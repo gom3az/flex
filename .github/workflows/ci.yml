@@ -22,7 +22,7 @@ jobs:
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
-      - name: Shellcheck (B-004 gate: wrappers must be finding-free)
+      - name: "Shellcheck (B-004 gate: wrappers must be finding-free)"
         run: shellcheck flex-rice/wrappers/flex-*.sh
       - name: Test
         run: cargo test --locked
