@@ -8,3 +8,5 @@
 //! cutover; each module documents its deliberate departures from its wrapper.
 
 pub mod shot;
+pub mod theme;
+pub mod wallpaper;

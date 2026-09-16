@@ -659,3 +659,557 @@ fn unknown_resolve_id_is_reported_with_a_single_prefix() {
         "flex: error: wallpaper: unknown id 'deadbeef'\n"
     );
 }
+
+// --- Executor (`flex-rice/src/exec/wallpaper.rs`) ------------------------------
+//
+// The wallpaper port of the `exec::shot` template: `WallpaperAction::parse`
+// validates the 16-char lowercase-hex id, `execute` resolves the hash
+// in-process (no `flex wallpaper --resolve` subprocess) and runs
+// `<setter> <path>` through the `SET_WALLPAPER` seam. No TUI, no pty: stub
+// `PATH` + scratch dirs.
+//
+// Like the theme suite, the popup guard itself lives in the shared runner
+// (covered by `popup.rs`), with one binary-level re-exec probe below.
+
+/// Save/restore one process env var around an executor call (tests run in
+/// parallel; only the wallpaper executor reads these keys).
+struct EnvGuard {
+    key: &'static str,
+    old: Option<std::ffi::OsString>,
+}
+
+/// Serialises the executor tests below: each mutates `WALLPAPER_DIRS`,
+/// `SET_WALLPAPER`, `HOME` or `PATH` (the seams `execute` reads) and the
+/// harness runs tests in parallel, so the mutations are held under one lock
+/// with restores in [`EnvGuard`].
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn set_env(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> EnvGuard {
+    let old = std::env::var_os(key);
+    std::env::set_var(key, value);
+    EnvGuard { key, old }
+}
+
+fn remove_env(key: &'static str) -> EnvGuard {
+    let old = std::env::var_os(key);
+    std::env::remove_var(key);
+    EnvGuard { key, old }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        match &self.old {
+            Some(value) => std::env::set_var(self.key, value),
+            None => std::env::remove_var(self.key),
+        }
+    }
+}
+
+/// Scratch `WALLPAPER_DIRS` root holding one PNG, one JPEG and one
+/// space-bearing JPEG (the B-021 shape: the id hash keeps the space off the
+/// `ACTION:` line).
+fn install_wallpaper_dirs(tag: &str) -> std::path::PathBuf {
+    let walls = scratch(&format!("exec-dirs-{tag}")).join("Walls");
+    for name in ["sunset.jpg", "pick me.jpg", "night.png"] {
+        write_image(&walls.join(name));
+    }
+    walls
+}
+
+/// `SET_WALLPAPER` stub logging every argv element bracketed (the theme
+/// dispatch idiom: a split path cannot masquerade as one argument).
+fn install_setter(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let setter = dir.join(name);
+    let log = dir.join(format!("{name}.log"));
+    std::fs::write(
+        &setter,
+        format!(
+            "#!/usr/bin/env bash\n{{ for arg in \"$@\"; do printf '[%s]' \"$arg\"; done; printf '\\n'; }} >> \"{}\"\n",
+            log.display()
+        ),
+    )
+    .expect("setter stub");
+    std::fs::set_permissions(&setter, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    setter
+}
+
+fn stub_path_env(dir: &std::path::Path) -> String {
+    format!(
+        "{}:{}",
+        dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    )
+}
+
+/// Full action-id matrix: every wallpaper (including the space-bearing name)
+/// sets through the setter seam as one call with the path intact.
+#[test]
+fn executor_matrix_sets_every_wallpaper_through_the_setter_seam() {
+    let _env = ENV_LOCK.lock().expect("env lock");
+    let dir = scratch("exec-matrix");
+    std::fs::create_dir_all(&dir).expect("stub dir");
+    let walls = install_wallpaper_dirs("matrix");
+    let setter = install_setter(&dir, "set-wallpaper.sh");
+    let _dirs = set_env("WALLPAPER_DIRS", &walls);
+    let _setter_env = set_env("SET_WALLPAPER", &setter);
+    let path_env = stub_path_env(&dir);
+    for name in ["sunset.jpg", "pick me.jpg", "night.png"] {
+        let image = walls.join(name);
+        let id = wallpaper::entry_id(&image);
+        let report =
+            flex_rice::exec::wallpaper::execute(&id, Some(&path_env)).expect("set succeeds");
+        assert_eq!(report.path.as_path(), image.as_path());
+        assert_eq!(report.setter.as_path(), setter.as_path());
+    }
+    let log = std::fs::read_to_string(dir.join("set-wallpaper.sh.log")).expect("call log");
+    let lines: Vec<&str> = log.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            format!("[{}]", walls.join("sunset.jpg").display()),
+            format!("[{}]", walls.join("pick me.jpg").display()),
+            format!("[{}]", walls.join("night.png").display()),
+        ],
+        "one setter call per id, paths intact (describe: `<setter> <path>`)",
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The `SET_WALLPAPER` seam: the override wins, the empty value falls back
+/// to the wrapper's exact `$HOME` default, and a missing `HOME` with no
+/// override is an error (never a silent empty spawn).
+#[test]
+fn executor_setter_seam_prefers_override_then_home_default() {
+    let _env = ENV_LOCK.lock().expect("env lock");
+    let dir = scratch("exec-seam");
+    std::fs::create_dir_all(&dir).expect("stub dir");
+    let setter = install_setter(&dir, "set-wallpaper.sh");
+    let _setter_env = set_env("SET_WALLPAPER", &setter);
+    assert_eq!(
+        flex_rice::exec::wallpaper::set_wallpaper().expect("override setter"),
+        setter
+    );
+
+    let fake_home = dir.join("fake-home");
+    std::fs::create_dir_all(&fake_home).expect("fake home");
+    let _empty = set_env("SET_WALLPAPER", "");
+    let _home = set_env("HOME", &fake_home);
+    assert_eq!(
+        flex_rice::exec::wallpaper::set_wallpaper().expect("default setter"),
+        fake_home.join(".config/scripts/set-wallpaper.sh"),
+        "empty falls back to the wrapper's exact default-path derivation"
+    );
+
+    let _no_setter = remove_env("SET_WALLPAPER");
+    let _no_home = remove_env("HOME");
+    let err = flex_rice::exec::wallpaper::set_wallpaper().expect_err("no HOME must fail");
+    let message = format!("{err:#}");
+    assert!(
+        message.starts_with("wallpaper: HOME is not set"),
+        "unexpected message: {message:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Malformed ids (`bad id`, mirroring the wrapper regex) and well-formed but
+/// unresolvable hashes (`unknown id`) are errors with no `flex:` prefix of
+/// their own — the runner adds the single prefix at the binary boundary.
+#[test]
+fn executor_rejects_bad_and_unknown_ids_without_its_own_prefix() {
+    let _env = ENV_LOCK.lock().expect("env lock");
+    let dir = scratch("exec-bad");
+    std::fs::create_dir_all(&dir).expect("stub dir");
+    let walls = install_wallpaper_dirs("bad");
+    let setter = install_setter(&dir, "set-wallpaper.sh");
+    let _dirs = set_env("WALLPAPER_DIRS", &walls);
+    let _setter_env = set_env("SET_WALLPAPER", &setter);
+    let path_env = stub_path_env(&dir);
+    let ghost_id = wallpaper::entry_id(&walls.join("ghost.jpg"));
+    let cases = [
+        ("", "wallpaper: bad id ''"),
+        ("nope", "wallpaper: bad id 'nope'"),
+        ("0123456789ABCDEF", "wallpaper: bad id"),
+        ("0123456789abcde", "wallpaper: bad id"),
+        ("a/b", "wallpaper: bad id 'a/b'"),
+        ("a\nb", "wallpaper: bad id 'a\nb'"),
+        (ghost_id.as_str(), "wallpaper: unknown id"),
+    ];
+    for (id, expected) in cases {
+        let err = flex_rice::exec::wallpaper::execute(id, Some(&path_env))
+            .expect_err("bad/unknown id must fail");
+        let message = format!("{err:#}");
+        assert!(
+            message.starts_with(expected),
+            "unexpected message for {id:?}: {message:?}"
+        );
+        assert!(
+            !message.contains("flex:"),
+            "no runner prefix below the runner: {message:?}"
+        );
+    }
+    assert!(
+        !dir.join("set-wallpaper.sh.log").exists(),
+        "no id failure reaches the setter"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A failing setter is a loud error, never a quiet cancel: wallpaper has no
+/// `slurp`-like user-cancellable step, so every tool failure exits non-zero
+/// through the runner (the menu-cancel 130 lives in the binary's
+/// `Outcome::Cancelled` arm, shared with shot/theme, and needs a pty).
+#[test]
+fn executor_tool_failure_is_a_loud_error_not_a_quiet_cancel() {
+    let _env = ENV_LOCK.lock().expect("env lock");
+    let dir = scratch("exec-fail");
+    std::fs::create_dir_all(&dir).expect("stub dir");
+    let walls = install_wallpaper_dirs("fail");
+    let setter = dir.join("set-wallpaper.sh");
+    std::fs::write(&setter, "#!/usr/bin/env bash\nexit 3\n").expect("failing stub");
+    std::fs::set_permissions(&setter, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let _dirs = set_env("WALLPAPER_DIRS", &walls);
+    let _setter_env = set_env("SET_WALLPAPER", &setter);
+    let image = walls.join("sunset.jpg");
+    let id = wallpaper::entry_id(&image);
+    let err = flex_rice::exec::wallpaper::execute(&id, Some(&stub_path_env(&dir)))
+        .expect_err("a failing setter must fail");
+    assert_eq!(
+        format!("{err:#}"),
+        format!("wallpaper: set {} failed", image.display())
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Binary level without a pty: the menu cannot start, so the binary exits 1
+/// with exactly one `flex: error:` prefix (the runner owns it; executor
+/// errors carry none). `setsid` detaches the controlling terminal so no
+/// harness tty can satisfy the TUI init.
+#[test]
+fn binary_errors_carry_a_single_prefix() {
+    let output = std::process::Command::new("setsid")
+        .arg(env!("CARGO_BIN_EXE_flex-wallpaper"))
+        .env("POPUP_KITTY", "1")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("run flex-wallpaper without a pty");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty(), "no stdout on error");
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(
+        stderr.starts_with("flex: error: "),
+        "runner prefix first: {stderr:?}"
+    );
+    assert_eq!(
+        stderr.matches("flex: error:").count(),
+        1,
+        "exactly one prefix: {stderr:?}"
+    );
+}
+
+/// Outside a popup the binary re-execs into the `menu-wide` popup (the
+/// shared runner guard); the kitty spawn is asserted against a stub `PATH`.
+#[test]
+fn binary_outside_a_popup_reexecs_into_the_wide_popup() {
+    let _env = ENV_LOCK.lock().expect("env lock");
+    let dir = scratch("exec-guard");
+    std::fs::create_dir_all(&dir).expect("stub dir");
+    let kitty_log = dir.join("kitty.log");
+    std::fs::write(dir.join("pgrep"), "#!/usr/bin/env bash\nexit 1\n").expect("pgrep stub");
+    std::fs::set_permissions(dir.join("pgrep"), std::fs::Permissions::from_mode(0o755))
+        .expect("chmod");
+    std::fs::write(
+        dir.join("kitty"),
+        format!(
+            "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > '{}.tmp'\nmv '{}.tmp' '{}'\n",
+            kitty_log.display(),
+            kitty_log.display(),
+            kitty_log.display(),
+        ),
+    )
+    .expect("kitty stub");
+    std::fs::set_permissions(dir.join("kitty"), std::fs::Permissions::from_mode(0o755))
+        .expect("chmod");
+    let path_env = stub_path_env(&dir);
+    let saved_path = std::env::var("PATH").ok();
+    std::env::set_var("PATH", &path_env);
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).expect("scratch HOME");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_flex-wallpaper"))
+        .env("HOME", &home)
+        .env_remove("POPUP_KITTY")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("run flex-wallpaper outside a popup");
+    match saved_path {
+        Some(value) => std::env::set_var("PATH", value),
+        None => std::env::remove_var("PATH"),
+    }
+    assert!(
+        output.status.success(),
+        "toggle exits 0: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let logged = loop {
+        if let Ok(body) = std::fs::read_to_string(&kitty_log) {
+            break body.lines().map(str::to_string).collect::<Vec<_>>();
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "kitty spawn never logged"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    assert!(
+        logged.contains(&String::from("--class"))
+            && logged.contains(&String::from("flex-menu-wide"))
+            && logged.contains(&String::from("POPUP_KITTY=1")),
+        "re-exec uses the menu-wide popup template: {logged:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// --- Parity with the untouched wrapper --------------------------------------
+//
+// For every action the wrapper supports, the wrapper (under stub `PATH`)
+// and the executor must produce byte-identical setter call sequences.
+// The one deliberate departure: the wrapper's `flex wallpaper --resolve`
+// subprocess is resolved in-process (same `wallpaper::resolve` scan the
+// hidden `--resolve` lookup uses), so the wrapper makes extra `flex` calls
+// the executor never spawns — asserted below.
+//
+// (`not a file` is a TOCTOU guard in both: the scan only yields existing
+// files, so no deterministic stub reaches it on either side; the check is
+// reviewed, not harnessed.)
+
+/// `flex` stub answering both wrapper calls: the `ACTION:` line
+/// (`$STUB_ACTION`) and the `--resolve` lookup over the test images. Every
+/// invocation is logged so the elided resolve subprocess stays visible.
+fn write_parity_flex_stub(dir: &std::path::Path, images: &[(&str, std::path::PathBuf)]) {
+    use std::fmt::Write as _;
+    let mut arms = String::new();
+    for (hash, path) in images {
+        let _ = writeln!(
+            arms,
+            "    \"{hash}\") printf '%s\\n' \"{}\" ;;",
+            path.display()
+        );
+    }
+    std::fs::write(
+        dir.join("flex"),
+        format!(
+            "#!/usr/bin/env bash\necho \"flex $@\" >> \"{}/flex.log\"\nif [[ \"${{2:-}}\" == \"--resolve\" ]]; then\n  case \"${{3:-}}\" in\n{arms}    *) exit 1 ;;\n  esac\n  exit 0\nfi\nprintf '%s\\n' \"$STUB_ACTION\"\n",
+            dir.display()
+        ),
+    )
+    .expect("flex stub");
+    std::fs::set_permissions(dir.join("flex"), std::fs::Permissions::from_mode(0o755))
+        .expect("chmod");
+}
+
+/// Raw `echo "$@"` setter stubs (the existing wrapper-harness idiom), so the
+/// compared bytes are exactly what the setter received.
+fn write_parity_setter(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let setter = dir.join(name);
+    let log = dir.join(format!("{name}.log"));
+    std::fs::write(
+        &setter,
+        format!(
+            "#!/usr/bin/env bash\necho \"$@\" >> \"{}\"\n",
+            log.display()
+        ),
+    )
+    .expect("setter stub");
+    std::fs::set_permissions(&setter, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    setter
+}
+
+/// Fixed parity inputs: stub dirs, the wrapper, and both setter stubs.
+/// One parity case runs the wrapper under stub `PATH`, then the executor
+/// with the scratch `WALLPAPER_DIRS`.
+struct ParityHarness {
+    dir: std::path::PathBuf,
+    wrapper: std::path::PathBuf,
+    path_env: String,
+    wrap_setter: std::path::PathBuf,
+    exec_setter: std::path::PathBuf,
+    walls: std::path::PathBuf,
+}
+
+/// Returns wrapper success, the wrapper setter log, the `flex` stub log,
+/// the executor setter log, and executor success.
+impl ParityHarness {
+    fn run(&self, action_line: &str, exec_id: &str) -> (bool, String, String, String, bool) {
+        for log in ["wrap-setter.sh.log", "exec-setter.sh.log", "flex.log"] {
+            let _ = std::fs::remove_file(self.dir.join(log));
+        }
+        let wrapper_out = std::process::Command::new("bash")
+            .arg(&self.wrapper)
+            .env("PATH", &self.path_env)
+            .env("SET_WALLPAPER", &self.wrap_setter)
+            .env("STUB_ACTION", action_line)
+            .env("POPUP_KITTY", "1")
+            .output()
+            .expect("run wrapper");
+        let wrap_log =
+            std::fs::read_to_string(self.dir.join("wrap-setter.sh.log")).unwrap_or_default();
+        let flex_log = std::fs::read_to_string(self.dir.join("flex.log")).unwrap_or_default();
+        let exec_result = {
+            let _dirs = set_env("WALLPAPER_DIRS", &self.walls);
+            let _setter_env = set_env("SET_WALLPAPER", &self.exec_setter);
+            flex_rice::exec::wallpaper::execute(exec_id, Some(&self.path_env))
+        };
+        let exec_log =
+            std::fs::read_to_string(self.dir.join("exec-setter.sh.log")).unwrap_or_default();
+        (
+            wrapper_out.status.success(),
+            wrap_log,
+            flex_log,
+            exec_log,
+            exec_result.is_ok(),
+        )
+    }
+}
+
+/// Assert one parity case: same success, byte-identical setter calls, and
+/// the expected `flex` subprocess shape (the resolve the executor elides).
+fn check_parity_case(
+    case: &str,
+    wrapper_ok: bool,
+    exec_ok: bool,
+    wrap_log: &str,
+    exec_log: &str,
+    flex_log: &str,
+    expected_path: Option<&str>,
+) {
+    assert_eq!(
+        wrapper_ok, exec_ok,
+        "{case}: wrapper and executor must agree on success"
+    );
+    assert_eq!(
+        wrap_log, exec_log,
+        "{case}: setter call sequences must be byte-identical"
+    );
+    // The wrapper resolves through a `flex wallpaper --resolve` subprocess;
+    // the executor resolves in-process, so only the wrapper logs it.
+    let flex_calls: Vec<&str> = flex_log.lines().collect();
+    match case {
+        "set" | "set-space-bearing" => {
+            let path = expected_path.expect("set cases carry the path");
+            assert_eq!(
+                wrap_log.trim(),
+                path,
+                "{case}: the resolved path reaches the setter whole"
+            );
+            assert_eq!(
+                flex_calls.len(),
+                2,
+                "{case}: wrapper spawns list + resolve: {flex_calls:?}"
+            );
+            assert!(
+                flex_calls[1].contains("--resolve"),
+                "{case}: second flex call is the resolve: {flex_calls:?}"
+            );
+        }
+        "bad-id" => {
+            assert!(
+                wrap_log.is_empty() && exec_log.is_empty(),
+                "{case}: nothing reaches the setter"
+            );
+            assert_eq!(
+                flex_calls.len(),
+                1,
+                "{case}: short-circuits before resolving: {flex_calls:?}"
+            );
+        }
+        "unknown-id" => {
+            assert!(
+                wrap_log.is_empty() && exec_log.is_empty(),
+                "{case}: unresolvable id never sets"
+            );
+            assert_eq!(
+                flex_calls.len(),
+                2,
+                "{case}: wrapper attempts the resolve and fails: {flex_calls:?}"
+            );
+        }
+        _ => panic!("unexpected case {case}"),
+    }
+}
+
+#[test]
+fn parity_executor_matches_wrapper_setter_calls() {
+    let _env = ENV_LOCK.lock().expect("env lock");
+    let dir = scratch("exec-parity");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("stub dir");
+    let walls = install_wallpaper_dirs("parity");
+    let sunset = walls.join("sunset.jpg");
+    let spaced = walls.join("pick me.jpg");
+    let sunset_id = wallpaper::entry_id(&sunset);
+    let spaced_id = wallpaper::entry_id(&spaced);
+    let ghost_id = wallpaper::entry_id(&walls.join("ghost.jpg"));
+    write_parity_flex_stub(
+        &dir,
+        &[
+            (sunset_id.as_str(), sunset.clone()),
+            (spaced_id.as_str(), spaced.clone()),
+        ],
+    );
+    let path_env = stub_path_env(&dir);
+    let wrap_setter = write_parity_setter(&dir, "wrap-setter.sh");
+    let exec_setter = write_parity_setter(&dir, "exec-setter.sh");
+    let harness = ParityHarness {
+        dir,
+        wrapper: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("wrappers")
+            .join("flex-wallpaper.sh"),
+        path_env,
+        wrap_setter,
+        exec_setter,
+        walls,
+    };
+
+    // (case, ACTION line the stubbed `flex wallpaper` prints, executor id)
+    let cases = [
+        (
+            "set",
+            format!("ACTION: wallpaper {sunset_id} sunset.jpg"),
+            sunset_id.clone(),
+        ),
+        (
+            "set-space-bearing",
+            format!("ACTION: wallpaper {spaced_id} pick me.jpg"),
+            spaced_id.clone(),
+        ),
+        (
+            "bad-id",
+            String::from("ACTION: wallpaper ../../etc/passwd x"),
+            String::from("../../etc/passwd"),
+        ),
+        (
+            "unknown-id",
+            format!("ACTION: wallpaper {ghost_id} ghost.jpg"),
+            ghost_id.clone(),
+        ),
+    ];
+    for (case, action_line, exec_id) in &cases {
+        let (wrapper_ok, wrap_log, flex_log, exec_log, exec_ok) = harness.run(action_line, exec_id);
+        let expected_path = match *case {
+            "set" => Some(harness.walls.join("sunset.jpg").display().to_string()),
+            "set-space-bearing" => Some(harness.walls.join("pick me.jpg").display().to_string()),
+            _ => None,
+        };
+        check_parity_case(
+            case,
+            wrapper_ok,
+            exec_ok,
+            &wrap_log,
+            &exec_log,
+            &flex_log,
+            expected_path.as_deref(),
+        );
+    }
+    let _ = std::fs::remove_dir_all(&harness.walls);
+    let _ = std::fs::remove_dir_all(&harness.dir);
+}
