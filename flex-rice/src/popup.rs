@@ -22,8 +22,8 @@ use super::terminal::{self, TerminalKind};
 
 /// Window class for the compact (`menu`) popup variant.
 ///
-/// Providers: `power`, `shot`, `theme`, `wifi` (see the variant table in
-/// `flex-rice/tests/wrappers.rs`).
+/// Providers: `power`, `shot`, `theme`, `wifi` (see
+/// [`Provider::variant`](crate::runner::Provider::variant)).
 pub const MENU_CLASS: &str = "flex-menu";
 
 /// Window class for the wide (`menu-wide`) popup variant.
@@ -229,8 +229,9 @@ pub fn toggle_with(variant_class: &str, cmd: &[String]) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
-    /// Providers per variant, mirroring `flex-rice/tests/wrappers.rs`: four
-    /// share `menu`, four share `menu-wide`.
+    /// Providers per variant, mirroring
+    /// [`Provider::variant`](crate::runner::Provider::variant): four share
+    /// `menu`, four share `menu-wide`.
     const PROVIDER_VARIANTS: &[(&str, &str)] = &[
         ("power", "menu"),
         ("shot", "menu"),

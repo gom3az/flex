@@ -1,9 +1,9 @@
 //! `flex-theme` binary: the theme switcher.
 //!
 //! Thin shell over the shared [`runner`]: popup guard, menu construction,
-//! then select+execute through [`exec::theme`] (the port of
-//! `wrappers/flex-theme.sh`, which stays live until cutover). `--print-action`
-//! keeps the end-to-end probe of the row→action mapping with no execution.
+//! then select+execute through [`exec::theme`] (the port of the retired
+//! `flex-theme.sh` wrapper). `--print-action` keeps the end-to-end probe of
+//! the row→action mapping with no execution.
 //!
 //! [`runner`]: flex_rice::runner
 //! [`exec::theme`]: flex_rice::exec::theme

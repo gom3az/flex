@@ -1,9 +1,9 @@
 //! `flex-center` binary: the control center (volume/brightness/network).
 //!
 //! Thin shell over the shared [`runner`]: popup guard, menu construction,
-//! then select+execute through [`exec::center`] (the port of
-//! `wrappers/flex-center.sh`, which stays live until cutover). `--print-action`
-//! keeps the end-to-end probe of the row→action mapping with no execution.
+//! then select+execute through [`exec::center`] (the port of the retired
+//! `flex-center.sh` wrapper). `--print-action` keeps the end-to-end probe of
+//! the row→action mapping with no execution.
 //!
 //! Outcome mapping mirrors the wrapper's arms (`flex-center.sh:32-44,168-200`):
 //! `Chosen` runs the `select` dispatch, `Toggle` runs the `toggle` dispatch

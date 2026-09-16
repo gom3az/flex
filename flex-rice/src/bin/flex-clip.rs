@@ -1,9 +1,9 @@
 //! `flex-clip` binary: the clipboard history.
 //!
 //! Thin shell over the shared [`runner`]: popup guard, menu construction,
-//! then select+execute through [`exec::clip`] (the port of
-//! `wrappers/flex-clip.sh`, which stays live until cutover). `--print-action`
-//! keeps the end-to-end probe of the row→action mapping with no execution.
+//! then select+execute through [`exec::clip`] (the port of the retired
+//! `flex-clip.sh` wrapper). `--print-action` keeps the end-to-end probe of
+//! the row→action mapping with no execution.
 //!
 //! Clip rows are deletable, so unlike `shot`/`theme`/`wallpaper`/`launch`
 //! (whose bins bail on `Delete`/`Toggle` as unexpected) this bin handles

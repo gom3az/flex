@@ -68,7 +68,7 @@ fn rows_carry_theme_names_wallpapers_and_active_marker() {
     );
     // The id is a space-free hash of the theme name (B-021), and every row
     // id resolves back to its own label through the same directory scan
-    // `flex-theme.sh` performs before calling `activate`.
+    // the theme executor performs before calling `activate`.
     let available = scratch("row-ids");
     for row in &tab.rows {
         std::fs::create_dir_all(available.join(row.label.as_str())).expect("theme dir");
@@ -171,8 +171,8 @@ fn keyseq_down_enter_selects_second_theme() {
         row.id.as_str()
     );
     assert_ne!(row.id.as_str(), row.label, "the name is not the id (B-021)");
-    // The wrapper's ACTION: line for this selection is
-    // `ACTION: theme <row-hash> tokyo-night` (exit 0); `flex-theme.sh`
+    // The retired wrapper's ACTION: line for this selection was
+    // `ACTION: theme <row-hash> tokyo-night` (exit 0); the theme executor
     // resolves the hash with `flex theme --resolve` before activating.
     assert_eq!(menu.provider, "theme");
 }

@@ -1,11 +1,10 @@
 //! `clip` executor: the clipboard-history copy/delete/pin-toggle flow.
 //!
-//! Port of `wrappers/flex-clip.sh` (which stays live until cutover): after
-//! the menu selects a row, the wrapper reads the `ACTION:` line (or the
-//! `ACTION:DELETE` / `ACTION:TOGGLE` lines — clip rows are deletable, so
-//! unlike `shot`/`theme`/`wallpaper`/`launch` all three outcomes are live),
-//! validates the id (`^[0-9a-f]+$`, the content-hash hex), resolves it back
-//! to the stored line (`flex clip --resolve`, i.e. the same
+//! Port of the retired `flex-clip.sh` wrapper: after the menu selects a row,
+//! the executor handles the select, delete and toggle outcomes (clip rows are
+//! deletable, so unlike `shot`/`theme`/`wallpaper`/`launch` all three are
+//! live), validates the id (`^[0-9a-f]+$`, the content-hash hex), resolves it
+//! back to the stored line (`flex clip --resolve`, i.e. the same
 //! [`resolve`](crate::providers::clip::resolve) scan), and:
 //!
 //! - `select`: decodes `<NEWLINE>` back to newlines and pipes the entry
@@ -66,7 +65,7 @@ use anyhow::{Context as _, Result};
 use crate::providers::clip;
 
 /// Which menu outcome is being executed: clip is the only provider (besides
-/// `center`/`wifi`, still wrappers) whose rows are deletable, so the binary
+/// `center`/`wifi`) whose rows are deletable, so the binary
 /// maps `Chosen`/`Delete`/`Toggle` onto these three ops and bails on
 /// `Target` (clip rows carry no dropdown targets, and the wrapper has no
 /// `ACTION:TARGET` arm either).

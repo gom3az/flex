@@ -2,8 +2,8 @@
 //!
 //! Ports ONLY the `pick()` menu path of
 //! `scripts/.config/scripts/theme-switcher.sh` (the `list` / `current` /
-//! `activate` / `delete` entry points stay in bash; the `flex-theme.sh`
-//! wrapper calls back into `theme-switcher.sh activate`):
+//! `activate` / `delete` entry points stay in bash; the theme executor
+//! calls back into `theme-switcher.sh activate`):
 //!
 //! - One row per directory directly under
 //!   `$HOME/.config/themes/available` (sorted, like the bash
@@ -165,7 +165,7 @@ pub const NO_THEMES_LABEL: &str = "(No themes found)";
 /// Build the `Themes` tab: standard spec rows, non-deletable rows.
 ///
 /// An empty theme directory yields the `noop` placeholder row rather than a
-/// blank menu (B-026): `Enter` on it is a no-op in `flex-theme.sh`.
+/// blank menu (B-026): `Enter` on it is a no-op in the theme executor.
 #[must_use]
 pub fn theme_tab() -> Tab {
     Tab::with_rows(

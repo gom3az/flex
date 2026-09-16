@@ -18,8 +18,8 @@
 //!   the bash cache (locale `sort` may differ for non-ASCII names; ASCII
 //!   order, the reference-data case, is identical).
 //!
-//! `Exec` is stored **raw** (`%U`/`%F`/… preserved): the `flex-launch.sh`
-//! wrapper strips field codes exactly like `launch_app_row` does. Row ids
+//! `Exec` is stored **raw** (`%U`/`%F`/… preserved): the launch executor
+//! strips field codes exactly like `launch_app_row` does. Row ids
 //! are [`entry_id`] hashes of the desktop-id — space-free, because the
 //! `ACTION:` protocol delimits the id on whitespace and a `.desktop` file
 //! may legally be named `My App.desktop` (B-021). `flex launch --resolve
@@ -190,7 +190,7 @@ pub const NO_APPS_LABEL: &str = "(No applications found)";
 /// Build the `Launchers` tab: bare-rows mode, non-deletable rows.
 ///
 /// An empty scan yields the `noop` placeholder row rather than a blank menu
-/// (B-026): `Enter` on it is a no-op in `flex-launch.sh`.
+/// (B-026): `Enter` on it is a no-op in the launch executor.
 #[must_use]
 pub fn launch_tab() -> Tab {
     Tab::with_rows(TAB_NAME, tab_rows(&scan_dirs(&app_dirs())))

@@ -1,8 +1,8 @@
 //! `theme` executor: the theme-activate flow.
 //!
-//! Port of `wrappers/flex-theme.sh` (which stays live until cutover): after
-//! the menu selects a row, the wrapper reads the `ACTION: theme <id> …`
-//! line, validates the id (non-empty, no `/`, no newline), short-circuits
+//! Port of the retired `flex-theme.sh` wrapper: after the menu selects a
+//! row, the executor validates the id (non-empty, no `/`, no newline),
+//! short-circuits
 //! the `noop` empty-scan placeholder (exit `0`, B-026), resolves the row
 //! hash back to the theme name (`flex theme --resolve`, i.e. the same
 //! [`resolve_name`](crate::providers::theme_::resolve_name) scan), and

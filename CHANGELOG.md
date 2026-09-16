@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Per-provider-binary migration: the eight providers now execute **in-process**
+in Rust, and the shell wrappers are retired. The `ACTION:` wire protocol is no
+longer consumed by anything — each binary selects a row and runs its effect
+directly.
+
+### Added
+- `flex popup <variant> <cmd…>`: the dispatcher's popup toggle/spawn helper
+  (used by dotfiles `kill-menu.sh`), keyed on the variant class.
+- `flex-rice/src/exec/*.rs`: one executor module per provider, porting the
+  matching wrapper's side effects into the binary. The binaries stay thin
+  (`runner::popup_guard` → `runner::build_menu` → `flex_core::run::run_capture`
+  → `exec::<provider>::execute`).
+- `flex-rice/tests/entrypoints.rs`: the `--help`/`--version` contract for the
+  nine binaries (replacing `tests/wrappers.rs`).
+
+### Changed
+- The eight providers are eight `flex-<provider>` binaries over the shared
+  `runner`, alongside the `flex` compat dispatcher — nine entry points in all.
+- Popups are terminal-agnostic: the host terminal comes from `$TERMINAL`
+  (kitty template; unknown/empty warns once and falls back to kitty, never
+  exits `1`).
+- Popup window classes are `flex-menu` / `flex-menu-wide` (the old
+  `kitty-menu*` names are gone); toggle stays keyed on the variant.
+- `setup.sh` links the nine release binaries into `~/.local/bin`, and
+  `setup.sh --check` is the gate that all nine resolve to executables.
+- `--print-action` is the only remaining producer of an `ACTION:` line: an
+  end-to-end row→action probe with no execution.
+
+### Removed
+- `flex-rice/wrappers/` (all eight `flex-*.sh` scripts) and
+  `flex-rice/tests/wrappers.rs`; the executor tests are the surviving
+  coverage.
+- The `ACTION:` wire protocol from the call path — nothing parses stdout.
+- The shellcheck CI step (no `.sh` remains in this repo).
+
 Monorepo consolidation: `flex-core` and `flex-rice` live in this repo as
 workspace members with a path dependency — no git tag to bump, no `[patch]`
 override, one `cargo test` (345 passed, 1 ignored), one `Cargo.lock`, one

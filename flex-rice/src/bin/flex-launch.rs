@@ -1,9 +1,9 @@
 //! `flex-launch` binary: the application launcher.
 //!
 //! Thin shell over the shared [`runner`]: popup guard, menu construction,
-//! then select+execute through [`exec::launch`] (the port of
-//! `wrappers/flex-launch.sh`, which stays live until cutover). `--print-action`
-//! keeps the end-to-end probe of the row→action mapping with no execution.
+//! then select+execute through [`exec::launch`] (the port of the retired
+//! `flex-launch.sh` wrapper). `--print-action` keeps the end-to-end probe of
+//! the row→action mapping with no execution.
 //!
 //! [`runner`]: flex_rice::runner
 //! [`exec::launch`]: flex_rice::exec::launch

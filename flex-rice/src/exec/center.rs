@@ -1,10 +1,9 @@
 //! `center` executor: the control-center flow (volume/bluetooth/wifi/power/theme).
 //!
-//! Port of `wrappers/flex-center.sh` (which stays live until cutover): after
-//! the menu selects a row, the wrapper reads the `ACTION:` line (or the
-//! `ACTION:DELETE` / `ACTION:TOGGLE` lines — only the Settings tab is
-//! deletable, so it can emit `Toggle`), validates the id (non-empty, no `/`,
-//! no newline), and dispatches:
+//! Port of the retired `flex-center.sh` wrapper: after the menu selects a
+//! row, the executor handles the select/toggle outcomes (only the Settings
+//! tab is deletable, so it can emit `Toggle`), validates the id (non-empty,
+//! no `/`, no newline), and dispatches:
 //!
 //! - `select launch:<hash>` → resolve the hash to a desktop-id in-process
 //!   (the same [`resolve_id`](crate::providers::launch::resolve_id) the

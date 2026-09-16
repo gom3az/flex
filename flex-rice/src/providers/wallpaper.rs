@@ -24,7 +24,7 @@
 //!   preview pane draws.
 //!
 //! The library never sets a wallpaper; [`set-wallpaper.sh`] runs from the
-//! `flex-wallpaper.sh` wrapper after the TUI exits.
+//! wallpaper executor after the TUI exits.
 //!
 //! [`set-wallpaper.sh`]: ../../../../scripts/.config/scripts/set-wallpaper.sh
 

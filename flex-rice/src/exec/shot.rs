@@ -1,7 +1,7 @@
 //! `shot` executor: the screenshot/recording flow.
 //!
-//! Port of `wrappers/flex-shot.sh` (which stays live until cutover): after the
-//! menu selects a row, the parent stages `SCREENSHOT_DIR`, timestamps the
+//! Port of the retired `flex-shot.sh` wrapper: after the menu selects a row,
+//! the parent stages `SCREENSHOT_DIR`, timestamps the
 //! capture, detaches a worker (`setsid -f flex-shot --capture …`) so the
 //! capture survives the popup kill, then closes the popup and exits `0`. The
 //! worker runs the capture synchronously: a `slurp` region (area modes),

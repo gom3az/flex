@@ -33,8 +33,8 @@
 //! runs on a background thread; [`refresh_scan`] swaps its rows in on the
 //! next tick. See [`menu`].
 //!
-//! The library never executes side effects; `wrappers/flex-wifi.sh` owns
-//! every `nmcli`/`notify-send` call, including the password prompt.
+//! The library never executes side effects; the wifi executor owns every
+//! `nmcli`/`notify-send` call, including the password prompt.
 
 use std::sync::Mutex;
 

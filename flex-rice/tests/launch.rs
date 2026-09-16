@@ -68,7 +68,7 @@ fn action_ids_are_space_free_row_hashes_and_terminal_rows_are_marked() {
     let htop = tab.rows.get(1).expect("second row");
     assert_eq!(htop.meta.as_deref(), Some(launch::TERMINAL_META));
     // The id is a hash, not the desktop-id: the `ACTION:` protocol splits
-    // the id on whitespace, so the id must be one token that the wrapper
+    // the id on whitespace, so the id must be one token that the executor
     // resolves back (B-021).
     let dirs = vec![fixtures_dir()];
     for (row, desktop_id) in tab.rows.iter().zip([
@@ -238,8 +238,8 @@ fn keyseq_type_fir_enter_selects_firefox() {
         "the selected row id resolves to Firefox's desktop-id"
     );
     assert_eq!(row.label, "Firefox");
-    // The wrapper's ACTION: line for this selection is
-    // `ACTION: launch <row-hash> Firefox` (exit 0); `flex-launch.sh`
+    // The retired wrapper's ACTION: line for this selection was
+    // `ACTION: launch <row-hash> Firefox` (exit 0); the launch executor
     // resolves the hash with `flex launch --resolve` before launching.
     assert_eq!(menu.provider, "launch");
 }

@@ -5,7 +5,8 @@
 //! ≡ `flex launch -t nocolor`); `flex popup <menu|menu-wide> <cmd…>`
 //! toggles the popup for dotfiles `kill-menu.sh`. Hidden `--resolve`
 //! lookups are handled inline, exactly as before. All providers run the
-//! full TUI event loop; thin `wrappers/*.sh` scripts own the side effects.
+//! full TUI event loop and execute the selected row in-process
+//! (`exec/*.rs`); the wrappers are retired.
 
 use std::path::PathBuf;
 
@@ -27,7 +28,7 @@ struct Cli {
     command: Command,
 }
 
-/// Menu providers (each becomes an `ACTION: <provider> …` line) plus the
+/// Menu providers (each re-execs its `flex-<provider>` binary) plus the
 /// `popup` toggle helper for dotfiles `kill-menu.sh`.
 #[derive(Debug, Subcommand)]
 enum Command {
@@ -51,9 +52,8 @@ enum Command {
         #[arg(long)]
         print_action: bool,
         /// Resolve a row-hash id to its desktop-id (`firefox.desktop`).
-        /// Hidden wrapper lookup: `flex-launch.sh` and `flex-center.sh`
-        /// resolve the id from the `ACTION:` line back to the `.desktop`
-        /// file AFTER the TUI exits (ids are space-free hashes, B-021).
+        /// Hidden id lookup: the retired launch/center wrappers used it to
+        /// turn a space-free hash back into the `.desktop` file (B-021).
         #[arg(long, hide = true)]
         resolve: Option<String>,
     },
@@ -68,9 +68,9 @@ enum Command {
         /// Print the selected `ACTION:` line without executing it.
         #[arg(long)]
         print_action: bool,
-        /// Resolve a row-hash id to its theme (directory) name. Hidden
-        /// wrapper lookup: `flex-theme.sh` resolves the id from the
-        /// `ACTION:` line before handing the name to `theme-switcher.sh`.
+        /// Resolve a row-hash id to its theme (directory) name. Hidden id
+        /// lookup: the retired theme wrapper used it before handing the
+        /// name to `theme-switcher.sh`.
         #[arg(long, hide = true)]
         resolve: Option<String>,
     },
@@ -80,8 +80,8 @@ enum Command {
         #[arg(long)]
         print_action: bool,
         /// Resolve a content-hash id to its stored (`<NEWLINE>`-encoded)
-        /// line. Hidden wrapper lookup: `flex-clip.sh` resolves the hash
-        /// from the `ACTION:` line back to content AFTER the TUI exits.
+        /// line. Hidden id lookup: the retired clip wrapper used it to turn
+        /// the hash back into content.
         #[arg(long, hide = true)]
         resolve: Option<String>,
     },
@@ -96,9 +96,9 @@ enum Command {
         /// Print the selected `ACTION:` line without executing it.
         #[arg(long)]
         print_action: bool,
-        /// Resolve a path-hash id to its absolute wallpaper path. Hidden
-        /// wrapper lookup: `flex-wallpaper.sh` resolves the id from the
-        /// `ACTION:` line back to a path AFTER the TUI exits.
+        /// Resolve a path-hash id to its absolute wallpaper path. Hidden id
+        /// lookup: the retired wallpaper wrapper used it to turn the id back
+        /// into a path.
         #[arg(long, hide = true)]
         resolve: Option<String>,
     },
@@ -129,7 +129,7 @@ fn main() {
 fn run() -> Result<()> {
     let cli = Cli::parse();
     let style = cli.style.options();
-    // Hidden wrapper lookups (`flex <provider> --resolve <id>`) print the
+    // Hidden id lookups (`flex <provider> --resolve <id>`) print the
     // provider identity behind a row id and exit; every other invocation
     // re-execs the provider binary (or toggles a popup).
     if resolve_lookup(&cli.command)?.is_some() {
@@ -150,7 +150,7 @@ fn run() -> Result<()> {
     }
 }
 
-/// Hidden wrapper lookups: `flex <provider> --resolve <id>` prints the
+/// Hidden id lookups: `flex <provider> --resolve <id>` prints the
 /// provider identity the id stands for (desktop-id, theme name, wallpaper
 /// path, clipboard line) and returns `Ok(Some(()))`.
 ///

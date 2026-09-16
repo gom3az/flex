@@ -1,9 +1,9 @@
 //! `flex-wifi` binary: the Wi-Fi picker (connect/disconnect, radio on/off).
 //!
 //! Thin shell over the shared [`runner`]: popup guard, menu construction,
-//! then select+execute through [`exec::wifi`] (the port of
-//! `wrappers/flex-wifi.sh`, which stays live until cutover). `--print-action`
-//! keeps the end-to-end probe of the row→action mapping with no execution.
+//! then select+execute through [`exec::wifi`] (the port of the retired
+//! `flex-wifi.sh` wrapper). `--print-action` keeps the end-to-end probe of
+//! the row→action mapping with no execution.
 //!
 //! Outcome mapping mirrors the wrapper's arms (`flex-wifi.sh:30-38,174-185`):
 //! `Chosen` runs the `select` dispatch — the wrapper accepts exactly one

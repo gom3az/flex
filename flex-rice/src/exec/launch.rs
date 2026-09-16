@@ -1,8 +1,8 @@
 //! `launch` executor: the application-launch flow.
 //!
-//! Port of `wrappers/flex-launch.sh` (which stays live until cutover): after
-//! the menu selects a row, the wrapper reads the `ACTION: launch <id> …`
-//! line, validates the id (non-empty, no `/`, no newline), short-circuits
+//! Port of the retired `flex-launch.sh` wrapper: after the menu selects a
+//! row, the executor validates the id (non-empty, no `/`, no newline),
+//! short-circuits
 //! the `noop` empty-scan placeholder (exit `0`, B-026), resolves the row
 //! hash back to the desktop-id (`flex launch --resolve`, i.e. the same
 //! [`resolve_id`](crate::providers::launch::resolve_id) scan), re-resolves

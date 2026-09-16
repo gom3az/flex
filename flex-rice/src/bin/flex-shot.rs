@@ -1,11 +1,11 @@
 //! `flex-shot` binary: the screenshot flow.
 //!
 //! Thin shell over the shared [`runner`]: popup guard, menu construction,
-//! then select+execute through [`exec::shot`] (the port of
-//! `wrappers/flex-shot.sh`, which stays live until cutover). `--print-action`
-//! keeps the end-to-end probe of the row→action mapping with no execution;
-//! `--capture` is the hidden detached worker the parent spawns via `setsid`
-//! so the capture survives the popup kill.
+//! then select+execute through [`exec::shot`] (the port of the retired
+//! `flex-shot.sh` wrapper). `--print-action` keeps the end-to-end probe of
+//! the row→action mapping with no execution; `--capture` is the hidden
+//! detached worker the parent spawns via `setsid` so the capture survives the
+//! popup kill.
 //!
 //! [`runner`]: flex_rice::runner
 //! [`exec::shot`]: flex_rice::exec::shot

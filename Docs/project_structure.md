@@ -9,7 +9,7 @@ dependencies.
 | Half | Carried by | Publishable |
 |---|---|---|
 | **`flex-core`** — the engine: menu rendering, fuzzy filtering, key handling, the design system, kitty-graphics previews | this repo, `flex-core/` | Yes |
-| **`flex-rice`** — this rice's eight providers, the `flex` binary and the shell wrappers | this repo, `flex-rice/` | No (`publish = false`) |
+| **`flex-rice`** — this rice's eight providers, their executors, the `flex` dispatcher and the eight `flex-<provider>` binaries | this repo, `flex-rice/` | No (`publish = false`) |
 
 Dependencies run one way (`flex-rice` → `flex-core`, a **path** dependency —
 no tags, no `[patch]` overrides). `flex-core` must never gain a
@@ -31,7 +31,7 @@ flex/                        # cargo workspace root (two members)
   LICENSE-MIT
   LICENSE-APACHE
   CHANGELOG.md
-  README.md                  # ACTION: protocol, wrapper recipes, cutover table
+  README.md                  # entry points, dispatcher, probe, env seams
 
   flex-core/                 # the reusable engine — no machine-specific paths
     Cargo.toml               # publishable; repository points at this repo
@@ -40,10 +40,13 @@ flex/                        # cargo workspace root (two members)
     benches/rerank.rs        # criterion rerank regression
 
   flex-rice/                 # this rice's glue — machine-specific, never published
-    Cargo.toml               # publish = false; [[bin]] name = "flex"
+    Cargo.toml               # publish = false; [[bin]] flex + eight flex-<provider>
     src/
-      lib.rs                 # pub mod providers + re-exported menu()/tick_hook()
-      main.rs                # clap power|launch|shot|theme|clip|center|wallpaper|wifi; prints ACTION:
+      lib.rs                 # pub mod exec/providers/runner/popup/terminal; menu()/tick_hook()
+      main.rs                # `flex` dispatcher: popup toggle, provider re-exec, hidden --resolve
+      runner.rs              # shared flow: popup_guard → build_menu → run_capture → exec
+      popup.rs               # popup classes, in-popup detection, toggle helper
+      terminal.rs            # $TERMINAL detection + popup spawn argv
       providers.rs           # module list + the per-tick refresh dispatcher
       providers/
         power.rs
@@ -54,51 +57,49 @@ flex/                        # cargo workspace root (two members)
         theme_.rs            # `theme` is a crate-adjacent ident; file uses trailing underscore
         wallpaper.rs         # image scan + kitty-graphics preview rows (M7)
         wifi.rs              # radio/scan rows for the network dialog (M8)
+      exec/                  # one executor per provider (the ported side effects)
+        mod.rs power.rs launch.rs shot.rs theme.rs
+        clip.rs center.rs wallpaper.rs wifi.rs
+      bin/                   # eight provider entry points (thin shells over runner)
+        flex-power.rs flex-launch.rs flex-shot.rs flex-theme.rs
+        flex-clip.rs flex-center.rs flex-wallpaper.rs flex-wifi.rs
     tests/
       golden.rs              # TestBackend goldens (empty tab bar M0; +danger/gauge/trunc M3)
+      entrypoints.rs         # --help/--version contract for the nine binaries
+      prefix.rs              # single `flex: error:` prefix across the provider binaries
       center.rs              # per-tab fixtures, gauge tick, TARGET/Action reporting
       clip.rs                # history rows, resolve round-trip, real-binary E2E
       clip_perf.rs           # (M1 spike, gated M5) 10k-row perf budget
-      power.rs               # DRY_RUN gate + stubbed-PATH dispatch
-      shot.rs                # stubbed pipeline dispatch
-      theme.rs               # theme rows + switcher dispatch
-      wallpaper.rs           # (M7) scan parity, pane geometry, wrapper dispatch
-      wifi.rs                # (M8) radio/scan rows, live seams, wrapper dispatch
-      wrappers.rs            # bind-path contract: executable + popup-wrapped
+      power.rs               # DRY_RUN gate + stubbed-PATH executor dispatch
+      shot.rs                # stubbed capture-pipeline executor dispatch
+      theme.rs               # theme rows + switcher executor dispatch
+      wallpaper.rs           # (M7) scan parity, pane geometry, executor dispatch
+      wifi.rs                # (M8) radio/scan rows, live seams, executor dispatch
       fixtures/              # captured subprocess stdout per provider (M2)
         center/
         launch/
         wifi/                # radio + nmcli snapshots for the network dialog (M8)
-    wrappers/
-      flex-power.sh flex-launch.sh flex-clip.sh flex-center.sh
-      flex-shot.sh flex-theme.sh flex-wallpaper.sh flex-wifi.sh
 ```
-
-### Why `flex-rice/wrappers/` never moves
-
-The wrapper directory sits exactly where the Hyprland binds, Waybar
-on-clicks and delegating scripts expect it (via the `~/.local/bin`
-symlink farm — see "Dotfiles integration" below). Moving it breaks every
-config reference at once. That is not hypothetical: `04e2599` in the old
-dotfiles history moved the wrappers one level and took out all seven
-keybinds.
 
 ## Conventions
 
 1. **The engine never executes side effects.** `flex-core` only produces an
    `Outcome` (selected `Row` + `action_id`). Process spawn/exec, clipboard
-   writes, shutdown, etc. live exclusively in `wrappers/*.sh` (M4), which parse
-   the single `ACTION:` stdout line.
-2. **Binary prints exactly one `ACTION:` line** to stdout on success
-   (`ACTION: <provider> <action_id> <escaped-label>`). All diagnostics go to
-   stderr via `eprintln!`/`anyhow`. Exit codes: `0` = action, `130` = cancel,
+   writes, shutdown, etc. live exclusively in `flex-rice/src/exec/*.rs`, which
+   the provider binaries call in-process.
+2. **Exit codes are the contract.** The provider binaries select a row and
+   execute its effect in Rust; all diagnostics go to stderr via
+   `eprintln!`/`anyhow`. Exit codes: `0` = action executed, `130` = cancel,
    `1` = error (the contract lives in `flex-core/src/backend.rs`).
+   `--print-action` is the only remaining producer of an `ACTION:` line: it
+   prints the selected line and exits without executing.
    **Empty providers have one policy (B-026):** a chooser that found nothing
    shows a single `noop` placeholder row (`providers::empty_row`, shared id
    `providers::NOOP_ID`) and keeps the TUI, so the menu is never blank and
-   `Enter` on it is a no-op in every wrapper; a provider that cannot offer any
-   action at all (`clip` without history, `wallpaper` without images)
-   diagnoses on stderr and exits `130` before initialising the terminal.
+   `Enter` on it is a no-op (the executor short-circuits the `noop` id); a
+   provider that cannot offer any action at all (`clip` without history,
+   `wallpaper` without images) diagnoses on stderr and exits `130` before
+   initialising the terminal.
 3. **Providers parse subprocess stdout once.** At most one child spawn per
    invocation; read stdout to `Vec<Row>` up front; filter/render in-process after
    that. No re-spawning per keystroke. Two documented exceptions, both driven by
@@ -116,8 +117,8 @@ keybinds.
    depends on them, and every failure (no kitty, no converter, unwritable
    cache) degrades to a blank pane plus one stderr line.
 4. **`RowId` hash hex for clipboard (Q2).** `clip` rows use
-   `action_id = hex(blake/simple-hash(content))` — stable across runs so wrappers
-   can round-trip history entries. `wallpaper` reuses it over the absolute
+   `action_id = hex(blake/simple-hash(content))` — stable across runs so the
+   store round-trips. `wallpaper` reuses it over the absolute
    path and adds a hidden `--resolve` lookup, since paths contain spaces.
    `launch` and `theme` follow the same rule over the desktop-id / theme
    name (`launch::entry_id`, `theme_::entry_id`) with `flex launch --resolve`
@@ -148,7 +149,7 @@ keybinds.
 
 There is no dance: the engine lives at `flex-core/` in this repo. Change it
 and its consumers in one commit; one `cargo test` covers both sides
-(345 tests). Keep the dependency direction (`flex-rice` → `flex-core`) and
+(479 tests). Keep the dependency direction (`flex-rice` → `flex-core`) and
 never add a machine-specific path to `flex-core` — that is what keeps it
 publishable.
 
@@ -156,8 +157,8 @@ publishable.
 
 - `cargo fmt --all --check`
 - `cargo clippy --all-targets -- -D warnings`
-- `cargo test` — the whole workspace (345 tests: 236 rice + 109 engine)
-- `cargo build --release` → `target/release/flex` (what the wrappers exec)
+- `cargo test` — the whole workspace (479 tests: 365 rice + 114 engine)
+- `cargo build --release` → `target/release/{flex,flex-power,…}` (the nine binaries)
 - `cargo tree -i crossterm` (single-major check)
 - `cargo bench -p flex-core --bench rerank`
 - Negative-dependency gate: `! rg -l '"serde"|"toml"' flex-core/src flex-rice/src`
@@ -168,8 +169,8 @@ The live machine consumes this repo, not the other way round. The checkout
 lives at `~/projects/flex`; dotfiles references it through a stable
 `~/.local/bin` symlink farm so the next move touches symlinks, not configs:
 
-- `~/.local/bin/flex` → `<checkout>/target/release/flex` (the binary;
-  wrappers resolve it by name, falling back to `~/.local/bin` on PATH).
-- `~/.local/bin/flex-<provider>.sh` → `<checkout>/flex-rice/wrappers/…`
+- `~/.local/bin/flex` → `<checkout>/target/release/flex` (the dispatcher).
+- `~/.local/bin/flex-<provider>` → `<checkout>/target/release/flex-<provider>`
   (one per provider; every Hyprland bind, Waybar on-click and delegating
-  script references the farm, never the checkout path).
+  script references the farm, never the checkout path). `setup.sh` creates
+  the nine links and `setup.sh --check` asserts they resolve.

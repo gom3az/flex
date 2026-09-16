@@ -100,8 +100,8 @@ impl Provider {
     }
 
     /// Popup variant for this provider (`menu` for power/shot/theme/wifi,
-    /// `menu-wide` for launch/clip/center/wallpaper — the table in
-    /// `flex-rice/tests/wrappers.rs`).
+    /// `menu-wide` for launch/clip/center/wallpaper — see
+    /// [`popup::MENU_VARIANT`] / [`popup::WIDE_VARIANT`]).
     #[must_use]
     pub fn variant(self) -> &'static str {
         match self {

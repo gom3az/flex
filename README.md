@@ -1,19 +1,18 @@
 # flex — reusable Rust TUI menu library
 
 `flex` powers the dotfiles popup menus (`power`, `launch`, `clip`, `center`,
-`shot`, `theme`, `wallpaper`, `wifi`) behind a single `ACTION:` stdout protocol.
-The library never executes side effects; thin `flex-rice/wrappers/*.sh` scripts parse the
-`ACTION:` line and perform the real work (shutdown, clipboard copy, app exec,
-wallpaper swap, Wi-Fi connect, …).
+`shot`, `theme`, `wallpaper`, `wifi`). Every provider is a Rust binary that
+renders its menu and executes the selected row **in-process** — the retired
+shell wrappers and the `ACTION:` wire protocol are no longer on the call path.
 
 ## Workspace layout
 
-The two halves of flex live in different repositories:
+Both halves of flex live in this repo as workspace members:
 
 | Crate | Where it lives | Publishable |
 |---|---|---|
 | `flex-core` | This repo, `flex-core/`: the engine — menu/list rendering, fuzzy filtering, key handling, the design system, kitty-graphics previews. No machine-specific paths. | Yes |
-| `flex-rice` | This repo, `flex-rice/`: the eight providers, the `flex` binary and the shell wrappers. Reads `~/.config/themes`, `hyprpaper.conf`, `~/.cache/cliphist` and ML4W's wallpaper cache. | No (`publish = false`) |
+| `flex-rice` | This repo, `flex-rice/`: the eight providers, their executors (`exec/`), the `flex` dispatcher and the eight `flex-<provider>` binaries. Reads `~/.config/themes`, `hyprpaper.conf`, `~/.cache/cliphist` and ML4W's wallpaper cache. | No (`publish = false`) |
 
 Dependencies run one way (`flex-rice` → `flex-core`). The engine's only former
 reach into providers is now a seam: `Menu::on_tick` takes a `TickHook`, and
@@ -22,9 +21,9 @@ finished `wifi` scan — build menus in this repo with `flex_rice::menu(…)`,
 which installs it.
 
 ```sh
-cargo test                       # the whole workspace (345 tests)
-cargo build --release            # → target/release/flex (what the wrappers exec)
-cargo clippy --all-targets -- -D warnings
+cargo test                       # the whole workspace (479 passed, 1 ignored)
+cargo build --release            # → target/release/{flex,flex-power,…}
+cargo clippy --locked --all-targets -- -D warnings
 ```
 
 To iterate on the engine locally, patch it in without committing the override —
@@ -32,81 +31,107 @@ see `Docs/project_structure.md` → "Working on the engine".
 
 [gom3az/flex-core]: https://github.com/gom3az/flex (retired; the engine now lives in this repo at `flex-core/`)
 
-## `ACTION:` protocol
+## Entry points
 
-On success the binary prints **exactly one line** to stdout:
+Nine binaries are built from `flex-rice`: the `flex` dispatcher plus one
+binary per provider.
+
+| Binary | Provider | What it does |
+|---|---|---|
+| `flex` | dispatcher | `flex popup …`, `flex <provider> [args…]`, hidden `flex <provider> --resolve <id>` (see below) |
+| `flex-power` | power | Shutdown/reboot/logout menu: `hyprlock`, `systemctl suspend\|reboot\|poweroff`, `pkill -SIGTERM Hyprland` |
+| `flex-launch` | launch | Application launcher: scans `.desktop` entries and detaches the chosen app with `setsid -f` (`kitty -e` for `Terminal=true`) |
+| `flex-shot` | shot | Screenshot/recording flow: `slurp`, `grim`, `wl-copy`, `notify-send`, or the `RECORDING_START` helper |
+| `flex-theme` | theme | Theme switcher: scans `~/.config/themes/available`, runs `theme-switcher.sh activate <name>` |
+| `flex-clip` | clip | Clipboard history: `wl-copy` a selection, delete it, pin/unpin it |
+| `flex-center` | center | Control center: volume/brightness/network/bluetooth/power/theme tabs |
+| `flex-wallpaper` | wallpaper | Wallpaper picker with a kitty-graphics preview pane; runs `set-wallpaper.sh <path>` |
+| `flex-wifi` | wifi | Wi-Fi picker: radio on/off, disconnect, connect (saved profile or password prompt) |
+
+Every provider binary runs the same shared flow:
 
 ```text
-ACTION: <provider> <action_id> <escaped-label>
+runner::popup_guard → runner::build_menu → flex_core::run::run_capture → exec::<provider>::execute
 ```
 
-- `<provider>`: one of `power|launch|shot|theme|clip|center|wallpaper|wifi`.
-- `<action_id>`: opaque, provider-defined id. For `clip` it is the
-  content-hash hex (`RowId`, Q2) so wrappers can round-trip history entries;
-  `wallpaper` uses the same idea over the absolute path and exposes the
-  hidden `flex wallpaper --resolve <id>` lookup. `launch` and `theme` hash
-  their ids the same way (`launch::entry_id` / `theme_::entry_id`) and expose
-  `flex launch --resolve <id>` / `flex theme --resolve <id>`, because a
-  `.desktop` file or a theme directory may be named with spaces
-  (`My App.desktop`, `My Theme`) and cannot survive a whitespace-delimited
-  token. `wifi` ids are the fixed actions
-  (`off`/`on`/`disconnect`/`wifi`/`noop`) and take their SSID from
-  the escaped label, because SSIDs contain spaces.
-- `<escaped-label>`: human label with `\n`/`\` escaped; wrappers must unescape.
-- Empty providers: a chooser whose scan found nothing shows a single `noop`
-  placeholder row (`(No applications found)`, `(No themes found)`,
-  `(No Wi-Fi networks)`, …) instead of a blank menu, so the id token `noop`
-  means "the user picked the empty-state row" — every wrapper exits `0`
-  without acting. Providers that cannot offer any action at all (`clip` with
-  no history, `wallpaper` with no images) instead diagnose on stderr and exit
-  `130` before initialising the terminal (B-026).
-- Hidden id lookups: `flex clip --resolve <id>`, `flex wallpaper --resolve
-  <id>`, `flex launch --resolve <id>` and `flex theme --resolve <id>` print the
-  provider identity behind a row id (content, path, desktop-id, theme name)
-  and exit; they are how the wrappers turn a space-free id back into the thing
-  they must act on.
+`runner` (`flex-rice/src/runner.rs`) owns the popup re-exec guard, menu
+construction, the select loop and the exit mapping; each `exec::<provider>`
+module (`flex-rice/src/exec/*.rs`) owns that provider's side effects. They run
+**in-process** — nothing parses stdout and no shell is involved.
 
-Exit codes: `0` = action chosen, `130` = user cancelled (`Esc`/`q`), `1` = error.
-All diagnostics go to **stderr**; stdout carries only the `ACTION:` line.
-Deletable tabs (`clip`) also emit `ACTION:DELETE <provider> …` (confirmed
-delete) and `ACTION:TOGGLE <provider> …` (NAVIGATE `m` pin toggle).
+## The `flex` dispatcher
 
-## Wrapper recipes (placeholder — full scripts land in M4)
+`flex` (`flex-rice/src/main.rs`) is a compat dispatcher over the eight
+provider binaries:
 
-```sh
-# flex-rice/wrappers/launch.sh (sketch)
-out="$(flex launch)" || exit "$?"   # 130 = cancel, passthrough
-action_id="$(printf '%s' "$out" | awk '{print $2}')"
-exec_app "$action_id"
-```
+- `flex popup <menu|menu-wide> <cmd…>` toggles (or spawns) the popup running
+  `cmd`; the dotfiles `kill-menu.sh` helper uses this.
+- `flex <provider> [args…]` re-execs the sibling `flex-<provider>` binary,
+  reconstructing the global flags (`-s/-t/-p/--filter-mode`) in canonical
+  order, so `flex -t nocolor launch` ≡ `flex launch -t nocolor`.
+- Hidden `flex <provider> --resolve <id>` prints the identity behind a row id
+  (desktop-id, theme name, wallpaper path, clipboard line) and exits. The
+  executors resolve ids in-process, so this is a standalone lookup rather than
+  a step on the call path.
 
-Each wrapper owns its side effects. The library/binary only *selects*.
+## `--print-action` probe
 
-## Cutover table (M4 order: launcher FIRST, power LAST — all ✅ v1.0)
+`--print-action` on a provider binary prints the selected `ACTION:` line and
+exits **without executing** — an end-to-end probe of the real binary's
+row→action mapping with no pty. It is the only remaining producer of an
+`ACTION:` line; nothing consumes one.
 
-| Script (today) | Provider | Wrapper | Status |
-|---|---|---|---|
-| `app-launcher.sh` (deleted 2026-09-15) | `launch` | `flex-rice/wrappers/flex-launch.sh` | ✅ cut over (M2; keybinds → `flex-launch.sh`, `app-cache.sh` kept for control-center) |
-| `cliphist.sh` (`pick()` delegates; add/pin/unpin intact) | `clip` | `flex-rice/wrappers/flex-clip.sh` | ✅ cut over (M4; keybind → `flex-clip.sh`, `ACTION:`/`ACTION:DELETE`/`ACTION:TOGGLE` + `clip --resolve`) |
-| `control-center.sh` (deleted 2026-09-15) | `center` | `flex-rice/wrappers/flex-center.sh` | ✅ cut over (M5; keybind `SUPER+X` → `flex-center.sh`, `app-cache.sh` kept as row-set reference, `popup.sh` kept for kill-menu/wallpaper-picker) |
-| screenshot flow (`screenshot.sh` deleted 2026-09-15) | `shot` | `flex-rice/wrappers/flex-shot.sh` | ✅ cut over (M3; keybind → `flex-shot.sh`, pipeline runs post-TUI) |
-| `theme-switcher.sh` (`pick()` delegates; the `rofi` arm was removed 2026-09-15; list/current/activate/delete intact) | `theme` | `flex-rice/wrappers/flex-theme.sh` | ✅ cut over (M3; keybind → `flex-theme.sh`) |
-| `power-menu.sh` (deleted 2026-09-15) | `power` | `flex-rice/wrappers/flex-power.sh` | ✅ cut over LAST (M6; `SUPER+M` + waybar `custom/power` → `flex-power.sh`, `DRY_RUN=1` blast-radius gate, `flex-tui.sh` deleted — zero sourcers remain) |
-| `wallpaper-picker.sh` (delegating stub; `picker-chrome.sh` deleted 2026-09-15) | `wallpaper` | `flex-rice/wrappers/flex-wallpaper.sh` | ✅ cut over (keybind `SUPER+W` → `flex-wallpaper.sh`, fzf+`kitty icat` previews replaced by the kitty-graphics pane in `flex-core/src/preview.rs`, `set-wallpaper.sh` still owns the swap — image only, the theme is left alone) |
-| `rofi/scripts/wifi.sh` (REMOVED 2026-09-15 with the whole `rofi` package) | `wifi` | `flex-rice/wrappers/flex-wifi.sh` | ✅ cut over (M8; Waybar `network` on-click → `flex-wifi.sh`; the rofi picker's signal bars/lock icons became the row metas, `nmcli` still owns every side effect) |
+## Exit codes
 
-The superseded rofi pickers are gone: the `rofi` stow package was removed on
-2026-09-15 (`stow -D rofi`), along with its `wifi.sh` stub and the `wifi.rasi`
-/ `wifi-prompt.rasi` theme assets. `generate-theme.sh` and `theme-switcher.sh`
-no longer link anything into `~/.config/rofi`, and RASI generation was dropped
-entirely (`generate_rasi()`, the static-theme `colors.rasi` heredoc, the
-saved-theme file list and the `theme-switcher.sh` validity check), so no
-`colors.rasi`/`theme.rasi` remains in any saved theme.
+- `0` — the action executed (or a probe printed its line)
+- `130` — the user cancelled (`Esc`/`q`), or an empty `clip`/`wallpaper` store
+- `1` — an error
 
-Out of scope (not flex surfaces, left intact): `kill-menu.sh` (`SHIFT+Esc`,
-htop-based, still uses `popup.sh`). `app-cache.sh` is kept as an orphaned
-row-set reference (no functional sourcers since M5), and
-`wallpaper-picker.sh` as a delegating stub to `flex-wallpaper.sh`.
+All diagnostics go to **stderr**. `flex: error:` is printed exactly once, by
+`flex_rice::runner::fail`; messages below it carry no `flex:` prefix of their
+own (B-022/B-027).
+
+## Zero bash, not zero exec
+
+There is no shell in the flex call path: the binaries select a row and execute
+it in Rust. Two deliberate **subprocess passthroughs** remain, forced by
+`unsafe_code = "deny"` (no libc `setsid`/`termios`):
+
+- `setsid -f` to detach a session (launching an app, spawning the `shot`
+  capture worker);
+- `stty -echo` around the secured-Wi-Fi password prompt.
+
+These are direct `Command` spawns of the named tools, not shell invocations.
+
+## Env seams
+
+| Variable | Provider | Purpose |
+|---|---|---|
+| `NMCLI`, `BLUETOOTHCTL`, `WPCTL` | wifi, center | Tool overrides |
+| `NOTIFY_SEND` | wifi, center | Notification tool override |
+| `THEME_SWITCHER` | theme, center | Theme switcher script override |
+| `SET_WALLPAPER` | wallpaper | Wallpaper setter script override |
+| `DRY_RUN` | power | When exactly `1`, print `would run: <cmd>` instead of executing |
+| `FLEX_WIFI_PASSWORD`, `FLEX_CENTER_PASSWORD` | wifi, center | Skip the `/dev/tty` password prompt |
+| `SCREENSHOT_DIR`, `RECORDING_START` | shot | Capture output dir / recording helper override |
+| `CLIPHIST_FILE`, `CLIPHIST_PINS` | clip | History and pins store overrides |
+| `TERMINAL` | popups | Terminal used to host a popup (see below) |
+
+## Popups
+
+Popups use the window classes `flex-menu` (compact variant: power/shot/theme/
+wifi) and `flex-menu-wide` (wide variant: launch/clip/center/wallpaper).
+Toggle is keyed on the **variant**, not the provider, so opening `wifi` while
+the `power` popup is up closes it instead of stacking. The hosting terminal
+comes from `$TERMINAL`; an unknown or empty value warns once on stderr and
+falls back to kitty, never exits `1` (`flex-rice/src/popup.rs`,
+`flex-rice/src/terminal.rs`).
+
+## `setup.sh`
+
+`setup.sh` symlinks the nine release binaries from `target/release/` into
+`~/.local/bin`; `setup.sh --check` is the gate that all nine resolve to
+executables.
 
 ## Image previews (`wallpaper`)
 

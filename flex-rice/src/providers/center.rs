@@ -44,7 +44,7 @@
 //! tick only rewrites the `Volume`/`Brightness` row labels/metas in
 //! place — never the row-vec structure, never filter/focus/scroll (R7).
 //!
-//! The library never executes side effects; `wrappers/flex-center.sh`
+//! The library never executes side effects; the center executor
 //! owns the `nmcli`/`bluetoothctl`/`wpctl` calls.
 
 use std::path::Path;
@@ -78,7 +78,7 @@ pub const VOL_ID: &str = "vol";
 /// Brightness gauge row id (stable across online/offline tick rewrites).
 pub const BRIGHT_ID: &str = "bright";
 /// Wi-Fi row id (the SSID travels in the escaped label, like theme names
-/// in `flex-theme.sh` — SSIDs may contain spaces, so they cannot be the
+/// in the theme provider — SSIDs may contain spaces, so they cannot be the
 /// whitespace-split id token).
 pub const WIFI_ID: &str = "wifi";
 /// Theme row id (the theme name travels in the `Theme: {name}` label).
@@ -102,7 +102,7 @@ pub const BT_INFO_DIR_ENV: &str = "CENTER_BT_INFO_DIR";
 /// Launcher row id: `launch:{row-id}` (kind prefix for dispatch).
 ///
 /// The row id is already the space-free [`launch::entry_id`] hash, so the
-/// `flex-center.sh` wrapper resolves it back to a desktop-id through
+/// center executor resolves it back to a desktop-id through
 /// `flex launch --resolve` before launching.
 #[must_use]
 pub fn launch_id(row_id: &str) -> String {

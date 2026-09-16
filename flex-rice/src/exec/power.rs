@@ -1,8 +1,8 @@
 //! `power` executor: the power-menu flow.
 //!
-//! Port of `wrappers/flex-power.sh` (which stays live until cutover): after
-//! the menu selects a row, the wrapper reads the `ACTION:` line, validates
-//! the id (non-empty, no `/`, no newline), and dispatches:
+//! Port of the retired `flex-power.sh` wrapper: after the menu selects a row,
+//! the executor validates the id (non-empty, no `/`, no newline) and
+//! dispatches:
 //!
 //! - `lock` → `hyprlock`
 //! - `suspend` → `systemctl suspend`

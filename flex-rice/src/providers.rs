@@ -2,7 +2,7 @@
 //!
 //! This is the rice-specific half of flex: every provider reads this
 //! machine's tools and `$HOME` conventions, and every provider's action is
-//! executed by the matching shell wrapper in `wrappers/`, never here.
+//! executed by the matching `exec` module, never here.
 
 #[path = "providers/theme_.rs"]
 pub mod theme_;
@@ -17,7 +17,7 @@ pub mod wifi;
 
 use flex_core::{Menu, Row, RowId, Tab, TickHook};
 
-/// No-op row id (bash `noop) :` arm — the wrapper exits 0, no effect).
+/// No-op row id (the executor exits 0, no effect).
 ///
 /// Defined once here and re-exported by [`center`] (which used to own the
 /// constant), because every provider's empty state ends up as a `noop` row
@@ -26,8 +26,8 @@ pub const NOOP_ID: &str = "noop";
 
 /// Placeholder row for a provider whose scan found nothing.
 ///
-/// Selecting it emits `ACTION: <provider> noop <label>`, which every wrapper
-/// treats as a no-op: the menu is never blank, and `Enter` on the placeholder
+/// Selecting it yields the `noop` id, which every executor treats as a
+/// no-op: the menu is never blank, and `Enter` on the placeholder
 /// cannot act on a row that does not exist (B-026).
 #[must_use]
 pub fn empty_row(label: &str) -> Row {

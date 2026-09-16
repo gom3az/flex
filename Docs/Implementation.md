@@ -25,7 +25,8 @@ Companion specs: `Docs/project_structure.md`, `Docs/UI_UX_doc.md`, `Docs/Bug_tra
 - Q6: `q` quits only in NORMAL mode + empty filter (else it edits the filter).
 - Q7: 1 s gauge tick; offline state renders dim `— offline`.
 - Q8: no `serde`/`toml` in v1 (std-only parsing; CI grep gate rejects them).
-- Library never executes side effects; binary prints exactly one `ACTION:` line to stdout;
+- Library never executes side effects; the provider binaries execute the chosen action
+  in-process (`exec/*.rs`), and `--print-action` is the only `ACTION:` producer;
   diagnostics go to stderr. Exit codes: `0` action chosen, `130` cancelled, `1` error.
 
 ## Tech stack (pinned, with docs)
@@ -34,7 +35,7 @@ Companion specs: `Docs/project_structure.md`, `Docs/UI_UX_doc.md`, `Docs/Bug_tra
 |---|---|---|---|
 | `ratatui` | `=0.29.0` + `crossterm` | Alt-screen TUI, `TestBackend` golden tests | https://docs.rs/ratatui/0.29.0 |
 | `crossterm` | single major via `cargo tree` | `/dev/tty` backend event/terminal control | https://docs.rs/crossterm |
-| `clap` | `4` derive | `power\|launch\|shot\|theme\|clip\|center` subcommands | https://docs.rs/clap/4 |
+| `clap` | `4` derive | nine entry points: the `flex` dispatcher + eight `flex-<provider>` binaries | https://docs.rs/clap/4 |
 | `anyhow` | `1` | Error context in binary/providers | https://docs.rs/anyhow |
 | `unicode-width` | `0.2` | `flex-core/src/width.rs` display-width truncation | https://docs.rs/unicode-width/0.2 |
 | `criterion` (dev) | `0.5` | `flex-core/benches/rerank.rs` | https://docs.rs/criterion |
@@ -58,7 +59,7 @@ Risk register drove this order — highest-unknown work is pulled earliest:
 3. **Launcher cutover before power cutover (M4).** Rationale: launcher is
    high-frequency + low-blast-radius (worst case: wrong app starts); power menu
    is low-frequency + high-blast-radius (wrong action shuts down the machine).
-   Validate wrappers + `ACTION:` protocol on the safe surface first.
+   Validate the executor + `ACTION:` protocol on the safe surface first.
 
 ## Stage overview + estimates
 
@@ -68,7 +69,7 @@ Risk register drove this order — highest-unknown work is pulled earliest:
 | M1 core | filter/width/render/keys/theme/backend + spikes | 2–3 d |
 | M2 providers | power/launch/clip/center stdout-once parsing | 2 d |
 | M3 widgets | gauge tick, offline, shot/theme, center grid | 1–2 d |
-| M4 wrappers + cutover | `wrappers/` scripts, launcher-first cutover table | 1 d |
+| M4 cutover | per-provider executors (`exec/*.rs`), launcher-first cutover table | 1 d |
 | M5 perf + hardening | benches, fuzzy corpus, dwidth/clip_perf gates | 1 d |
 | M6 release | version, changelog, release profile verify | 0.5 d |
 
@@ -131,15 +132,15 @@ Risk register drove this order — highest-unknown work is pulled earliest:
       danger rows confirmed by the shared `keys` double-Enter flow (no
       duplicated logic); event loop via `run::run` with `--filter-mode`
       support; `main.rs` dispatches `power` (no stubs remain).
-      `wrappers/flex-power.sh` (SELECT→bash-verbatim power command AFTER
+      the power executor (SELECT→bash-verbatim power command AFTER
       the TUI exits; `DRY_RUN=1` echoes `would run: …` instead of executing
       — merge gated on dry-run verification given the blast radius).
-      Keybinds repointed: `SUPER+M` → `flex-power.sh` (its old
+      Keybinds repointed: `SUPER+M` → the power binary (its old
       `hyprshutdown || hyprctl dispatch exit` is now the Logout row),
-      waybar `custom/power` on-click → `flex-power.sh`; `SHIFT+Esc`
+      waybar `custom/power` on-click → the power binary; `SHIFT+Esc`
       stays on `kill-menu.sh` (htop-based, out of scope).
-      `power-menu.sh` deleted post-parity, then `flex-tui.sh` deleted
-      (last sourcer gone; `git grep flex-tui.sh` zero functional hits).
+      `power-menu.sh` deleted post-parity, then the bash `flex-tui` engine deleted
+      (last sourcer gone; `git grep flex-tui` zero functional hits).
       Tests: `flex-rice/tests/power.rs` (18: exact row fixtures, danger key-seq
       replays incl. the single-`Enter`-never-confirms release-gate property,
       49 ms hold swallow, 5 s expiry→re-arm, 80x24 default + armed-danger
@@ -150,11 +151,11 @@ Risk register drove this order — highest-unknown work is pulled earliest:
       (90/90 names, zero drift vs `~/.cache/app-launcher.list`), `Terminal`
       meta, `%X`-preserving `Exec`; row id = space-free hash of the
       desktop-id (`launch::entry_id`) with the hidden `flex launch --resolve`
-      lookup the wrappers call before launching (B-021 — a `.desktop` file
+      lookup the executor uses before launching (B-021 — a `.desktop` file
       may be named `My App.desktop`); event loop (`flex-core/src/run.rs`: poll 1 s,
       `handle_key`, render-per-frame, `tick`, `ACTION:`/`ACTION:DELETE`/quit
       exits, `FLEX_TEST` seeded step); hidden `--filter-mode=spec|legacy`
-      escape hatch;       `wrappers/flex-launch.sh` (41 lines, `setsid`/`%X`-strip/
+      escape hatch;       the launch executor (`setsid`/`%X`-strip/
       `kitty -e` semantics matching `launch_app_row`); keybinds repointed,
       `app-launcher.sh` deleted, `app-cache.sh` KEPT (row-set reference;
       its only sourcer `control-center.sh` was deleted in the M5 cutover).
@@ -172,7 +173,7 @@ Risk register drove this order — highest-unknown work is pulled earliest:
       the pin); `CLIPHIST_FILE`/`CLIPHIST_PINS` env overrides (test seam);
       hidden `flex clip --resolve <hash>` for wrapper hash→content lookup;
       event loop via `run::run` with `--filter-mode` support; empty store →
-      stderr + exit 130. `wrappers/flex-clip.sh` (SELECT→decode+`wl-copy`
+      stderr + exit 130. the clip executor (SELECT→decode+`wl-copy`
       post-TUI with pty redirect; DELETE→`grep -aFxv` both files;
       TOGGLE→pin/unpin) with `sel`/`pin`/`unpin` bash semantics; keybind
       `SUPER+SHIFT+V` repointed, `cliphist.sh pick()` a delegating stub
@@ -192,13 +193,13 @@ Risk register drove this order — highest-unknown work is pulled earliest:
       theme rows (shared `theme_` scan); 1 s tick rewrites gauge
       labels/metas in place only (60-tick soak test: no scroll/filter
       reset, R7); `Row::offline` per-row dim flag (`lib.rs`+`render.rs`,
-      additive); `wrappers/flex-center.sh` (`SELECT`→exec/connect,
+      additive); the center executor (`SELECT`→exec/connect,
       `TOGGLE`→mute/bt, danger-confirmed `SELECT`→power ops,
       `NMCLI`/`BLUETOOTHCTL`/`WPCTL`/`THEME_SWITCHER`/`FLEX_CENTER_PASSWORD`
       overrides); keybind `SUPER+X` repointed, `control-center.sh` deleted,
       `app-cache.sh` KEPT intentionally (orphaned reference for the row
-      set), `flex-tui.sh`/`popup.sh` kept (power-menu/kill-menu/
-      wallpaper-picker still need them). Tests: `flex-rice/tests/center.rs` (27:
+      set), the bash `flex-tui` engine kept (power-menu/kill-menu/
+      wallpaper-picker still need `popup.sh`). Tests: `flex-rice/tests/center.rs` (27:
       fixtures per tab, 125x30 golden + gauge states, key-seq replays,
       stubbed-pipeline wrapper tests) + 7 provider unit tests;
       `tests/fixtures/center/` reference snapshots.
@@ -221,12 +222,12 @@ Risk register drove this order — highest-unknown work is pulled earliest:
       basename (`(no metadata)`/`unknown` fallbacks) + `  Active` suffix for
       the current theme (bash meta+status join); non-deletable. `main.rs`
       dispatches both through `run::run` with `--filter-mode` support.
-      Wrappers `wrappers/flex-shot.sh` (capture pipeline verbatim from the
+      Executors: the shot executor (capture pipeline verbatim from the
       deleted bash, runs AFTER the TUI exits; `SCREENSHOT_DIR` /
-      `RECORDING_START` test overrides) + `wrappers/flex-theme.sh`
+      `RECORDING_START` test overrides) + the theme executor
       (`exec theme-switcher.sh activate`; `THEME_SWITCHER` override).
-      Keybinds repointed (`SUPER+s` → `flex-shot.sh`, `SUPER+T` →
-      `flex-theme.sh`); `screenshot.sh` deleted; `theme-switcher.sh pick()`
+      Keybinds repointed (`SUPER+s` → the shot binary, `SUPER+T` →
+      the theme binary); `screenshot.sh` deleted; `theme-switcher.sh pick()`
       is now a delegating stub (`list/current/activate/delete/rofi`
       intact, verified live). Tests: `flex-rice/tests/shot.rs` (10) + `flex-rice/tests/theme.rs`
       (12) — exact row fixtures, golden default view @80x24, key-seq
@@ -238,26 +239,27 @@ Risk register drove this order — highest-unknown work is pulled earliest:
       `flex-rice/tests/center.rs` (5-tab bar + gauge states 0/50/100/muted/offline).
 - [ ] `flex-rice/tests/golden.rs` additions: danger row, gauge online/offline, truncation @80x24.
 
-## M4 — Wrappers + cutover (launcher BEFORE power)
+## M4 — Cutover (launcher BEFORE power)
 
-- [x] `wrappers/{power,launch,clip,center,shot,theme}.sh`: parse the single `ACTION:` line,
-      execute the side effect. Wrappers own all side effects — never the library.
-      All six land as `flex-rice/wrappers/flex-<provider>.sh` (`power` LAST, M6).
-- [x] `clip` cutover DONE (M4, ahead of M4 schedule): `flex-rice/wrappers/flex-clip.sh`
+- [x] Per-provider executors (`flex-rice/src/exec/*.rs`): own the side effects
+      the six original wrappers introduced, now called in-process by the
+      `flex-<provider>` binaries. The retired wrappers parsed the single
+      `ACTION:` line; the executors run the same effects directly.
+- [x] `clip` cutover DONE (M4, ahead of M4 schedule): the clip executor
       + `pick()` delegating stub + `README.md` cutover table ✅.
-- [x] `center` cutover DONE (M5): `flex-rice/wrappers/flex-center.sh`
+- [x] `center` cutover DONE (M5): the center executor
       + `README.md` cutover table ✅ + `control-center.sh` deleted
-      (keybind `SUPER+X` repointed). Remaining wrapper (`power`) still
-      lands here in M4, `power` LAST.
-- [x] Cutover table in `README.md` (script → wrapper → status):
+      (keybind `SUPER+X` repointed). Remaining provider (`power`) still
+      landed here in M4, `power` LAST.
+- [x] Cutover table in `README.md` (script → provider → status):
       `launch` ✅ (M2), `shot`/`theme` ✅ (M3), `clip` ✅ (M4),
       `center` ✅ (M5), `power` ✅ (M6, LAST).
 - [x] Cutover order: `launch` first (safe, high-frequency), then `clip`/`center`/`shot`/`theme`,
       `power` LAST (high-blast-radius). `launch` ✅ (M2), `shot`/`theme` ✅ (M3),
       `clip` ✅ (M4), `center` ✅ (M5), `power` ✅ (M6).
-      Post-cutover cleanup (M6): `power-menu.sh` deleted after wrapper parity
-      (dry-run + stubbed dispatch green); `flex-tui.sh` deleted after its last
-      sourcer went away (zero-hit `git grep` verified worktree-wide).
+      Post-cutover cleanup (M6): `power-menu.sh` deleted after executor parity
+      (dry-run + stubbed dispatch green); the bash `flex-tui` engine deleted after
+      its last sourcer went away (zero-hit `git grep` verified worktree-wide).
       Intentionally KEPT (out of scope, documented): `popup.sh` (still exec'd
       by `kill-menu.sh` and the delegating stubs), `app-cache.sh` (orphaned
       row-set reference since M2/M5, kept deliberately),
@@ -266,9 +268,13 @@ Risk register drove this order — highest-unknown work is pulled earliest:
       `picker-chrome.sh` was deleted in the M7 wallpaper cutover (below);
       `rofi/scripts/wifi.sh` became a delegating stub in the M8 Wi-Fi
       cutover (below).
-- [x] `flex-tui.sh` dispatcher updated; stow packaging verified (`target/` ignored).
-      (M6: bash dispatcher deleted — superseded by the six `flex-*` binaries;
-      `stow -n flex` dry-run links everything except `target/`.)
+      **Subsequently retired (2026-09-16):** all eight wrappers were removed in
+      the per-provider-binary migration; their effects live in `exec/*.rs` and
+      the `ACTION:` wire protocol left the call path.
+- [x] the bash `flex-tui` dispatcher updated; stow packaging verified (`target/` ignored).
+      (M6: bash dispatcher deleted — superseded by the `flex` dispatcher and the
+      eight `flex-<provider>` binaries; `stow -n flex` dry-run links everything
+      except `target/`.)
 
 ## M7 — Wallpaper cutover (previews kept)
 
@@ -299,11 +305,11 @@ across rather than drop it.
       `render::cursor_position` (renderer stays ANSI-free; `run` opens a
       second `/dev/tty` handle and paints after the frame flush, then
       re-parks the caret so it never sits in the pane).
-- [x] `wrappers/flex-wallpaper.sh` DONE (hex-id validation → `--resolve` →
+- [x] the wallpaper executor DONE (hex-id validation → `--resolve` →
       `[[ -f ]]` → `set-wallpaper.sh`, `SET_WALLPAPER` override; the old
       picker is a delegating stub, `picker-chrome.sh` deleted).
-- [x] `SUPER+W` repointed to `flex-wallpaper.sh`; `flex-rice/tests/wallpaper.rs` (21) +
-      preview/wallpaper unit tests (20) + `flex-rice/tests/wrappers.rs` entry.
+- [x] `SUPER+W` repointed to the wallpaper binary; `flex-rice/tests/wallpaper.rs` (21) +
+      preview/wallpaper unit tests (20) + the entrypoints contract.
 
 ## M8 — Wi-Fi dialog cutover (network popup)
 
@@ -327,26 +333,26 @@ makes the dialog a flex provider instead of a package dependency.
 - [x] Standard rows (`bare_rows = false`): unlike the `center` `Networks`
       tab, the signal/security meta **is** the surface, so it must render.
       Filterable (rofi `-dmenu` parity), never deletable.
-- [x] `wrappers/flex-wifi.sh` DONE (`menu` popup variant): radio on/off,
+- [x] the wifi executor DONE (`menu` popup variant): radio on/off,
       `device disconnect`, open-network connect, `/dev/tty` password prompt
       for secured ones (`FLEX_WIFI_PASSWORD` seam), selecting the connected
       network drops it (rofi parity). `NMCLI`/`NOTIFY_SEND` overrides for
-      tests; `bash -n` + `zsh -n` clean (shellcheck still absent, B-004).
-- [x] Waybar `network.on-click` → `~/.local/bin/flex-wifi.sh`;
+      tests.
+- [x] Waybar `network.on-click` → the wifi binary;
       `rofi/scripts/wifi.sh` reduced to a delegating stub (external callers
       keep working) — `wifi.rasi`/`wifi-prompt.rasi` are now unused assets.
-- [x] `flex-rice/tests/wifi.rs` (32) + `flex-rice/tests/wrappers.rs` entry: row-set fixtures,
+- [x] `flex-rice/tests/wifi.rs` (32) + the entrypoints contract: row-set fixtures,
       offline/empty/radio-off degradation, live `$WIFI_*` seam path,
       cached-first opening (placeholder + scan swap, focus identity across a
       reorder, filter survival, idle tick is a no-op), key-seq replays, 80x24
-      golden, stubbed wrapper dispatch (incl. bad/unknown ids refused and
+      golden, stubbed executor dispatch (incl. bad/unknown ids refused and
       cancel passing 130 through untouched).
 - [x] Latency: a triggered `nmcli` scan blocks ~3 s, which put the popup on a
       blank terminal until it returned. `wifi::menu` now builds the first frame
       from the **cached** scan (`--rescan no`, 10 ms) and runs the real scan on
       a worker thread; `Menu::tick` → `wifi::refresh_scan` swaps its rows in,
       keeping the cursor on the same SSID. Cold cache → dim `Scanning…` row
-      instead of a false `(No Wi-Fi networks)`; the wrapper's connect probe
+      instead of a false `(No Wi-Fi networks)`; the executor's connect probe
       reads the cache too, so Enter does not wait for a second scan. Measured
       live in a pty with a stubbed slow scan: first frame 22 ms, fresh rows
       3.0 s (scan + one tick).
@@ -355,11 +361,11 @@ makes the dialog a flex provider instead of a package dependency.
       up — signal padded to `NNN%`, fixed-width bar, security padded to the
       widest class in the list, reserved `Connected` column. Lock glyphs are
       Nerd Font private-use icons (single cell, the deleted rofi picker's),
-      not colour emoji. Wrapper feedback fixed with it: the password prompt is
+      not colour emoji. Executor feedback fixed with it: the password prompt is
       printed explicitly (it used to go to `/dev/null` via `read -p`, leaving
       the popup blank while it waited), an empty answer says so instead of
       exiting silently, and a `Connecting to <ssid>…` line covers the connect.
-- [x] Saved networks connect from their stored profile: `flex-wifi.sh`'s
+- [x] Saved networks connect from their stored profile: the wifi executor's
       `is_saved()` matches an `802-11-wireless` profile in `nmcli … connection
       show` (name = SSID, split on the last colon so `My\:Net` works) and only
       asks for a password when no profile exists or the stored credentials are
@@ -414,12 +420,12 @@ makes the dialog a flex provider instead of a package dependency.
       `render`/`filter`/`width`/`keys`/`theme` — sole `Command::new` is the
       center snapshot at provider load, once up front per convention; power
       rows are fully static); `DRY_RUN=1` dry-run mode added to
-      `flex-power.sh` and gated (all 5 ids dry-run to exact bash commands,
+      the power executor and gated (all 5 ids dry-run to exact bash commands,
       stub log proves nothing executes); full hygiene
       (`fmt --check` + `clippy --all-targets -D warnings` + debug AND
       release suites green); `shellcheck` re-checked 2026-09-15 — still
-      absent (B-004 stays open; `bash -n` + `zsh -n` + stubbed-pipeline
-      tests cover `flex-power.sh`).
+      absent (B-004 stayed open at that time; `bash -n` + `zsh -n` +
+      stubbed-pipeline tests covered the then-live power wrapper).
 
 ---
 
@@ -428,12 +434,14 @@ makes the dialog a flex provider instead of a package dependency.
 | Suite | File | What it gates |
 |---|---|---|
 | Golden (TestBackend) | `flex-rice/tests/golden.rs` | Empty tab bar, danger, gauge on/offline, truncation @80x24 |
+| Entry-point contract | `flex-rice/tests/entrypoints.rs` | `--help`/`--version` on all nine binaries |
+| Error prefix | `flex-rice/tests/prefix.rs` | Exactly one `flex: error:` across the provider binaries |
 | Key state machine | `flex-core/tests/keys.rs` | Q1 digit/Alt-digit, Q6 q-quit, danger confirm timing (29-case `FLEX_TEST` seed table + empty-app safeties) |
-| Power cutover | `flex-rice/tests/power.rs` | Bash-exact rows, single-Enter-never-confirms gate, hold/expiry replays, armed-danger golden, wrapper dry-run + dispatch |
+| Power cutover | `flex-rice/tests/power.rs` | Bash-exact rows, single-Enter-never-confirms gate, hold/expiry replays, armed-danger golden, executor dry-run + dispatch |
 | Fuzzy corpus | `flex-core/tests/fuzzy_corpus.rs` | Tier ordering 100/80/60/40/10, penalties, subsequence-required |
 | Display width | `flex-core/tests/dwidth.rs` | Truncation/pad, `…`, non-CJK widths |
 | Clip perf | `flex-rice/tests/clip_perf.rs` | 10k rerank+render budget |
-| Wallpaper cutover | `flex-rice/tests/wallpaper.rs` | Bash-exact scan (`-maxdepth 2 -iname` + `sort -u`), hash id ↔ `--resolve` round trip, pane geometry/goldens, key-seq replays, stubbed wrapper dispatch (bad/unknown ids refused) |
+| Wallpaper cutover | `flex-rice/tests/wallpaper.rs` | Bash-exact scan (`-maxdepth 2 -iname` + `sort -u`), hash id ↔ `--resolve` round trip, pane geometry/goldens, key-seq replays, stubbed executor dispatch (bad/unknown ids refused) |
 | Wi-Fi dialog cutover | `flex-rice/tests/wifi.rs` | Radio/scan row set (incl. offline, empty scan, radio off), live `$WIFI_*` seam path, cached-first open + background rescan swap (placeholder, focus identity across a reorder, filter survival, idle tick no-op), filter/navigate/Esc replays, 80x24 standard-mode golden, stubbed `nmcli` dispatch (open/secure/connected-toggle/noop/cancel + bad/unknown ids refused) |
 | Bench | `flex-core/benches/rerank.rs` | Criterion regression signal |
 | Lints/fmt/tree | CI gates | `fmt --check`, `clippy -D warnings`, single crossterm, no serde/toml grep |

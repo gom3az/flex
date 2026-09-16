@@ -1,9 +1,8 @@
 //! `wallpaper` executor: the wallpaper-set flow.
 //!
-//! Port of `wrappers/flex-wallpaper.sh` (which stays live until cutover):
-//! after the menu selects a row, the wrapper reads the
-//! `ACTION: wallpaper <id> …` line, validates the id (16 lowercase hex
-//! chars, the FNV-1a path hash), resolves it back to the image path
+//! Port of the retired `flex-wallpaper.sh` wrapper: after the menu selects a
+//! row, the executor validates the id (16 lowercase hex chars, the FNV-1a
+//! path hash), resolves it back to the image path
 //! (`flex wallpaper --resolve`, i.e. the same
 //! [`resolve`](crate::providers::wallpaper::resolve) scan), refuses paths
 //! that are not files, and `exec`s

@@ -2,7 +2,7 @@
 //!
 //! Ports ONLY the `pick()` menu path of
 //! `scripts/.config/scripts/cliphist.sh` (the `add` / `pin` / `unpin` /
-//! `read_current` entry points stay in bash; the `flex-clip.sh` wrapper
+//! `read_current` entry points stay in bash; the clip executor
 //! resolves hashes and performs copies/pins/deletes AFTER the TUI exits):
 //!
 //! - Store: `${CLIPHIST_FILE:-$HOME/.cache/cliphist}` history lines plus

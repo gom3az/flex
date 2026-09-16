@@ -7,7 +7,7 @@
 //! - Labels keep their exact bash bytes, including the two-space indent
 //!   on area/window rows and the `🖥` glyph on full-capture rows.
 //! - Row ids are the bash `case` arms (`area-shot`, …, `full-rec-audio`);
-//!   the `flex-shot.sh` wrapper matches on them after the TUI exits
+//!   the shot executor matches on them after the TUI exits
 //!   (`slurp` needs a clean tty, so capture never runs inside the TUI).
 //!
 //! The library never executes captures; it only selects a row.

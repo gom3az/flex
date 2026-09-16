@@ -1,9 +1,8 @@
 //! `wifi` executor: the Wi-Fi picker flow (radio on/off, disconnect, connect).
 //!
-//! Port of `wrappers/flex-wifi.sh` (which stays live until cutover): after
-//! the menu selects a row, the wrapper reads the single `ACTION: wifi …`
-//! line, validates the id (non-empty, no `/`, no newline —
-//! `flex-wifi.sh:37`), and dispatches (`flex-wifi.sh:174-185`):
+//! Port of the retired `flex-wifi.sh` wrapper: after the menu selects a
+//! row, the executor validates the id (non-empty, no `/`, no newline —
+//! `flex-wifi.sh:37`) and dispatches (`flex-wifi.sh:174-185`):
 //!
 //! - `on` / `off` → `nmcli radio wifi on|off` (quiet, `|| true`);
 //! - `disconnect` → fresh interface discovery, `nmcli device disconnect`,

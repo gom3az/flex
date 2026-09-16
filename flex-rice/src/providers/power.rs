@@ -1,13 +1,13 @@
 //! Power provider (M6): static System / Power menu rows for `flex power`.
 //!
 //! Row-set parity with `waybar/.config/waybar/power-menu.sh` (deleted at
-//! cutover; the last `flex-tui.sh` consumer):
+//! cutover; the last bash `flex-tui` consumer):
 //!
 //! - Row order, labels, and metas are exact: `Lock Screen`/`hyprlock`,
 //!   `Suspend`/`systemctl suspend`, `Reboot`/`systemctl reboot`,
 //!   `Power Off`/`systemctl poweroff`, `Logout`/`pkill -SIGTERM Hyprland`.
 //! - Row ids are the bash `flex_on_activate` case arms (`lock`, `suspend`,
-//!   `reboot`, `poweroff`, `logout`); `wrappers/flex-power.sh` matches on
+//!   `reboot`, `poweroff`, `logout`); the power executor matches on
 //!   them after the TUI exits, running the same commands verbatim.
 //! - `Reboot`/`Power Off` are danger rows armed/confirmed by the shared
 //!   [`keys`](flex_core::keys) double-Enter flow — danger logic is never

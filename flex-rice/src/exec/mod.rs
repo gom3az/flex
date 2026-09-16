@@ -1,11 +1,11 @@
-//! Executors: one module per provider, porting the wrapper logic.
+//! Executors: one module per provider, porting the retired wrapper logic.
 //!
 //! The binaries stay thin (argv → shared runner → select → `exec::<provider>`)
 //! while each `exec` module owns the side effects the matching shell wrapper
-//! in `wrappers/` used to own. Integration tests reach the library
+//! used to own. Integration tests reach the library
 //! (`src/bin/*.rs` is not importable), so executors must live here for the
-//! dispatch coverage to become Rust tests. The wrappers stay live until
-//! cutover; each module documents its deliberate departures from its wrapper.
+//! dispatch coverage to become Rust tests. Each module documents its
+//! deliberate departures from the wrapper it ported.
 
 pub mod center;
 pub mod clip;

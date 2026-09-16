@@ -2,9 +2,9 @@
 //!
 //! Thin shell over the shared [`runner`]: popup guard, menu
 //! construction, then select+execute through [`exec::power`] (the
-//! port of `wrappers/flex-power.sh`, which stays live until
-//! cutover). `--print-action` keeps the end-to-end probe of the
-//! row→action mapping with no execution.
+//! port of the retired `flex-power.sh` wrapper). `--print-action`
+//! keeps the end-to-end probe of the row→action mapping with no
+//! execution.
 //!
 //! Outcome mapping mirrors the wrapper's arms (`flex-power.sh:51-57`):
 //! `Chosen` runs the `select` dispatch (`lock`, `suspend`,
