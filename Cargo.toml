@@ -1,37 +1,47 @@
-[package]
-name = "flex-core"
-description = "Reusable Rust TUI menu engine: menu rendering, fuzzy filtering, key handling and kitty-graphics previews"
+# flex — Cargo workspace root.
+#
+# Two members, one repo:
+#
+#   flex-core   the reusable TUI menu engine (rendering, filtering, keys,
+#               design system, kitty-graphics previews). No machine-specific
+#               paths; stays publishable.
+#   flex-rice   this rice's glue: the eight providers that adapt
+#               hyprpaper/cliphist/nmcli/wpctl/… to the engine, the `flex`
+#               binary, and the shell wrappers that Hyprland and Waybar call.
+#               Machine-specific by nature (`publish = false`).
+#
+# Dependencies run one way (`flex-rice` → `flex-core`, a path dependency —
+# no tags, no `[patch]` dance). Profiles and lints are honoured only here.
+
+[workspace]
+members = ["flex-core", "flex-rice"]
+resolver = "2"
+
+[workspace.package]
 version = "1.0.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["flex contributors"]
-repository = "https://github.com/gom3az/flex-core"
-keywords = ["tui", "menu", "launcher", "ratatui"]
-categories = ["command-line-utilities"]
+repository = "https://github.com/gom3az/flex"
 
-[dependencies]
-anyhow = "1"
-crossterm = "0.28"
-# Pinned: layout must match the wiremix-derived design system exactly.
+[workspace.dependencies]
+flex-core = { path = "flex-core" }
 ratatui = { version = "=0.29.0", features = ["crossterm"] }
-# Non-CJK widths: ambiguous codepoints are narrow (default-features off drops
-# the `cjk` feature that would make them wide). See `src/width.rs`.
+crossterm = "0.28"
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+# Non-CJK widths: narrow ambiguous codepoints (no `cjk` feature).
 unicode-width = { version = "0.2", default-features = false }
 
-[dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
-
-[[bench]]
-name = "rerank"
-harness = false
-
-[lints.rust]
+[workspace.lints.rust]
 unsafe_code = "deny"
 
-[lints.clippy]
+[workspace.lints.clippy]
 all = "deny"
 pedantic = "deny"
 
+# Profiles are only honoured at the workspace root: member `[profile.*]`
+# sections are ignored, so this is the single definition.
 [profile.release]
 lto = true
 strip = true

@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=OnlyShow
+Exec=onlyshow
+OnlyShowIn=KDE;
+NotShowIn=GNOME;
+Icon=onlyshow-icon
+Type=Application

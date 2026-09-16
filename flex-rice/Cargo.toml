@@ -1,0 +1,26 @@
+[package]
+name = "flex-rice"
+description = "Hyprland-rice glue for flex-core: the eight providers, the `flex` binary and its shell wrappers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+# Machine-specific by design (hyprpaper, cliphist, nmcli, wpctl, ML4W paths):
+# this half is never published.
+publish = false
+
+[[bin]]
+name = "flex"
+path = "src/main.rs"
+
+[dependencies]
+# The engine, from its own repository (see the workspace root for the pin).
+flex-core.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+crossterm.workspace = true
+ratatui.workspace = true
+
+[lints]
+workspace = true

@@ -1,1 +1,2 @@
+# Build output for the whole workspace lands at the root `target/`.
 /target

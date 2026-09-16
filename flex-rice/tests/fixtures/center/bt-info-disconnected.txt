@@ -1,0 +1,8 @@
+Device 11:22:33:44:55:66 (public)
+	Name: Speaker One
+	Alias: Speaker One
+	Paired: yes
+	Trusted: no
+	Blocked: no
+	Connected: no
+	LegacyPairing: no

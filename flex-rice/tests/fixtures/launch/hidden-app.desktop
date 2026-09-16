@@ -1,0 +1,5 @@
+[Desktop Entry]
+Name=Hidden Two
+Exec=hidden-two
+Hidden=true
+Type=Application

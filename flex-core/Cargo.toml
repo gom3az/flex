@@ -5,7 +5,7 @@ version = "1.0.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["flex contributors"]
-repository = "https://github.com/gom3az/flex-core"
+repository = "https://github.com/gom3az/flex"
 keywords = ["tui", "menu", "launcher", "ratatui"]
 categories = ["command-line-utilities"]
 
@@ -16,7 +16,7 @@ crossterm = "0.28"
 ratatui = { version = "=0.29.0", features = ["crossterm"] }
 # Non-CJK widths: ambiguous codepoints are narrow (default-features off drops
 # the `cjk` feature that would make them wide). See `src/width.rs`.
-unicode-width = { version = "0.2", default-features = false }
+unicode-width.workspace = true
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
@@ -31,8 +31,3 @@ unsafe_code = "deny"
 [lints.clippy]
 all = "deny"
 pedantic = "deny"
-
-[profile.release]
-lto = true
-strip = true
-panic = "abort"

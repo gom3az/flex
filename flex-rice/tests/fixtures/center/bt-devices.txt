@@ -1,0 +1,3 @@
+Device AA:BB:CC:DD:EE:FF Headphones
+Device 11:22:33:44:55:66 Speaker One
+Controller 00:11:22:33:44:55 myhost [default]

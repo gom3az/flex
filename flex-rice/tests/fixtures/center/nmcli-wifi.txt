@@ -1,0 +1,4 @@
+*:HomeNet:87:WPA2
+:Corp\:Net:63:WPA2
+:Coffee Shop:41:--
+:Lobby:5:WPA3

@@ -1,0 +1,8 @@
+Device AA:BB:CC:DD:EE:FF (public)
+	Name: Headphones
+	Alias: Headphones
+	Paired: yes
+	Trusted: yes
+	Blocked: no
+	Connected: yes
+	LegacyPairing: no

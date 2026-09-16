@@ -1,0 +1,5 @@
+[Desktop Entry]
+Name=Hidden One
+Exec=hidden-one
+NoDisplay=true
+Type=Application

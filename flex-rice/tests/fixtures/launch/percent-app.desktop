@@ -1,0 +1,5 @@
+[Desktop Entry]
+Name=Percent App
+Exec=myapp %F --open
+Icon=myapp
+Type=Application
