@@ -156,7 +156,7 @@ Risk register drove this order — highest-unknown work is pulled earliest:
       `handle_key`, render-per-frame, `tick`, `ACTION:`/`ACTION:DELETE`/quit
       exits, `FLEX_TEST` seeded step); hidden `--filter-mode=spec|legacy`
       escape hatch;       the launch executor (`setsid`/`%X`-strip/
-      `kitty -e` semantics matching `launch_app_row`); keybinds repointed,
+      `$TERMINAL -e` semantics matching `launch_app_row`); keybinds repointed,
       `app-launcher.sh` deleted, `app-cache.sh` KEPT (row-set reference;
       its only sourcer `control-center.sh` was deleted in the M5 cutover).
       Tests: `flex-rice/tests/launch.rs` (fixtures, `fir→Enter` replay, Esc chain,

@@ -40,7 +40,7 @@ binary per provider.
 |---|---|---|
 | `flex` | dispatcher | `flex popup …`, `flex <provider> [args…]`, hidden `flex <provider> --resolve <id>` (see below) |
 | `flex-power` | power | Shutdown/reboot/logout menu: `hyprlock`, `systemctl suspend\|reboot\|poweroff`, `pkill -SIGTERM Hyprland` |
-| `flex-launch` | launch | Application launcher: scans `.desktop` entries and detaches the chosen app with `setsid -f` (`kitty -e` for `Terminal=true`) |
+| `flex-launch` | launch | Application launcher: scans `.desktop` entries and detaches the chosen app with `setsid -f` (`$TERMINAL -e` for `Terminal=true`) |
 | `flex-shot` | shot | Screenshot/recording flow: `slurp`, `grim`, `wl-copy`, `notify-send`, or the `RECORDING_START` helper |
 | `flex-theme` | theme | Theme switcher: scans `~/.config/themes/available`, runs `theme-switcher.sh activate <name>` |
 | `flex-clip` | clip | Clipboard history: `wl-copy` a selection, delete it, pin/unpin it |

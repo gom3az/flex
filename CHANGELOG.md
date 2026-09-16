@@ -34,6 +34,22 @@ directly.
   `setup.sh --check` is the gate that all nine resolve to executables.
 - `--print-action` is the only remaining producer of an `ACTION:` line: an
   end-to-end row→action probe with no execution.
+- `Terminal=true` desktop entries are hosted by `$TERMINAL` (the
+  `<terminal> -e <cmd…>` form — no popup class, font override or
+  `POPUP_KITTY` marker) instead of a hardcoded `kitty -e`; the variable is
+  read only for those entries, so a plain GUI launch never consults it.
+
+### Fixed
+- Providers no longer abort when a diagnostic write fails. `eprintln!`/
+  `println!` panic on a write error — a hung-up popup pty gives `EIO`, a
+  closed pipe `EPIPE` — and the release profile is `panic = "abort"`, so a
+  provider whose stderr was a deleted `/dev/pts/N` died with SIGABRT before
+  it could spawn its popup (live: a Waybar started before
+  `hl.env("TERMINAL", …)` kept a deleted pts on fd 2, and every
+  `flex-wifi`/`flex-power` on-click aborted). Runtime prints now go through
+  `flex_core::diag`, which discards the error; locked by
+  `flex-rice/tests/diagnostics.rs` (`/dev/full` on stderr must exit 1, not
+  die by signal).
 
 ### Removed
 - `flex-rice/wrappers/` (all eight `flex-*.sh` scripts) and
