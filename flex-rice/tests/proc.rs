@@ -119,8 +119,13 @@ fn proc_menu_confirms_the_selected_row() {
     let mut menu = build_menu(Provider::Proc, default_style()).expect("proc menu");
     let rows = &menu.app.active_tab().expect("tab").rows;
     assert!(!rows.is_empty(), "proc menu has rows");
-    let row_id = rows[0].id.clone();
-    menu.app.active_tab_mut().expect("tab").state.focus = 0;
+    let (index, row) = rows
+        .iter()
+        .enumerate()
+        .find(|(_, r)| r.confirmable && r.targets.is_empty())
+        .expect("confirmable row without targets exists");
+    let row_id = row.id.clone();
+    menu.app.active_tab_mut().expect("tab").state.focus = index;
 
     let t0 = run::test_base();
     assert_eq!(
