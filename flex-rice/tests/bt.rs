@@ -293,7 +293,7 @@ fn tick_refresh_preserves_focus_and_updates_rows() {
 #[test]
 fn executor_dispatch_matrix() {
     assert_eq!(
-        exec_bt::execute("noop", "", None).unwrap(),
+        exec_bt::execute("noop", "", Some("")).unwrap(),
         exec_bt::ExecuteReport {
             action_id: "noop".to_string(),
             detail: None,
@@ -301,7 +301,7 @@ fn executor_dispatch_matrix() {
     );
 
     assert_eq!(
-        exec_bt::execute("power:on", "", None).unwrap(),
+        exec_bt::execute("power:on", "", Some("")).unwrap(),
         exec_bt::ExecuteReport {
             action_id: "power:on".to_string(),
             detail: Some("power:on".to_string()),
@@ -309,7 +309,7 @@ fn executor_dispatch_matrix() {
     );
 
     assert_eq!(
-        exec_bt::execute("connect:F4:4E:FC:21:40:48", "", None).unwrap(),
+        exec_bt::execute("connect:F4:4E:FC:21:40:48", "", Some("")).unwrap(),
         exec_bt::ExecuteReport {
             action_id: "connect:F4:4E:FC:21:40:48".to_string(),
             detail: Some("F4:4E:FC:21:40:48".to_string()),
@@ -317,7 +317,7 @@ fn executor_dispatch_matrix() {
     );
 
     assert_eq!(
-        exec_bt::execute("sink:F4:4E:FC:21:40:48", "", None).unwrap(),
+        exec_bt::execute("sink:F4:4E:FC:21:40:48", "", Some("")).unwrap(),
         exec_bt::ExecuteReport {
             action_id: "sink:F4:4E:FC:21:40:48".to_string(),
             detail: Some("F4:4E:FC:21:40:48".to_string()),
@@ -325,7 +325,7 @@ fn executor_dispatch_matrix() {
     );
 
     assert_eq!(
-        exec_bt::execute("profile:a2dp:F4:4E:FC:21:40:48", "", None).unwrap(),
+        exec_bt::execute("profile:a2dp:F4:4E:FC:21:40:48", "", Some("")).unwrap(),
         exec_bt::ExecuteReport {
             action_id: "profile:a2dp:F4:4E:FC:21:40:48".to_string(),
             detail: Some("F4:4E:FC:21:40:48".to_string()),

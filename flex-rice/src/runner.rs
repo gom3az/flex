@@ -26,9 +26,11 @@ use flex_core::backend::{EXIT_CANCELLED, EXIT_ERROR, EXIT_OK};
 use flex_core::{CharSet, CharSetName, Menu, Outcome, Peaks, Theme, ThemeName};
 
 use crate::{menu, popup, providers};
-use providers::{bt, center, clip, launch, net, power, proc, shot, theme_, wallpaper, wifi};
+use providers::{
+    bt, center, clip, launch, net, notify, power, proc, shot, theme_, wallpaper, wifi,
+};
 
-/// The eleven menu providers, one per `flex-<name>` binary.
+/// The twelve menu providers, one per `flex-<name>` binary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provider {
     /// Shutdown/reboot/logout menu.
@@ -53,11 +55,13 @@ pub enum Provider {
     Net,
     /// Native Bluetooth manager.
     Bt,
+    /// Notification Center drawer.
+    Notify,
 }
 
 impl Provider {
     /// Every provider, in binary-name order.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Power,
         Self::Launch,
         Self::Shot,
@@ -69,6 +73,7 @@ impl Provider {
         Self::Proc,
         Self::Net,
         Self::Bt,
+        Self::Notify,
     ];
 
     /// Parse a provider subcommand/binary name (`None` for anything else).
@@ -86,6 +91,7 @@ impl Provider {
             "proc" => Some(Self::Proc),
             "net" => Some(Self::Net),
             "bt" => Some(Self::Bt),
+            "notify" => Some(Self::Notify),
             _ => None,
         }
     }
@@ -105,6 +111,7 @@ impl Provider {
             Self::Proc => proc::PROVIDER,
             Self::Net => net::PROVIDER,
             Self::Bt => bt::PROVIDER,
+            Self::Notify => notify::PROVIDER,
         }
     }
 
@@ -115,8 +122,8 @@ impl Provider {
     }
 
     /// Popup variant for this provider (`menu` for power/shot/theme/wifi/bt,
-    /// `menu-wide` for launch/clip/center/wallpaper/proc/net — see
-    /// [`popup::MENU_VARIANT`] / [`popup::WIDE_VARIANT`]).
+    /// `menu-wide` for launch/clip/center/wallpaper/proc/net, `drawer` for notify — see
+    /// [`popup::MENU_VARIANT`] / [`popup::WIDE_VARIANT`] / [`popup::DRAWER_VARIANT`]).
     #[must_use]
     pub fn variant(self) -> &'static str {
         match self {
@@ -124,6 +131,7 @@ impl Provider {
             Self::Launch | Self::Clip | Self::Center | Self::Wallpaper | Self::Proc | Self::Net => {
                 popup::WIDE_VARIANT
             }
+            Self::Notify => popup::DRAWER_VARIANT,
         }
     }
 
@@ -135,6 +143,7 @@ impl Provider {
             Self::Launch | Self::Clip | Self::Center | Self::Wallpaper | Self::Proc | Self::Net => {
                 popup::WIDE_CLASS
             }
+            Self::Notify => popup::DRAWER_CLASS,
         }
     }
 }
@@ -334,6 +343,7 @@ pub fn build_menu(provider: Provider, style: StyleOptions) -> Result<Menu> {
         Provider::Proc => Ok(style.apply(menu(proc::PROVIDER, vec![proc::proc_tab()]))),
         Provider::Net => Ok(style.apply(net::net_menu())),
         Provider::Bt => Ok(style.apply(bt::bt_menu())),
+        Provider::Notify => Ok(style.apply(notify::menu())),
     }
 }
 
@@ -505,6 +515,7 @@ mod tests {
                 "launch" | "clip" | "center" | "wallpaper" | "proc" | "net" => {
                     ("menu-wide", popup::WIDE_CLASS)
                 }
+                "notify" => ("drawer", popup::DRAWER_CLASS),
                 other => panic!("unexpected provider {other}"),
             };
             assert_eq!(provider.variant(), variant);

@@ -13,6 +13,7 @@ pub mod clip;
 pub mod launch;
 pub mod mixer;
 pub mod net;
+pub mod notify;
 pub mod power;
 pub mod proc;
 pub mod record;

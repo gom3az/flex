@@ -66,6 +66,10 @@ path = "src/bin/flex-net.rs"
 name = "flex-bt"
 path = "src/bin/flex-bt.rs"
 
+[[bin]]
+name = "flex-notify"
+path = "src/bin/flex-notify.rs"
+
 [dependencies]
 # The engine, built from the sibling `flex-core` member (see the workspace root).
 flex-core.workspace = true
@@ -73,6 +77,8 @@ anyhow.workspace = true
 clap.workspace = true
 crossterm.workspace = true
 ratatui.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

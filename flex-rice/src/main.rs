@@ -114,6 +114,12 @@ enum Command {
         #[arg(long)]
         print_action: bool,
     },
+    /// Notification Center drawer.
+    Notify {
+        /// Print the selected `ACTION:` line without executing it.
+        #[arg(long)]
+        print_action: bool,
+    },
 }
 
 /// Non-interactive `clip` verbs forwarded to `flex-clip` (mirrors the
@@ -240,6 +246,12 @@ fn run() -> Result<()> {
             reexec(Provider::Net, style, *print_action, &[String::from("-m")])
         }
         Command::Bt { print_action } => reexec(Provider::Bt, style, *print_action, &[]),
+        Command::Notify { print_action } => reexec(
+            Provider::Notify,
+            style,
+            *print_action,
+            &[String::from("-m")],
+        ),
     }
 }
 

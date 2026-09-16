@@ -1,0 +1,388 @@
+//! Notification center engine, persistence, entity extractors, and quick control probes.
+//!
+//! Provides safe, high-performance state management for `flex-notify`, including:
+//! - In-flight progress updates and notification threading
+//! - Regex-free / robust entity extraction (2FA/OTP codes, URLs, hex colors)
+//! - Quick system toggles (DND presets, Night Light, Caffeine, Mic mute)
+//! - MPRIS track info and playback commands
+//! - Persistent runtime store at `$XDG_RUNTIME_DIR/flex-notify.json`
+
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use serde::{Deserialize, Serialize};
+
+/// Urgency level matching the `FreeDesktop` notification specification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Urgency {
+    Low,
+    Normal,
+    Critical,
+}
+
+impl Urgency {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Normal => "normal",
+            Self::Critical => "critical",
+        }
+    }
+}
+
+/// Action button attached to a notification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotificationAction {
+    pub id: String,
+    pub title: String,
+}
+
+/// A rich notification item stored in the feed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NotificationItem {
+    pub id: u32,
+    pub app_name: String,
+    pub summary: String,
+    pub body: String,
+    pub urgency: Urgency,
+    pub timestamp: u64,
+    pub progress: Option<f32>,
+    pub app_icon: Option<String>,
+    pub image_path: Option<String>,
+    pub actions: Vec<NotificationAction>,
+    pub is_pinned: bool,
+    pub is_snoozed: bool,
+    pub snooze_until: Option<u64>,
+    pub is_dismissed: bool,
+}
+
+impl NotificationItem {
+    /// Create a new notification with default flags.
+    #[must_use]
+    pub fn new(
+        id: u32,
+        app_name: impl Into<String>,
+        summary: impl Into<String>,
+        body: impl Into<String>,
+        urgency: Urgency,
+    ) -> Self {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        Self {
+            id,
+            app_name: app_name.into(),
+            summary: summary.into(),
+            body: body.into(),
+            urgency,
+            timestamp,
+            progress: None,
+            app_icon: None,
+            image_path: None,
+            actions: Vec::new(),
+            is_pinned: urgency == Urgency::Critical,
+            is_snoozed: false,
+            snooze_until: None,
+            is_dismissed: false,
+        }
+    }
+}
+
+/// Extracted actionable entity from notification text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExtractedEntity {
+    OtpCode(String),
+    Url(String),
+    HexColor(String),
+}
+
+/// Extract actionable entities (OTP 2FA codes, URLs, hex color codes) from text.
+#[must_use]
+pub fn extract_entities(text: &str) -> Vec<ExtractedEntity> {
+    let mut entities = Vec::new();
+
+    // 1. Scan for URLs (https:// or http://)
+    for word in text.split_whitespace() {
+        let trimmed = word.trim_matches(|c: char| {
+            c == '('
+                || c == ')'
+                || c == '<'
+                || c == '>'
+                || c == '"'
+                || c == '\''
+                || c == ','
+                || c == '.'
+        });
+        if trimmed.starts_with("https://") || trimmed.starts_with("http://") {
+            entities.push(ExtractedEntity::Url(trimmed.to_string()));
+        }
+    }
+
+    // 2. Scan for Hex color codes (#RRGGBB)
+    for word in text.split_whitespace() {
+        let trimmed = word.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '#');
+        if trimmed.starts_with('#') && (trimmed.len() == 7 || trimmed.len() == 4) {
+            let hex_part = &trimmed[1..];
+            if hex_part.chars().all(|c| c.is_ascii_hexdigit()) {
+                entities.push(ExtractedEntity::HexColor(trimmed.to_string()));
+            }
+        }
+    }
+
+    // 3. Scan for OTP / 2FA verification codes (4 to 8 consecutive digits)
+    let words: Vec<&str> = text.split_whitespace().collect();
+    for (i, &word) in words.iter().enumerate() {
+        let clean = word.trim_matches(|c: char| !c.is_ascii_digit());
+        if (4..=8).contains(&clean.len()) && clean.chars().all(|c| c.is_ascii_digit()) {
+            // Check context if available or if standalone
+            let is_contextual = if i > 0 {
+                let prev = words[i - 1].to_lowercase();
+                prev.contains("code")
+                    || prev.contains("otp")
+                    || prev.contains("pin")
+                    || prev.contains("is")
+                    || prev.contains("verification")
+            } else {
+                false
+            };
+            if (is_contextual || clean.len() == 6)
+                && !entities
+                    .iter()
+                    .any(|e| matches!(e, ExtractedEntity::OtpCode(c) if c == clean))
+            {
+                entities.push(ExtractedEntity::OtpCode(clean.to_string()));
+            }
+        }
+    }
+
+    entities
+}
+
+/// Do Not Disturb state machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DndState {
+    Off,
+    Indefinite,
+    Timed { until: u64, total_secs: u64 },
+}
+
+impl DndState {
+    #[must_use]
+    pub fn is_active(self, now: u64) -> bool {
+        match self {
+            Self::Off => false,
+            Self::Indefinite => true,
+            Self::Timed { until, .. } => now < until,
+        }
+    }
+
+    #[must_use]
+    pub fn remaining_secs(self, now: u64) -> Option<u64> {
+        match self {
+            Self::Timed { until, .. } if now < until => Some(until - now),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn fraction_remaining(self, now: u64) -> Option<f32> {
+        match self {
+            Self::Timed { until, total_secs } if total_secs > 0 && now < until => {
+                let remaining = until.saturating_sub(now);
+                #[allow(clippy::cast_precision_loss)]
+                Some(((remaining as f32) / (total_secs as f32)).clamp(0.0, 1.0))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// MPRIS Now Playing track status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MprisTrack {
+    pub player: String,
+    pub title: String,
+    pub artist: String,
+    pub album: Option<String>,
+    pub position_secs: u64,
+    pub length_secs: u64,
+    pub is_playing: bool,
+}
+
+/// Status of connected peripheral batteries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeripheralDevice {
+    pub name: String,
+    pub battery: u8,
+    pub icon: String,
+}
+
+/// Quick controls shelf snapshot.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QuickControls {
+    pub dnd: DndState,
+    pub night_light: bool,
+    pub caffeine: bool,
+    pub mic_muted: bool,
+    pub wifi_ssid: Option<String>,
+    pub bluetooth_status: Option<String>,
+    pub peripherals: Vec<PeripheralDevice>,
+    pub mpris: Option<MprisTrack>,
+}
+
+impl Default for QuickControls {
+    fn default() -> Self {
+        Self {
+            dnd: DndState::Off,
+            night_light: false,
+            caffeine: false,
+            mic_muted: false,
+            wifi_ssid: None,
+            bluetooth_status: None,
+            peripherals: Vec::new(),
+            mpris: None,
+        }
+    }
+}
+
+/// Complete runtime state stored in `$XDG_RUNTIME_DIR/flex-notify.json`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct NotifyState {
+    pub notifications: Vec<NotificationItem>,
+    pub controls: QuickControls,
+    pub muted_apps: Vec<String>,
+    pub priority_apps: Vec<String>,
+}
+
+/// Resolve the path to the runtime state JSON file.
+#[must_use]
+pub fn state_file_path() -> PathBuf {
+    if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
+        PathBuf::from(runtime_dir).join("flex-notify.json")
+    } else {
+        std::env::temp_dir().join("flex-notify.json")
+    }
+}
+
+/// Load state from JSON file, returning default state if missing or corrupted.
+#[must_use]
+pub fn load_state(path: Option<&Path>) -> NotifyState {
+    let default_path = state_file_path();
+    let file = path.unwrap_or(&default_path);
+
+    if let Ok(content) = std::fs::read_to_string(file) {
+        if let Ok(state) = serde_json::from_str::<NotifyState>(&content) {
+            return state;
+        }
+    }
+    NotifyState::default()
+}
+
+/// Save state to JSON file with atomic rename.
+///
+/// # Errors
+/// Returns error if file cannot be created or serialized.
+pub fn save_state(state: &NotifyState, path: Option<&Path>) -> anyhow::Result<()> {
+    let default_path = state_file_path();
+    let file = path.unwrap_or(&default_path);
+
+    let json = serde_json::to_string_pretty(state)?;
+    let tmp_file = file.with_extension("tmp");
+    std::fs::write(&tmp_file, json)?;
+    std::fs::rename(tmp_file, file)?;
+    Ok(())
+}
+
+/// Format relative time (e.g. "Just Now", "2m ago", "1h ago", "2d ago").
+#[must_use]
+pub fn format_relative_time(timestamp: u64, now: u64) -> String {
+    if now <= timestamp || now - timestamp < 45 {
+        return String::from("Just Now");
+    }
+    let diff = now - timestamp;
+    if diff < 3600 {
+        let mins = diff / 60;
+        format!("{mins}m ago")
+    } else if diff < 86400 {
+        let hours = diff / 3600;
+        format!("{hours}h ago")
+    } else {
+        let days = diff / 86400;
+        format!("{days}d ago")
+    }
+}
+
+/// Format duration in mm:ss.
+#[must_use]
+pub fn format_duration(seconds: u64) -> String {
+    let mins = seconds / 60;
+    let secs = seconds % 60;
+    format!("{mins:02}:{secs:02}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn entity_extractor_detects_otp_urls_and_colors() {
+        let text = "Your GitHub verification code is 849201. Please visit https://github.com/login and use theme #7aa2f7.";
+        let entities = extract_entities(text);
+
+        assert_eq!(
+            entities,
+            vec![
+                ExtractedEntity::Url("https://github.com/login".to_string()),
+                ExtractedEntity::HexColor("#7aa2f7".to_string()),
+                ExtractedEntity::OtpCode("849201".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn relative_time_formatting() {
+        assert_eq!(format_relative_time(1000, 1020), "Just Now");
+        assert_eq!(format_relative_time(1000, 1120), "2m ago");
+        assert_eq!(format_relative_time(1000, 4600), "1h ago");
+        assert_eq!(format_relative_time(1000, 90000), "1d ago");
+    }
+
+    #[test]
+    fn dnd_state_calculations() {
+        let dnd = DndState::Timed {
+            until: 2000,
+            total_secs: 1000,
+        };
+        assert!(dnd.is_active(1500));
+        assert!(!dnd.is_active(2500));
+        assert_eq!(dnd.remaining_secs(1500), Some(500));
+        assert_eq!(dnd.fraction_remaining(1500), Some(0.5));
+    }
+
+    #[test]
+    fn state_save_and_load_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("flex-notify-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("test-state.json");
+
+        let mut state = NotifyState::default();
+        state.notifications.push(NotificationItem::new(
+            1,
+            "Discord",
+            "#dev-team",
+            "Message body",
+            Urgency::Normal,
+        ));
+        state.controls.night_light = true;
+
+        save_state(&state, Some(&path)).expect("saved");
+        let loaded = load_state(Some(&path));
+
+        assert_eq!(loaded.notifications.len(), 1);
+        assert_eq!(loaded.notifications[0].app_name, "Discord");
+        assert!(loaded.controls.night_light);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

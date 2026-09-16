@@ -12,6 +12,7 @@ pub mod center;
 pub mod clip;
 pub mod launch;
 pub mod net;
+pub mod notify;
 pub mod power;
 pub mod proc;
 pub mod shot;
@@ -58,6 +59,9 @@ pub fn tick_hook(menu: &mut Menu) {
     }
     if menu.provider == bt::PROVIDER {
         bt::refresh(menu);
+    }
+    if menu.provider == notify::PROVIDER {
+        notify::refresh(menu);
     }
 }
 

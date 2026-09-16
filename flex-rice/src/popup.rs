@@ -31,16 +31,24 @@ pub const MENU_CLASS: &str = "flex-menu";
 /// Providers: `launch`, `clip`, `center`, `wallpaper`.
 pub const WIDE_CLASS: &str = "flex-menu-wide";
 
+/// Window class for the notification center drawer (`drawer`) variant.
+///
+/// Providers: `notify`.
+pub const DRAWER_CLASS: &str = "flex-notify-center";
+
 /// Variant name for the compact popup (the `popup.sh` spelling).
 pub const MENU_VARIANT: &str = "menu";
 
 /// Variant name for the wide popup (the `popup.sh` spelling).
 pub const WIDE_VARIANT: &str = "menu-wide";
 
+/// Variant name for the notification center drawer.
+pub const DRAWER_VARIANT: &str = "drawer";
+
 /// Map a popup variant to its window class.
 ///
-/// Accepts both the `popup.sh` variant spellings (`menu`, `menu-wide`) and
-/// the already-resolved class names (`flex-menu`, `flex-menu-wide`;
+/// Accepts both the `popup.sh` variant spellings (`menu`, `menu-wide`, `drawer`) and
+/// the already-resolved class names (`flex-menu`, `flex-menu-wide`, `flex-notify-center`;
 /// idempotent, so callers holding either spelling converge). Returns `None`
 /// for anything else — `popup.sh` rejects unknown variants with a usage
 /// error, and this is the typed equivalent.
@@ -50,6 +58,8 @@ pub fn class_for(variant: &str) -> Option<&'static str> {
         Some(MENU_CLASS)
     } else if variant == WIDE_VARIANT || variant == WIDE_CLASS {
         Some(WIDE_CLASS)
+    } else if variant == DRAWER_VARIANT || variant == DRAWER_CLASS {
+        Some(DRAWER_CLASS)
     } else {
         None
     }
@@ -342,14 +352,17 @@ mod tests {
     fn class_constants_are_the_new_names() {
         assert_eq!(MENU_CLASS, "flex-menu");
         assert_eq!(WIDE_CLASS, "flex-menu-wide");
+        assert_eq!(DRAWER_CLASS, "flex-notify-center");
     }
 
     #[test]
     fn class_for_maps_variants_and_passes_classes_through() {
         assert_eq!(class_for("menu"), Some(MENU_CLASS));
         assert_eq!(class_for("menu-wide"), Some(WIDE_CLASS));
+        assert_eq!(class_for("drawer"), Some(DRAWER_CLASS));
         assert_eq!(class_for(MENU_CLASS), Some(MENU_CLASS), "idempotent");
         assert_eq!(class_for(WIDE_CLASS), Some(WIDE_CLASS), "idempotent");
+        assert_eq!(class_for(DRAWER_CLASS), Some(DRAWER_CLASS), "idempotent");
         assert_eq!(class_for(""), None);
         assert_eq!(class_for("kitty-menu"), None, "old names are gone");
         assert_eq!(class_for("bogus"), None);

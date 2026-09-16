@@ -119,12 +119,13 @@ fn sample_json_emits_valid_waybar_payload() {
 }
 
 #[test]
-fn net_menu_constructs_both_tabs() {
+fn net_menu_constructs_all_tabs() {
     let menu = net_provider::net_menu();
     assert_eq!(menu.provider, net_provider::PROVIDER);
-    assert_eq!(menu.app.tabs.len(), 2);
+    assert_eq!(menu.app.tabs.len(), 3);
     assert_eq!(menu.app.tabs[0].name, net_provider::TAB_BANDWIDTH);
     assert_eq!(menu.app.tabs[1].name, net_provider::TAB_INTERFACES);
+    assert_eq!(menu.app.tabs[2].name, net_provider::TAB_SPEEDTEST);
 }
 
 #[test]
