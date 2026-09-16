@@ -116,6 +116,7 @@ use anyhow::Result;
 
 use crate::exec::center::NotifyWhen;
 use crate::providers::{center, wifi};
+use crate::spawn::RetryExec as _;
 
 /// A validated wifi action id (`flex-wifi.sh:174-185` arms; the SSID travels
 /// in the label, never in the whitespace-split id token).
@@ -457,7 +458,7 @@ fn tool_quiet(path_env: &str, name: &str, args: &[String]) -> bool {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
+        .status_retrying()
         .is_ok_and(|status| status.success())
 }
 
@@ -470,7 +471,7 @@ fn tool_captured(path_env: &str, name: &str, args: &[String]) -> Option<String> 
         .args(args)
         .stdin(Stdio::null())
         .stderr(Stdio::null())
-        .output()
+        .output_retrying()
         .ok()?;
     Some(String::from_utf8_lossy(&output.stdout).into_owned())
 }
@@ -583,7 +584,7 @@ fn set_echo(path_env: &str, on: bool) {
         .stdin(tty)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status();
+        .status_retrying();
 }
 
 /// Secure-wifi password: `FLEX_WIFI_PASSWORD` when set and non-empty, else

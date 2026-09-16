@@ -50,6 +50,7 @@ use std::process::{Command, Stdio};
 use anyhow::{Context as _, Result};
 
 use crate::providers::launch;
+use crate::spawn::RetryExec as _;
 use crate::terminal::{self, TerminalKind};
 
 /// A validated launch action id.
@@ -186,7 +187,7 @@ fn tool(path_env: &str, args: &[String]) -> Result<bool> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
+        .status_retrying()
         .with_context(|| String::from("launch: failed to run setsid"))?;
     Ok(status.success())
 }

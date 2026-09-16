@@ -104,25 +104,9 @@ fn resolve_tool(name: &str, path_env: &str) -> Option<PathBuf> {
 /// Retry a process call while it fails with a transient `ETXTBSY`
 /// (`ExecutableFileBusy`).
 ///
-/// A tool path is momentarily "busy" while some process holds it open for
-/// writing. That is rare in production but inherent to the stub-`PATH` tests,
-/// which write a tool script and exec it while other tests in the same process
-/// fork; a forked child can inherit the writer's descriptor until its own
-/// `exec`. The condition clears in microseconds, so a short bounded retry is
-/// enough, and every other error propagates unchanged.
-fn retrying<T>(mut run: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
-    let mut last = None;
-    for _ in 0..50 {
-        match run() {
-            Ok(value) => return Ok(value),
-            Err(err) if err.kind() == std::io::ErrorKind::ExecutableFileBusy => {
-                last = Some(err);
-                std::thread::sleep(std::time::Duration::from_millis(2));
-            }
-            Err(err) => return Err(err),
-        }
-    }
-    Err(last.unwrap_or_else(|| std::io::Error::other("popup: exec stayed busy")))
+/// See [`crate::spawn`] for the rationale; this is the shared wrapper.
+fn retrying<T>(run: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    crate::spawn::retrying(run)
 }
 
 /// Whether a popup of `class` is currently open (`pgrep -f "<class> "`).

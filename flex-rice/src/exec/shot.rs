@@ -36,6 +36,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result};
 
 use crate::popup;
+use crate::spawn::RetryExec as _;
 
 /// Capture rows in bash `case`-arm order (screenshots, then recordings).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -373,7 +374,7 @@ fn tool(path_env: &str, name: &str, args: &[String], stdin_file: Option<&Path>) 
     let output = cmd
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .output()
+        .output_retrying()
         .with_context(|| format!("shot: failed to run {name}"))?;
     Ok(ToolOut {
         ok: output.status.success(),
@@ -648,7 +649,7 @@ fn spawn_detached_worker(id: ShotId, filepath: &Path, rec: &Path, path_env: &str
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn()
+        .spawn_retrying()
         .context("shot: failed to detach the capture worker")?;
     Ok(())
 }
@@ -669,7 +670,7 @@ fn close_popup(path_env: &str) {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .status();
+            .status_retrying();
     }
     let Some(pgrep) = resolve_tool("pgrep", path_env) else {
         return;
@@ -681,7 +682,7 @@ fn close_popup(path_env: &str) {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .output()
+            .output_retrying()
             .is_ok_and(|output| output.status.success());
         if !open {
             break;

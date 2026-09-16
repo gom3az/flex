@@ -70,6 +70,8 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context as _, Result};
 
+use crate::spawn::RetryExec as _;
+
 /// A validated power action id (the wrapper's two-stage check: bad id, then
 /// case arm). `Unknown` is well-formed but unsupported — the wrapper's `*)`
 /// arm, not its `bad id` exit.
@@ -234,7 +236,7 @@ fn tool(path_env: &str, name: &str, args: &[String]) -> Result<bool> {
     let status = Command::new(&bin)
         .args(args)
         .stdin(Stdio::null())
-        .status()
+        .status_retrying()
         .with_context(|| format!("power: failed to run {name}"))?;
     Ok(status.success())
 }
@@ -252,7 +254,7 @@ fn tool_quiet(path_env: &str, name: &str, args: &[String]) -> bool {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
+        .status_retrying()
         .is_ok_and(|status| status.success())
 }
 

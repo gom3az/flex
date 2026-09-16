@@ -52,6 +52,7 @@ use std::path::Path;
 use flex_core::{Menu, Row, RowId, Tab};
 
 use super::{launch, theme_};
+use crate::spawn::RetryExec as _;
 
 /// Provider name for the `ACTION:` line.
 pub const PROVIDER: &str = "center";
@@ -130,7 +131,10 @@ pub(crate) fn snapshot(file_env: &str, cmd: &str, args: &[&str]) -> Option<Strin
         }
         return std::fs::read_to_string(path).ok();
     }
-    let output = std::process::Command::new(cmd).args(args).output().ok()?;
+    let output = std::process::Command::new(cmd)
+        .args(args)
+        .output_retrying()
+        .ok()?;
     if output.status.success() {
         Some(String::from_utf8_lossy(&output.stdout).into_owned())
     } else {

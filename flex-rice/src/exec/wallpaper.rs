@@ -48,6 +48,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result};
 
 use crate::providers::wallpaper;
+use crate::spawn::RetryExec as _;
 
 /// A validated wallpaper action id: the 16-char lowercase-hex row hash.
 ///
@@ -165,7 +166,7 @@ fn tool(path_env: &str, name: &str, args: &[String]) -> Result<bool> {
     let status = Command::new(&bin)
         .args(args)
         .stdin(Stdio::null())
-        .status()
+        .status_retrying()
         .with_context(|| format!("wallpaper: failed to run {name}"))?;
     Ok(status.success())
 }
@@ -186,7 +187,7 @@ fn run_optional(path_env: &str, name: &str, args: &[String], stdin: Option<&[u8]
     } else {
         cmd.stdin(Stdio::null());
     }
-    let mut child = cmd.spawn().ok()?;
+    let mut child = cmd.spawn_retrying().ok()?;
     if let Some(input) = stdin {
         if let Some(mut handle) = child.stdin.take() {
             let _ = handle.write_all(input);
@@ -241,7 +242,7 @@ fn current_uid(path_env: &str) -> Result<u32> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .output()
+        .output_retrying()
         .context("wallpaper: failed to run id")?;
     let text = String::from_utf8_lossy(&output.stdout);
     text.trim()
@@ -262,7 +263,7 @@ fn spawn_hyprpaper(path_env: &str) {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .spawn();
+            .spawn_retrying();
         return;
     }
     if let Some(hyprpaper) = resolve_tool("hyprpaper", path_env) {
@@ -270,7 +271,7 @@ fn spawn_hyprpaper(path_env: &str) {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .spawn();
+            .spawn_retrying();
     }
 }
 

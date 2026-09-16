@@ -104,6 +104,7 @@ use anyhow::{Context as _, Result};
 
 use crate::exec::theme;
 use crate::providers::{center, launch};
+use crate::spawn::RetryExec as _;
 use crate::terminal::{self, TerminalKind};
 
 /// Which menu outcome is being executed: the wrapper has live `select` and
@@ -612,7 +613,7 @@ fn tool(path_env: &str, name: &str, args: &[String]) -> Result<bool> {
     let status = Command::new(&bin)
         .args(args)
         .stdin(Stdio::null())
-        .status()
+        .status_retrying()
         .with_context(|| format!("center: failed to run {name}"))?;
     Ok(status.success())
 }
@@ -629,7 +630,7 @@ fn tool_quiet(path_env: &str, name: &str, args: &[String]) -> bool {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
+        .status_retrying()
         .is_ok_and(|status| status.success())
 }
 
@@ -642,7 +643,7 @@ fn tool_captured(path_env: &str, name: &str, args: &[String]) -> Option<String> 
         .args(args)
         .stdin(Stdio::null())
         .stderr(Stdio::null())
-        .output()
+        .output_retrying()
         .ok()?;
     Some(String::from_utf8_lossy(&output.stdout).into_owned())
 }
@@ -735,7 +736,7 @@ fn set_echo(path_env: &str, on: bool) {
         .stdin(tty)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status();
+        .status_retrying();
 }
 
 /// Whether any application directory currently holds `desk_id` (tells the
@@ -1152,7 +1153,7 @@ fn run_detached(path_env: &str, args: &[String]) -> Result<bool> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
+        .status_retrying()
         .with_context(|| String::from("center: failed to run setsid"))?;
     Ok(status.success())
 }

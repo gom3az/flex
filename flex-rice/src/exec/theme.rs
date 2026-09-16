@@ -40,6 +40,7 @@ use std::process::{Command, Stdio};
 use anyhow::{Context as _, Result};
 
 use crate::providers::theme_;
+use crate::spawn::RetryExec as _;
 
 /// A validated theme action id.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,7 +159,7 @@ fn tool(path_env: &str, name: &str, args: &[String]) -> Result<bool> {
     let status = Command::new(&bin)
         .args(args)
         .stdin(Stdio::null())
-        .status()
+        .status_retrying()
         .with_context(|| format!("theme: failed to run {name}"))?;
     Ok(status.success())
 }
@@ -178,7 +179,7 @@ fn run_optional(path_env: &str, name: &str, args: &[String], stdin: Option<&[u8]
     } else {
         cmd.stdin(Stdio::null());
     }
-    let mut child = cmd.spawn().ok()?;
+    let mut child = cmd.spawn_retrying().ok()?;
     if let Some(input) = stdin {
         if let Some(mut handle) = child.stdin.take() {
             let _ = handle.write_all(input);

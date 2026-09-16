@@ -62,6 +62,7 @@ use std::process::{Command, Stdio};
 use anyhow::{Context as _, Result};
 
 use crate::providers::clip;
+use crate::spawn::RetryExec as _;
 
 /// Which menu outcome is being executed: clip is the only provider (besides
 /// `center`/`wifi`) whose rows are deletable, so the binary
@@ -282,7 +283,7 @@ fn tool_piped(path_env: &str, name: &str, args: &[String], stdin_bytes: &[u8]) -
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn()
+        .spawn_retrying()
         .with_context(|| format!("clip: failed to run {name}"))?;
     {
         let Some(stdin) = child.stdin.as_mut() else {
@@ -315,7 +316,7 @@ fn tool(path_env: &str, name: &str, args: &[String]) -> Result<bool> {
     let status = Command::new(&bin)
         .args(args)
         .stdin(Stdio::null())
-        .status()
+        .status_retrying()
         .with_context(|| format!("clip: failed to run {name}"))?;
     Ok(status.success())
 }
