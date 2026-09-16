@@ -106,12 +106,136 @@ enum NotifyOp {
     ClearAll,
     /// Toggle Do Not Disturb mode
     ToggleDnd,
+    /// Render a transient toast overlay for a notification and auto-dismiss
+    Toast {
+        /// Notification ID to render
+        id: u32,
+    },
 }
 
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
+}
+
+/// Render a 2-line toast card and auto-dismiss after a timeout.
+///
+/// - Normal/Low: 5 s auto-dismiss; any keypress opens the notification center.
+/// - Critical:   stays until any key is pressed.
+///
+/// The window is rendered directly to stdout without ratatui so the kitty
+/// instance stays tiny.  Hyprland positions it via the `flex-notify-toast`
+/// window rule.
+fn run_toast(id: u32, state_path: Option<&std::path::Path>) {
+    use std::io::Write as _;
+
+    let state = notify::load_state(state_path);
+    let now = now_secs();
+
+    let item = state.notifications.iter().find(|n| n.id == id);
+    let Some(item) = item else {
+        return;
+    };
+
+    let urgency = item.urgency;
+    let is_critical = urgency == Urgency::Critical;
+    let timeout_secs: u64 = if is_critical { 0 } else { 5 };
+
+    // ── Badge icon ───────────────────────────────────────────────────────────
+    let icon = match urgency {
+        Urgency::Critical => "󰀦",
+        Urgency::Normal => "󰂚",
+        Urgency::Low => "󰂞",
+    };
+
+    // ── Truncate body to 72 chars ────────────────────────────────────────────
+    let body_preview = if item.body.is_empty() {
+        String::new()
+    } else {
+        let trimmed = item.body.replace('\n', " ");
+        if trimmed.len() > 72 {
+            format!("{}…", &trimmed[..71])
+        } else {
+            trimmed
+        }
+    };
+
+    let rel = notify::format_relative_time(item.timestamp, now);
+
+    // ── Render ───────────────────────────────────────────────────────────────
+    // Clear screen + hide cursor
+    print!("\x1b[2J\x1b[H\x1b[?25l");
+
+    // Line 1: icon + app · summary  +  rel time right-aligned (approx)
+    println!(
+        "{icon}  \x1b[1m{}\x1b[0m · {}  \x1b[2m{rel}\x1b[0m",
+        item.app_name, item.summary
+    );
+
+    // Line 2: body preview (dim) or blank
+    if body_preview.is_empty() {
+        println!();
+    } else {
+        println!("   \x1b[2m{body_preview}\x1b[0m");
+    }
+
+    // Line 3: hint
+    if is_critical {
+        println!("\x1b[2m   [any key] open • [q] dismiss\x1b[0m");
+    } else {
+        println!("\x1b[2m   auto-dismiss in {timeout_secs}s  •  [any key] open\x1b[0m");
+    }
+
+    let _ = std::io::stdout().flush();
+
+    // ── Input / timeout ──────────────────────────────────────────────────────
+    // Put terminal in raw mode so we get single keystrokes.
+    let _ = std::process::Command::new("stty")
+        .args(["-echo", "raw", "-icanon", "min", "0", "time", "1"])
+        .status();
+
+    let deadline = if timeout_secs > 0 {
+        Some(std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs))
+    } else {
+        None
+    };
+
+    let mut buf = [0u8; 1];
+    let mut open_center = false;
+    loop {
+        use std::io::Read as _;
+        let n = std::io::stdin().read(&mut buf).unwrap_or(0);
+        if n > 0 {
+            // 'q' or ESC = quiet dismiss; anything else = open center
+            if buf[0] != b'q' && buf[0] != 0x1b {
+                open_center = true;
+            }
+            break;
+        }
+        if let Some(dl) = deadline {
+            if std::time::Instant::now() >= dl {
+                break;
+            }
+        }
+    }
+
+    // Restore terminal
+    let _ = std::process::Command::new("stty").arg("sane").status();
+
+    // Show cursor again
+    print!("\x1b[?25h");
+    let _ = std::io::stdout().flush();
+
+    if open_center {
+        // Detach so this process can exit while the drawer opens
+        let _ = std::process::Command::new("flex-notify")
+            .args(["--menu"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
 }
 
 fn main() {
@@ -270,6 +394,10 @@ fn handle_op(op: NotifyOp, state_path: Option<&Path>) -> anyhow::Result<()> {
             };
             notify::save_state(&state, state_path)?;
             println!("DND toggled");
+            Ok(())
+        }
+        NotifyOp::Toast { id } => {
+            run_toast(id, state_path);
             Ok(())
         }
     }

@@ -735,6 +735,7 @@ impl NotificationServer {
 
         if !is_dnd && !is_app_muted && !suppress_sound {
             play_notification_sound(urgency, false);
+            spawn_toast(target_id, self.state_path.as_deref());
         }
 
         target_id
@@ -755,6 +756,33 @@ impl NotificationServer {
         id: u32,
         action_key: &str,
     ) -> zbus::Result<()>;
+}
+
+/// Spawn a transient toast overlay for a newly-arrived notification.
+///
+/// Launches `kitty --class flex-notify-toast -o font_size=10 -e flex-notify
+/// toast <id>` detached (stdio nulled).  The toast binary renders a 2-line
+/// card and auto-dismisses after a timeout.  Errors are silently ignored so
+/// a missing binary never kills the daemon.
+pub fn spawn_toast(id: u32, state_path: Option<&Path>) {
+    let mut cmd = std::process::Command::new("kitty");
+    cmd.args([
+        "--class",
+        "flex-notify-toast",
+        "-o",
+        "font_size=11",
+        "-e",
+        "flex-notify",
+    ]);
+    if let Some(p) = state_path {
+        cmd.args(["--state-file", &p.display().to_string()]);
+    }
+    cmd.args(["toast", &id.to_string()]);
+    let _ = cmd
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
 }
 
 /// Run the D-Bus Notification daemon.
