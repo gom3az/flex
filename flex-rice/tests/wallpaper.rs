@@ -544,6 +544,16 @@ struct EnvGuard {
 /// with restores in [`EnvGuard`].
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// The serialising lock for env-mutating tests, recovering from a poisoned
+/// lock so one panicking sibling does not fail every other holder with a
+/// `PoisonError` that masks the real failure. The panicking test's
+/// [`EnvGuard`]s already restored the environment during unwinding.
+fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn set_env(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> EnvGuard {
     let old = std::env::var_os(key);
     std::env::set_var(key, value);
@@ -605,7 +615,7 @@ fn stub_path_env(dir: &std::path::Path) -> String {
 /// sets through the setter seam as one call with the path intact.
 #[test]
 fn executor_matrix_sets_every_wallpaper_through_the_setter_seam() {
-    let _env = ENV_LOCK.lock().expect("env lock");
+    let _env = env_lock();
     let dir = scratch("exec-matrix");
     std::fs::create_dir_all(&dir).expect("stub dir");
     let walls = install_wallpaper_dirs("matrix");
@@ -640,7 +650,7 @@ fn executor_matrix_sets_every_wallpaper_through_the_setter_seam() {
 /// override is an error (never a silent empty spawn).
 #[test]
 fn executor_setter_seam_prefers_override_then_home_default() {
-    let _env = ENV_LOCK.lock().expect("env lock");
+    let _env = env_lock();
     let dir = scratch("exec-seam");
     std::fs::create_dir_all(&dir).expect("stub dir");
     let setter = install_setter(&dir, "set-wallpaper.sh");
@@ -676,7 +686,7 @@ fn executor_setter_seam_prefers_override_then_home_default() {
 /// their own — the runner adds the single prefix at the binary boundary.
 #[test]
 fn executor_rejects_bad_and_unknown_ids_without_its_own_prefix() {
-    let _env = ENV_LOCK.lock().expect("env lock");
+    let _env = env_lock();
     let dir = scratch("exec-bad");
     std::fs::create_dir_all(&dir).expect("stub dir");
     let walls = install_wallpaper_dirs("bad");
@@ -720,7 +730,7 @@ fn executor_rejects_bad_and_unknown_ids_without_its_own_prefix() {
 /// `Outcome::Cancelled` arm, shared with shot/theme, and needs a pty).
 #[test]
 fn executor_tool_failure_is_a_loud_error_not_a_quiet_cancel() {
-    let _env = ENV_LOCK.lock().expect("env lock");
+    let _env = env_lock();
     let dir = scratch("exec-fail");
     std::fs::create_dir_all(&dir).expect("stub dir");
     let walls = install_wallpaper_dirs("fail");
@@ -744,9 +754,19 @@ fn executor_tool_failure_is_a_loud_error_not_a_quiet_cancel() {
 /// with exactly one `flex: error:` prefix (the runner owns it; executor
 /// errors carry none). `setsid` detaches the controlling terminal so no
 /// harness tty can satisfy the TUI init.
+///
+/// A fixture store is installed because an *empty* store exits 130 with the
+/// `no wallpapers found` diagnostic before the tty probe; relying on the
+/// ambient `$HOME` made this test pass only on machines that happened to have
+/// wallpapers (it exited 130 in CI, poisoning the env lock for its siblings).
 #[test]
 fn binary_errors_carry_a_single_prefix() {
-    let _env = ENV_LOCK.lock().expect("env lock");
+    let _env = env_lock();
+    let home = scratch("binary-prefix-home");
+    std::fs::create_dir_all(&home).expect("home dir");
+    let walls = install_wallpaper_dirs("binary-prefix");
+    let _dirs = set_env("WALLPAPER_DIRS", &walls);
+    let _home = set_env("HOME", &home);
     let output = std::process::Command::new("setsid")
         .arg(env!("CARGO_BIN_EXE_flex-wallpaper"))
         .env("POPUP_KITTY", "1")
@@ -771,7 +791,7 @@ fn binary_errors_carry_a_single_prefix() {
 /// shared runner guard); the kitty spawn is asserted against a stub `PATH`.
 #[test]
 fn binary_outside_a_popup_reexecs_into_the_wide_popup() {
-    let _env = ENV_LOCK.lock().expect("env lock");
+    let _env = env_lock();
     let dir = scratch("exec-guard");
     let home = scratch("exec-guard-home");
     std::fs::create_dir_all(&dir).expect("stub dir");
