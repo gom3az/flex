@@ -55,6 +55,9 @@ pub const PLACEHOLDER: &str = "<NEWLINE>";
 pub const HIST_ENV: &str = "CLIPHIST_FILE";
 /// Env override for the pins file (honored by bash too; empty = default).
 pub const PINS_ENV: &str = "CLIPHIST_PINS";
+/// Env override for the current-entry file (test seam; bash hardcodes
+/// `$HOME/.cache/cliphist.current`, empty = default).
+pub const CURRENT_ENV: &str = "CLIPHIST_CURRENT";
 
 /// One cleaned history line plus its precomputed row rendering data.
 ///
@@ -82,6 +85,16 @@ pub fn hist_path() -> PathBuf {
 #[must_use]
 pub fn pins_path() -> PathBuf {
     env_override(PINS_ENV).unwrap_or_else(|| home_dir().join(".cache/cliphist.pins"))
+}
+
+/// Current-entry file path (`$CLIPHIST_CURRENT`, else
+/// `$HOME/.cache/cliphist.current`).
+///
+/// Bash hardcodes the default (`cliphist.sh:6`); the env seam exists so the
+/// `add`/`pin`/`unpin` verbs are testable without touching `$HOME`.
+#[must_use]
+pub fn current_path() -> PathBuf {
+    env_override(CURRENT_ENV).unwrap_or_else(|| home_dir().join(".cache/cliphist.current"))
 }
 
 /// Load entries from the real store (env-overridden paths).
@@ -214,6 +227,16 @@ pub fn resolve_in(hist: &Path, pins: &Path, hash: &str) -> Option<String> {
 #[must_use]
 pub fn decode(encoded: &str) -> String {
     encoded.replace(PLACEHOLDER, "\n")
+}
+
+/// Encode an entry for storage (real newlines → the `<NEWLINE>` placeholder).
+///
+/// The inverse of [`decode`] and the exact effect of the wrapper's
+/// `sed ':a;N;$!ba;s/\n/<NEWLINE>/g'` slurp (`cliphist.sh:18,50,78`); used by
+/// the `add`/`pin`/`unpin` verbs.
+#[must_use]
+pub fn encode(raw: &str) -> String {
+    raw.replace('\n', PLACEHOLDER)
 }
 
 /// Read a store file into cleaned non-empty lines (file order).

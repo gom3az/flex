@@ -387,13 +387,13 @@ fn scrub_file(path: &Path, raw: &[u8]) -> Result<bool> {
 }
 
 /// Append `raw` plus a trailing newline to `path` (the wrapper's
-/// `printf '%s\n' "$raw" >> "$PINFILE"`), creating parent dirs and the file
+/// `printf '%s\n' "$raw" >> "$file"`), creating parent dirs and the file
 /// first (the wrapper's `mkdir -p` + `touch`).
 ///
 /// # Errors
 ///
 /// When dirs cannot be created or the rewrite fails.
-fn append_pin(path: &Path, raw: &[u8]) -> Result<()> {
+fn append_line(path: &Path, raw: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)
@@ -496,7 +496,7 @@ pub fn execute_with(
                 scrub_file(pins, raw.as_bytes())?;
             }
             Step::AppendPin { raw } => {
-                append_pin(pins, raw.as_bytes())?;
+                append_line(pins, raw.as_bytes())?;
             }
             Step::Notify { summary, preview } => {
                 let args = vec![
@@ -520,6 +520,228 @@ pub fn execute_with(
             None
         },
     })
+}
+
+// === `cliphist.sh` add/pin/unpin/current verbs (the non-TUI entry points) ===
+//
+// The retired wrapper's `add`/`pin`/`unpin`/`read_current` are ported here so
+// `wl-paste --watch` and the `pin` bind no longer need bash. Semantics mirror
+// `cliphist.sh` exactly (encode `<NEWLINE>`, exact-line dedupe, `.tmp`+`mv`
+// scrub, the verbatim notify messages), with one documented departure shared
+// with the ACTION path: previews are the first 50 bytes of the *decoded* text,
+// lossy-decoded (never a raw byte split).
+
+/// Send a `notify-send -a Cliphist <summary> <body>` line.
+///
+/// # Errors
+///
+/// When `notify-send` is missing or exits non-zero. Messages carry no
+/// `flex:` prefix.
+fn notify(path_env: &str, summary: &str, body: &str) -> Result<()> {
+    let args = vec![
+        String::from("-a"),
+        String::from("Cliphist"),
+        summary.to_string(),
+        body.to_string(),
+    ];
+    if !tool(path_env, "notify-send", &args)? {
+        anyhow::bail!("clip: notify-send failed");
+    }
+    Ok(())
+}
+
+/// Read the current clipboard via `wl-paste` (stdout captured, stderr
+/// discarded), mirroring `cliphist.sh:11`.
+///
+/// A non-zero `wl-paste` exit is not an error: the wrapper pipes through `tr`
+/// under `|| true`, so whatever stdout it produced is used.
+///
+/// # Errors
+///
+/// When `wl-paste` is missing from `path_env` or the spawn itself fails.
+fn read_clipboard(path_env: &str) -> Result<String> {
+    let Some(bin) = resolve_tool("wl-paste", path_env) else {
+        anyhow::bail!("clip: wl-paste not found on PATH");
+    };
+    let output = Command::new(&bin)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output_retrying()
+        .context("clip: failed to run wl-paste")?;
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Decode the current-entry file the way `read_current` does: strip `NUL`s,
+/// drop trailing newlines, decode `<NEWLINE>` → newlines. Missing/empty →
+/// `""`.
+#[must_use]
+fn current_decoded(current: &Path) -> String {
+    let Ok(bytes) = std::fs::read(current) else {
+        return String::new();
+    };
+    let stripped: Vec<u8> = bytes.iter().copied().filter(|byte| *byte != 0).collect();
+    let text = String::from_utf8_lossy(&stripped);
+    clip::decode(text.trim_end_matches('\n'))
+}
+
+/// Overwrite the current-entry file with the encoded line plus a newline
+/// (`echo "$multiline" > "$CURRFILE"`), creating parent dirs.
+///
+/// # Errors
+///
+/// When the parent dir cannot be created or the write fails.
+fn write_current(current: &Path, encoded: &str) -> Result<()> {
+    if let Some(parent) = current.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("clip: cannot create {}", parent.display()))?;
+        }
+    }
+    let mut bytes = encoded.as_bytes().to_vec();
+    bytes.push(b'\n');
+    std::fs::write(current, &bytes)
+        .with_context(|| format!("clip: cannot write {}", current.display()))?;
+    Ok(())
+}
+
+/// Exact-line membership in a store file (`grep -Fxq`).
+#[must_use]
+fn file_contains(path: &Path, raw: &[u8]) -> bool {
+    std::fs::read(path).is_ok_and(|bytes| store_contains(&bytes, raw))
+}
+
+/// The verb text for `pin`/`unpin`: a non-empty argument, else the decoded
+/// current entry (the wrapper's `[[ -n "${2:-}" ]]` guard around
+/// `read_current`).
+#[must_use]
+fn verb_text(text: Option<&str>, current: &Path) -> String {
+    match text {
+        Some(value) if !value.is_empty() => value.to_string(),
+        _ => current_decoded(current),
+    }
+}
+
+/// `cliphist.sh add`: capture the current clipboard (NULs and trailing
+/// newlines stripped), encode newlines, overwrite the current entry, then
+/// append to history unless the exact line is already present.
+///
+/// An empty clipboard is a no-op (exit 0), like the wrapper.
+///
+/// # Errors
+///
+/// When `wl-paste` is missing/fails or a store write fails. Messages carry no
+/// `flex:` prefix; the runner reports them.
+pub fn add(path_env: Option<&str>) -> Result<()> {
+    let path_env = path_env.map_or_else(ambient_path, str::to_string);
+    let clipboard = read_clipboard(&path_env)?;
+    add_with(&clipboard, &clip::hist_path(), &clip::current_path())
+}
+
+/// [`add`] with the clipboard text and paths given (the test seam).
+///
+/// # Errors
+///
+/// When a store write fails.
+pub fn add_with(clipboard: &str, hist: &Path, current: &Path) -> Result<()> {
+    let stripped: String = clipboard.chars().filter(|ch| *ch != '\0').collect();
+    let trimmed = stripped.trim_end_matches('\n');
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+    let encoded = clip::encode(trimmed);
+    write_current(current, &encoded)?;
+    if !file_contains(hist, encoded.as_bytes()) {
+        append_line(hist, encoded.as_bytes())?;
+    }
+    Ok(())
+}
+
+/// `cliphist.sh pin`: pin the current entry, or the given non-empty text.
+///
+/// # Errors
+///
+/// When the pins rewrite fails or `notify-send` fails. Messages carry no
+/// `flex:` prefix; the runner reports them.
+pub fn pin(text: Option<&str>, path_env: Option<&str>) -> Result<()> {
+    let path_env = path_env.map_or_else(ambient_path, str::to_string);
+    let decoded = verb_text(text, &clip::current_path());
+    pin_with(&decoded, &clip::pins_path(), &path_env)
+}
+
+/// [`pin`] with the decoded text and pins path given (the test seam).
+///
+/// # Errors
+///
+/// When the pins rewrite fails or `notify-send` fails.
+pub fn pin_with(decoded: &str, pins: &Path, path_env: &str) -> Result<()> {
+    if decoded.is_empty() {
+        return notify(
+            path_env,
+            "Nothing to pin",
+            "Clipboard is empty — copy something first",
+        );
+    }
+    let encoded = clip::encode(decoded);
+    let shown = preview(decoded);
+    if is_pinned(pins, &encoded) {
+        return notify(path_env, "Already pinned", &shown);
+    }
+    append_line(pins, encoded.as_bytes())?;
+    notify(path_env, "Pinned to history", &shown)
+}
+
+/// `cliphist.sh unpin`: unpin the current entry, or the given non-empty text.
+///
+/// # Errors
+///
+/// When the pins scrub fails or `notify-send` fails. Messages carry no
+/// `flex:` prefix; the runner reports them.
+pub fn unpin(text: Option<&str>, path_env: Option<&str>) -> Result<()> {
+    let path_env = path_env.map_or_else(ambient_path, str::to_string);
+    let decoded = verb_text(text, &clip::current_path());
+    unpin_with(&decoded, &clip::pins_path(), &path_env)
+}
+
+/// [`unpin`] with the decoded text and pins path given (the test seam).
+///
+/// # Errors
+///
+/// When the pins scrub fails or `notify-send` fails.
+pub fn unpin_with(decoded: &str, pins: &Path, path_env: &str) -> Result<()> {
+    if decoded.is_empty() {
+        return notify(path_env, "Nothing to unpin", "Clipboard is empty");
+    }
+    if !pins.exists() {
+        return notify(path_env, "Nothing unpinned", "No pinned items exist");
+    }
+    let encoded = clip::encode(decoded);
+    let shown = preview(decoded);
+    if is_pinned(pins, &encoded) {
+        scrub_file(pins, encoded.as_bytes())?;
+        notify(path_env, "Unpinned", &shown)
+    } else {
+        notify(path_env, "Not pinned", &shown)
+    }
+}
+
+/// `cliphist.sh` `read_current`: print the decoded current entry plus a
+/// trailing newline (nothing when the entry is empty).
+///
+/// # Errors
+///
+/// When stdout cannot be written. Messages carry no `flex:` prefix.
+pub fn current() -> Result<()> {
+    let decoded = current_decoded(&clip::current_path());
+    if decoded.is_empty() {
+        return Ok(());
+    }
+    let mut out = std::io::stdout();
+    out.write_all(decoded.as_bytes())
+        .context("clip: cannot write current entry")?;
+    out.write_all(b"\n")
+        .context("clip: cannot write current entry")?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -635,5 +857,129 @@ mod tests {
         assert!(store_contains(b"flip me\nother\n", b"flip me"));
         assert!(!store_contains(b"flip me extended\nother\n", b"flip me"));
         assert!(!store_contains(b"", b"flip me"));
+    }
+
+    /// Unique scratch dir for one test (tests run in parallel).
+    fn scratch(name: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "flex-clip-verbs-{}-{name}-{seq}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    /// Install a no-op `notify-send` stub in `dir` and return it as a `PATH`
+    /// value (so `pin_with`/`unpin_with` report without a live tool).
+    fn notify_stub(dir: &Path) -> String {
+        let stub = dir.join("notify-send");
+        std::fs::write(&stub, "#!/bin/sh\nexit 0\n").expect("write notify stub");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod notify stub");
+        }
+        dir.display().to_string()
+    }
+
+    #[test]
+    fn add_encodes_strips_nuls_and_dedupes() {
+        let dir = scratch("add");
+        let hist = dir.join("hist");
+        let current = dir.join("current");
+        add_with("alpha\nbeta\0\n", &hist, &current).expect("add");
+        // NUL stripped, trailing newline trimmed, internal newline encoded.
+        assert_eq!(
+            std::fs::read(&current).expect("current"),
+            b"alpha<NEWLINE>beta\n".to_vec(),
+        );
+        assert_eq!(
+            std::fs::read(&hist).expect("hist"),
+            b"alpha<NEWLINE>beta\n".to_vec(),
+        );
+        // Second add of the same entry updates current but does not re-append.
+        add_with("alpha\nbeta\n", &hist, &current).expect("add again");
+        assert_eq!(
+            std::fs::read(&hist).expect("hist"),
+            b"alpha<NEWLINE>beta\n".to_vec(),
+            "exact-line dedupe",
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn add_of_an_empty_clipboard_is_a_no_op() {
+        let dir = scratch("add-empty");
+        let hist = dir.join("hist");
+        let current = dir.join("current");
+        add_with("\n", &hist, &current).expect("add");
+        assert!(!hist.exists());
+        assert!(!current.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn current_decoded_decodes_the_stored_entry() {
+        let dir = scratch("current");
+        let current = dir.join("current");
+        std::fs::write(&current, b"a<NEWLINE>b\n").expect("write");
+        assert_eq!(current_decoded(&current), "a\nb");
+        assert_eq!(current_decoded(&dir.join("missing")), "");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verb_text_prefers_a_non_empty_argument() {
+        let dir = scratch("verb-text");
+        let current = dir.join("current");
+        std::fs::write(&current, b"stored\n").expect("write");
+        assert_eq!(verb_text(Some("given"), &current), "given");
+        assert_eq!(verb_text(Some(""), &current), "stored");
+        assert_eq!(verb_text(None, &current), "stored");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pin_appends_once_and_reports_state() {
+        let dir = scratch("pin");
+        let path_env = notify_stub(&dir);
+        let pins = dir.join("pins");
+        pin_with("entry", &pins, &path_env).expect("pin");
+        assert_eq!(std::fs::read(&pins).expect("pins"), b"entry\n".to_vec());
+        pin_with("entry", &pins, &path_env).expect("pin again");
+        assert_eq!(
+            std::fs::read(&pins).expect("pins"),
+            b"entry\n".to_vec(),
+            "already-pinned does not re-append",
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unpin_scrubs_only_a_present_entry() {
+        let dir = scratch("unpin");
+        let path_env = notify_stub(&dir);
+        let pins = dir.join("pins");
+        std::fs::write(&pins, b"keep\ndrop\n").expect("write");
+        unpin_with("drop", &pins, &path_env).expect("unpin");
+        assert_eq!(std::fs::read(&pins).expect("pins"), b"keep\n".to_vec());
+        unpin_with("absent", &pins, &path_env).expect("unpin absent");
+        assert_eq!(
+            std::fs::read(&pins).expect("pins"),
+            b"keep\n".to_vec(),
+            "not-pinned leaves the file untouched",
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn encode_decode_round_trip() {
+        assert_eq!(clip::encode("a\nb"), "a<NEWLINE>b");
+        assert_eq!(clip::decode("a<NEWLINE>b"), "a\nb");
     }
 }

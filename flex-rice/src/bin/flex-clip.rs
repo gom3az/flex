@@ -14,13 +14,14 @@
 //! [`runner`]: flex_rice::runner
 //! [`exec::clip`]: flex_rice::exec::clip
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use flex_core::backend::EXIT_CANCELLED;
 use flex_core::Outcome;
 use flex_rice::exec::clip::{self, ClipOp};
 use flex_rice::runner::{self, GlobalStyle, Provider};
 
-/// Clipboard history: select a row and copy, delete, or (un)pin it.
+/// Clipboard history: select a row and copy, delete, or (un)pin it; or run
+/// one non-interactive store verb (`add`/`pin`/`unpin`/`current`).
 #[derive(Debug, Parser)]
 #[command(name = "flex-clip", version, about = "Clipboard history")]
 struct Cli {
@@ -32,6 +33,29 @@ struct Cli {
     /// probe of the real binary's row→action mapping with no pty.
     #[arg(long)]
     print_action: bool,
+
+    /// Non-interactive store verb; without one the interactive picker runs.
+    #[command(subcommand)]
+    op: Option<Op>,
+}
+
+/// The ported `cliphist.sh` entry points (`sel` is the default picker).
+#[derive(Debug, Subcommand)]
+enum Op {
+    /// Capture the current clipboard into the history store.
+    Add,
+    /// Pin the current clipboard entry, or `TEXT` when given.
+    Pin {
+        /// Text to pin instead of the current clipboard entry.
+        text: Option<String>,
+    },
+    /// Unpin the current clipboard entry, or `TEXT` when given.
+    Unpin {
+        /// Text to unpin instead of the current clipboard entry.
+        text: Option<String>,
+    },
+    /// Print the current clipboard entry (decoded).
+    Current,
 }
 
 fn main() {
@@ -41,15 +65,24 @@ fn main() {
     }
 }
 
-/// Parse args, guard the popup, then select+execute.
+/// Parse args: a store verb runs directly (no popup, no TUI); otherwise guard
+/// the popup and select+execute.
 ///
 /// # Errors
 ///
-/// Returns an error when the popup toggle or the select loop fails, the
-/// action id is unknown, or the copy/delete/toggle cannot run. The error
-/// carries no `flex:` prefix; `main` adds it via the runner.
+/// Returns an error when a verb fails, the popup toggle or the select loop
+/// fails, the action id is unknown, or the copy/delete/toggle cannot run. The
+/// error carries no `flex:` prefix; `main` adds it via the runner.
 fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    if let Some(op) = cli.op {
+        return match op {
+            Op::Add => clip::add(None),
+            Op::Pin { text } => clip::pin(text.as_deref(), None),
+            Op::Unpin { text } => clip::unpin(text.as_deref(), None),
+            Op::Current => clip::current(),
+        };
+    }
     let style = cli.style.options();
     runner::popup_guard(Provider::Clip)?;
     if cli.print_action {

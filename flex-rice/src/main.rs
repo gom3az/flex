@@ -68,6 +68,9 @@ enum Command {
         /// Print the selected `ACTION:` line without executing it.
         #[arg(long)]
         print_action: bool,
+        /// Optional non-interactive store verb (`add`/`pin`/`unpin`/`current`).
+        #[command(subcommand)]
+        op: Option<ClipVerb>,
     },
     /// Control center (volume/brightness/network).
     Center {
@@ -87,6 +90,40 @@ enum Command {
         #[arg(long)]
         print_action: bool,
     },
+}
+
+/// Non-interactive `clip` verbs forwarded to `flex-clip` (mirrors the
+/// `Op` enum in `bin/flex-clip.rs`).
+#[derive(Debug, Subcommand)]
+enum ClipVerb {
+    /// Capture the current clipboard into the history store.
+    Add,
+    /// Pin the current clipboard entry, or `TEXT` when given.
+    Pin { text: Option<String> },
+    /// Unpin the current clipboard entry, or `TEXT` when given.
+    Unpin { text: Option<String> },
+    /// Print the current clipboard entry (decoded).
+    Current,
+}
+
+/// Re-exec tokens for a `clip` verb (`add`/`pin TEXT`/`unpin TEXT`/`current`).
+fn clip_verb_tail(op: Option<&ClipVerb>) -> Vec<String> {
+    match op {
+        None => Vec::new(),
+        Some(ClipVerb::Add) => vec![String::from("add")],
+        Some(ClipVerb::Current) => vec![String::from("current")],
+        Some(ClipVerb::Pin { text }) => verb_with_text("pin", text.as_deref()),
+        Some(ClipVerb::Unpin { text }) => verb_with_text("unpin", text.as_deref()),
+    }
+}
+
+/// `[verb]` or `[verb, text]` for the pin/unpin verbs.
+fn verb_with_text(verb: &str, text: Option<&str>) -> Vec<String> {
+    let mut tail = vec![verb.to_string()];
+    if let Some(value) = text {
+        tail.push(value.to_string());
+    }
+    tail
 }
 
 fn main() {
@@ -110,14 +147,21 @@ fn run() -> Result<()> {
     let style = cli.style.options();
     match &cli.command {
         Command::Popup { variant, cmd } => run_popup(variant, cmd),
-        Command::Power { print_action } => reexec(Provider::Power, style, *print_action),
-        Command::Launch { print_action } => reexec(Provider::Launch, style, *print_action),
-        Command::Shot { print_action } => reexec(Provider::Shot, style, *print_action),
-        Command::Theme { print_action } => reexec(Provider::Theme, style, *print_action),
-        Command::Clip { print_action } => reexec(Provider::Clip, style, *print_action),
-        Command::Center { print_action } => reexec(Provider::Center, style, *print_action),
-        Command::Wallpaper { print_action } => reexec(Provider::Wallpaper, style, *print_action),
-        Command::Wifi { print_action } => reexec(Provider::Wifi, style, *print_action),
+        Command::Power { print_action } => reexec(Provider::Power, style, *print_action, &[]),
+        Command::Launch { print_action } => reexec(Provider::Launch, style, *print_action, &[]),
+        Command::Shot { print_action } => reexec(Provider::Shot, style, *print_action, &[]),
+        Command::Theme { print_action } => reexec(Provider::Theme, style, *print_action, &[]),
+        Command::Clip { print_action, op } => reexec(
+            Provider::Clip,
+            style,
+            *print_action,
+            &clip_verb_tail(op.as_ref()),
+        ),
+        Command::Center { print_action } => reexec(Provider::Center, style, *print_action, &[]),
+        Command::Wallpaper { print_action } => {
+            reexec(Provider::Wallpaper, style, *print_action, &[])
+        }
+        Command::Wifi { print_action } => reexec(Provider::Wifi, style, *print_action, &[]),
     }
 }
 
@@ -146,6 +190,20 @@ fn reexec_argv(provider: Provider, style: StyleOptions, print_action: bool) -> V
     argv
 }
 
+/// [`reexec_argv`] plus trailing verb tokens (e.g. `["pin", "text"]`), which
+/// the child parses as its subcommand after the global flags.
+#[must_use]
+fn reexec_argv_with(
+    provider: Provider,
+    style: StyleOptions,
+    print_action: bool,
+    extra: &[String],
+) -> Vec<String> {
+    let mut argv = reexec_argv(provider, style, print_action);
+    argv.extend(extra.iter().cloned());
+    argv
+}
+
 /// Sibling `flex-<name>` binary next to the running dispatcher.
 ///
 /// # Errors
@@ -159,14 +217,20 @@ fn sibling_binary(name: &str) -> Result<PathBuf> {
     Ok(dir.join(name))
 }
 
-/// Re-exec the provider binary with canonical flags and exit with its code.
+/// Re-exec the provider binary with canonical flags (plus any verb tokens)
+/// and exit with its code.
 ///
 /// # Errors
 ///
 /// When the sibling binary cannot be located or spawned. A running child
 /// that exits (any code) never returns an error: its code becomes ours.
-fn reexec(provider: Provider, style: StyleOptions, print_action: bool) -> Result<()> {
-    let argv = reexec_argv(provider, style, print_action);
+fn reexec(
+    provider: Provider,
+    style: StyleOptions,
+    print_action: bool,
+    extra: &[String],
+) -> Result<()> {
+    let argv = reexec_argv_with(provider, style, print_action, extra);
     let program = argv.first().map(String::as_str).unwrap_or_default();
     let bin = sibling_binary(program)?;
     let tail: Vec<&str> = argv.iter().skip(1).map(String::as_str).collect();
