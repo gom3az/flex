@@ -13,7 +13,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use flex_core::backend::EXIT_CANCELLED;
 use flex_core::Outcome;
 use flex_rice::exec::notify::{self, DndState, Urgency};
@@ -55,6 +55,39 @@ struct Cli {
     /// State file override (for testing)
     #[arg(long = "state-file", hide = true)]
     state_file: Option<PathBuf>,
+
+    /// Direct notification operations
+    #[command(subcommand)]
+    op: Option<NotifyOp>,
+}
+
+#[derive(Debug, Subcommand)]
+enum NotifyOp {
+    /// Post a new notification into the notification feed
+    Send {
+        /// Notification summary / title
+        summary: String,
+
+        /// Notification body
+        #[arg(default_value = "")]
+        body: String,
+
+        /// Application name
+        #[arg(short = 'a', long = "app", default_value = "System")]
+        app: String,
+
+        /// Urgency level (low, normal, critical)
+        #[arg(short = 'u', long = "urgency", default_value = "normal")]
+        urgency: String,
+
+        /// In-flight progress fraction (0.0 - 1.0)
+        #[arg(short = 'p', long = "progress")]
+        progress: Option<f32>,
+    },
+    /// Clear all non-critical notifications
+    ClearAll,
+    /// Toggle Do Not Disturb mode
+    ToggleDnd,
 }
 
 fn now_secs() -> u64 {
@@ -151,6 +184,48 @@ fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let state_path = cli.state_file.as_deref();
     let style = cli.style.options();
+
+    if let Some(op) = cli.op {
+        return match op {
+            NotifyOp::Send {
+                summary,
+                body,
+                app,
+                urgency,
+                progress,
+            } => {
+                let urg = Urgency::parse(&urgency);
+                let mut item = notify::NotificationItem::new(0, app, summary, body, urg);
+                item.progress = progress;
+                let id = notify::post_notification(item, state_path)?;
+                println!("Notification {id} posted");
+                Ok(())
+            }
+            NotifyOp::ClearAll => {
+                let mut state = notify::load_state(state_path);
+                for n in &mut state.notifications {
+                    if !n.is_pinned && n.urgency != Urgency::Critical {
+                        n.is_dismissed = true;
+                    }
+                }
+                notify::save_state(&state, state_path)?;
+                println!("Cleared active notifications");
+                Ok(())
+            }
+            NotifyOp::ToggleDnd => {
+                let mut state = notify::load_state(state_path);
+                let now = now_secs();
+                state.controls.dnd = if state.controls.dnd.is_active(now) {
+                    DndState::Off
+                } else {
+                    DndState::Indefinite
+                };
+                notify::save_state(&state, state_path)?;
+                println!("DND toggled");
+                Ok(())
+            }
+        };
+    }
 
     if cli.clear_all {
         let mut state = notify::load_state(state_path);

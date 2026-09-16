@@ -29,6 +29,15 @@ impl Urgency {
             Self::Critical => "critical",
         }
     }
+
+    #[must_use]
+    pub fn parse(s: &str) -> Self {
+        match s.to_ascii_lowercase().as_str() {
+            "low" => Self::Low,
+            "critical" | "crit" => Self::Critical,
+            _ => Self::Normal,
+        }
+    }
 }
 
 /// Action button attached to a notification.
@@ -403,6 +412,23 @@ pub fn save_state(state: &NotifyState, path: Option<&Path>) -> anyhow::Result<()
     std::fs::write(&tmp_file, json)?;
     std::fs::rename(tmp_file, file)?;
     Ok(())
+}
+
+/// Append a new notification to the active state store.
+///
+/// # Errors
+/// Returns error if state cannot be loaded or saved.
+pub fn post_notification(item: NotificationItem, path: Option<&Path>) -> anyhow::Result<u32> {
+    let mut state = load_state(path);
+    let next_id = state.notifications.iter().map(|n| n.id).max().unwrap_or(0) + 1;
+    let mut final_item = item;
+    if final_item.id == 0 {
+        final_item.id = next_id;
+    }
+    let assigned_id = final_item.id;
+    state.notifications.push(final_item);
+    save_state(&state, path)?;
+    Ok(assigned_id)
 }
 
 /// Format relative time (e.g. "Just Now", "2m ago", "1h ago", "2d ago").
