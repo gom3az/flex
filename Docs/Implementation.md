@@ -5,13 +5,13 @@ Companion specs: `Docs/project_structure.md`, `Docs/UI_UX_doc.md`, `Docs/Bug_tra
 
 ## Frozen decisions (do not revisit without a new review)
 
-- `ratatui =0.29.0` (NOT 0.30). Pinned with `=` in `flex/Cargo.toml`, `crossterm` feature only.
+- `ratatui =0.29.0` (NOT 0.30). Pinned with `=` in `Cargo.toml`, `crossterm` feature only.
   Single `crossterm` major in the tree — verified via `cargo tree` (see M0 gate).
-- Hand-rolled fuzzy filter (~150 lines, `src/filter.rs`), tiers:
+- Hand-rolled fuzzy filter (~150 lines, `flex-core/src/filter.rs`), tiers:
   `prefix 100 > prefix-word 80 > consecutive-run>=3 60 > word-boundary 40 > scattered 10`,
   with gap/offset penalties; ordered-subsequence is REQUIRED for a match.
   Signature kept `nucleo`-swappable (rank fn behind a trait / free-fn seam).
-- `unicode-width 0.2` non-CJK display-width handling (`src/width.rs`).
+- `unicode-width 0.2` non-CJK display-width handling (`flex-core/src/width.rs`).
 - `clap 4` derive + `anyhow` for CLI/errors.
 - NO `serde`/`toml` in v1. CI grep check rejects them:
   `! rg -l '"serde"|"toml"|serde::|toml::' flex-core/src flex-rice/src flex-core/tests flex-rice/tests`.
@@ -19,9 +19,9 @@ Companion specs: `Docs/project_structure.md`, `Docs/UI_UX_doc.md`, `Docs/Bug_tra
 - Q2: clipboard `action_id` = content-hash hex (`RowId`, see `project_structure.md`).
 - Q3: danger-arm timing — 50 ms confirm delay + 5 s arm expiry
   (`keys::ARM_CONFIRM_DELAY` / `keys::ARM_EXPIRE`; hold/repeat swallowed,
-  single-`Enter` never confirms; release-gated by `tests/power.rs`).
+  single-`Enter` never confirms; release-gated by `flex-rice/tests/power.rs`).
 - Q4: release profile `panic="abort" strip=true lto=true`.
-- Q5: commit `Cargo.lock`; gitignore + stow-ignore `flex/target/`.
+- Q5: commit `Cargo.lock`; gitignore + stow-ignore `target/`.
 - Q6: `q` quits only in NORMAL mode + empty filter (else it edits the filter).
 - Q7: 1 s gauge tick; offline state renders dim `— offline`.
 - Q8: no `serde`/`toml` in v1 (std-only parsing; CI grep gate rejects them).
@@ -36,8 +36,8 @@ Companion specs: `Docs/project_structure.md`, `Docs/UI_UX_doc.md`, `Docs/Bug_tra
 | `crossterm` | single major via `cargo tree` | `/dev/tty` backend event/terminal control | https://docs.rs/crossterm |
 | `clap` | `4` derive | `power\|launch\|shot\|theme\|clip\|center` subcommands | https://docs.rs/clap/4 |
 | `anyhow` | `1` | Error context in binary/providers | https://docs.rs/anyhow |
-| `unicode-width` | `0.2` | `src/width.rs` display-width truncation | https://docs.rs/unicode-width/0.2 |
-| `criterion` (dev) | `0.5` | `benches/rerank.rs` | https://docs.rs/criterion |
+| `unicode-width` | `0.2` | `flex-core/src/width.rs` display-width truncation | https://docs.rs/unicode-width/0.2 |
+| `criterion` (dev) | `0.5` | `flex-core/benches/rerank.rs` | https://docs.rs/criterion |
 | `pretty_assertions` (dev) | `1` | Readable golden diffs | https://docs.rs/pretty_assertions |
 
 MSRV: Rust 1.96 stable. `rustfmt.toml` mirrors wiremix (`max_width=100`).
@@ -50,7 +50,7 @@ Risk register drove this order — highest-unknown work is pulled earliest:
 1. **Clipboard perf spike → pulled into M1** (not M4/M5). Rationale: clipboard
    history can be 10k+ rows; naive re-rank per keystroke or full redraw kills the
    60 fps / <16 ms frame budget. M1 prototypes the corpus + `clip_perf` test +
-   `benches/rerank.rs` skeleton so M2 providers inherit a proven budget.
+   `flex-core/benches/rerank.rs` skeleton so M2 providers inherit a proven budget.
 2. **Danger-timing + `FLEX_TEST` seed → M1.** Danger rows (`shutdown`, `reboot`,
    `format`) need triple-coding + confirm timing defined before any provider
    ships; `FLEX_TEST` deterministic seed is needed for golden/key tests from day
@@ -76,50 +76,50 @@ Risk register drove this order — highest-unknown work is pulled earliest:
 
 ## M0 — Scaffold (THIS PHASE)
 
-- [ ] `flex/Cargo.toml`: pinned `ratatui =0.29.0` (`crossterm` feature), `clap` derive,
+- [ ] `Cargo.toml`: pinned `ratatui =0.29.0` (`crossterm` feature), `clap` derive,
       `anyhow`, `unicode-width`; dev `criterion` + `pretty_assertions`;
       `[lints] unsafe deny, clippy all+pedantic deny`;
       `[profile.release] lto=true strip=true panic="abort"`.
 - [ ] `rustfmt.toml` (`max_width=100`, wiremix mirror), `LICENSE-MIT`, `LICENSE-APACHE`,
       `CHANGELOG.md` skeleton, `README.md` (`ACTION:` protocol + wrapper recipes
       placeholder + cutover table).
-- [ ] `src/lib.rs`: pub `Row`/`Tab`/`Mode`/`Outcome`/`Theme`/`Provider`/`App` types.
-- [ ] `src/main.rs`: `clap` subcommands `power|launch|shot|theme|clip|center`, stubs
+- [ ] `flex-core/src/lib.rs`: pub `Row`/`Tab`/`Mode`/`Outcome`/`Theme`/`Provider`/`App` types.
+- [ ] `flex-rice/src/main.rs`: `clap` subcommands `power|launch|shot|theme|clip|center`, stubs
       returning exits (no TUI yet).
-- [ ] `src/backend.rs`: `/dev/tty` alt-screen init/restore via `ratatui::init`/`restore`;
+- [ ] `flex-core/src/backend.rs`: `/dev/tty` alt-screen init/restore via `ratatui::init`/`restore`;
       `ACTION:` single-line stdout writer; exit codes `0/130/1`.
 - [ ] Stub modules `filter`/`width`/`render`/`keys`/`providers`/`theme` with `TODO(M1)` markers.
-- [ ] `tests/golden.rs`: one passing `TestBackend` test (empty tab bar @80x24).
-- [ ] `.gitignore` + `.stow-local-ignore` entries for `flex/target/`.
+- [ ] `flex-rice/tests/golden.rs`: one passing `TestBackend` test (empty tab bar @80x24).
+- [ ] `.gitignore` + `.stow-local-ignore` entries for `target/`.
 - [ ] Gates: `cargo fmt --check` && `cargo clippy --all-targets -- -D warnings` &&
       `cargo test` all green; `cargo tree` shows a single `crossterm` major.
 
 ## M1 — Core (filter/width/render/keys/theme/backend)
 
-- [x] `src/filter.rs`: hand-rolled fuzzy (~150 lines); tiers
+- [x] `flex-core/src/filter.rs`: hand-rolled fuzzy (~150 lines); tiers
       `100/80/60/40/10` + gap/offset penalties; ordered-subsequence required;
       `nucleo`-swappable rank seam. Unit tests for each tier + penalty ordering.
-- [x] `src/width.rs`: `unicode-width 0.2` truncation/padding; `…` ellipsis;
-      CJK out-of-scope (documented); `tests/dwidth.rs` fixtures.
-- [x] `src/theme.rs`: hardcoded `Theme` tokens per `UI_UX_doc.md`
+- [x] `flex-core/src/width.rs`: `unicode-width 0.2` truncation/padding; `…` ellipsis;
+      CJK out-of-scope (documented); `flex-core/tests/dwidth.rs` fixtures.
+- [x] `flex-core/src/theme.rs`: hardcoded `Theme` tokens per `UI_UX_doc.md`
       (`bg #1e1e2e`, `fg #cdd6f4`, `dim #6c7086`, `accent #89b4fa`,
       `selected_bg #313244`, `danger #f38ba8`, `gauge_fill #a6e3a1`).
-- [x] `src/render.rs`: row column math (`█` col 0 accent outside inversion, label col 2,
+- [x] `flex-core/src/render.rs`: row column math (`█` col 0 accent outside inversion, label col 2,
       `avail = W-2-1-M-1`, truncation, right dim meta); bare-rows vs standard mode;
       danger triple-code (color + `!!` + text label); gauge + `— offline`.
-- [x] `src/keys.rs`: key priority chain + Q1 (bare-digit iff filter empty else `Alt-digit`)
-      + Q6 (`q` quits only NORMAL+empty filter); `tests/keys.rs` state-machine tests.
-- [x] `src/backend.rs`: real `/dev/tty` open, event poll, 1 s gauge tick (Q7),
+- [x] `flex-core/src/keys.rs`: key priority chain + Q1 (bare-digit iff filter empty else `Alt-digit`)
+      + Q6 (`q` quits only NORMAL+empty filter); `flex-core/tests/keys.rs` state-machine tests.
+- [x] `flex-core/src/backend.rs`: real `/dev/tty` open, event poll, 1 s gauge tick (Q7),
       resize handling; `FLEX_TEST` deterministic seed support.
 - [x] **Spike (M1): clipboard perf** — 10k-row synthetic corpus, `cargo test clip_perf`
-      asserts re-rank + render < frame budget; `benches/rerank.rs` skeleton.
+      asserts re-rank + render < frame budget; `flex-core/benches/rerank.rs` skeleton.
 - [x] **Danger-timing spec lock** — confirm-hold/step for danger rows defined +
-      covered in `tests/keys.rs` before any provider uses it.
-- [x] `tests/fuzzy_corpus.rs`: tier/penalty regression corpus checked in.
+      covered in `flex-core/tests/keys.rs` before any provider uses it.
+- [x] `flex-core/tests/fuzzy_corpus.rs`: tier/penalty regression corpus checked in.
 
 ## M2 — Providers (parse subprocess stdout once)
 
-- [ ] `src/providers.rs` + `src/providers/{power,launch,clip,center}.rs`:
+- [ ] `flex-rice/src/providers.rs` + `src/providers/{power,launch,clip,center}.rs`:
       each provider spawns at most one subprocess, parses stdout once into `Vec<Row>`,
       then owns filtering/rendering. Library never executes the chosen action.
 - [x] `power` (M6 cutover DONE 2026-09-15): static 5-row table
@@ -140,7 +140,7 @@ Risk register drove this order — highest-unknown work is pulled earliest:
       stays on `kill-menu.sh` (htop-based, out of scope).
       `power-menu.sh` deleted post-parity, then `flex-tui.sh` deleted
       (last sourcer gone; `git grep flex-tui.sh` zero functional hits).
-      Tests: `tests/power.rs` (18: exact row fixtures, danger key-seq
+      Tests: `flex-rice/tests/power.rs` (18: exact row fixtures, danger key-seq
       replays incl. the single-`Enter`-never-confirms release-gate property,
       49 ms hold swallow, 5 s expiry→re-arm, 80x24 default + armed-danger
       goldens, `FLEX_TEST` determinism, all-5-ids dry-run gate + stubbed-PATH
@@ -151,14 +151,14 @@ Risk register drove this order — highest-unknown work is pulled earliest:
       meta, `%X`-preserving `Exec`; row id = space-free hash of the
       desktop-id (`launch::entry_id`) with the hidden `flex launch --resolve`
       lookup the wrappers call before launching (B-021 — a `.desktop` file
-      may be named `My App.desktop`); event loop (`src/run.rs`: poll 1 s,
+      may be named `My App.desktop`); event loop (`flex-core/src/run.rs`: poll 1 s,
       `handle_key`, render-per-frame, `tick`, `ACTION:`/`ACTION:DELETE`/quit
       exits, `FLEX_TEST` seeded step); hidden `--filter-mode=spec|legacy`
       escape hatch;       `wrappers/flex-launch.sh` (41 lines, `setsid`/`%X`-strip/
       `kitty -e` semantics matching `launch_app_row`); keybinds repointed,
       `app-launcher.sh` deleted, `app-cache.sh` KEPT (row-set reference;
       its only sourcer `control-center.sh` was deleted in the M5 cutover).
-      Tests: `tests/launch.rs` (fixtures, `fir→Enter` replay, Esc chain,
+      Tests: `flex-rice/tests/launch.rs` (fixtures, `fir→Enter` replay, Esc chain,
       legacy order, 80x24 golden, seed determinism) + `parity_against_app_cache`
       (ignored, live-cache probe).
 - [x] `clip` (M4 cutover DONE 2026-09-15): byte-safe ingest
@@ -176,11 +176,11 @@ Risk register drove this order — highest-unknown work is pulled earliest:
       post-TUI with pty redirect; DELETE→`grep -aFxv` both files;
       TOGGLE→pin/unpin) with `sel`/`pin`/`unpin` bash semantics; keybind
       `SUPER+SHIFT+V` repointed, `cliphist.sh pick()` a delegating stub
-      (`add`/`pin`/`unpin` intact, verified live). Tests: `tests/clip.rs`
+      (`add`/`pin`/`unpin` intact, verified live). Tests: `flex-rice/tests/clip.rs`
       (22: binary corpus, globs, 120-char preview, pins-first, hashes,
       widths, `m`/Delete flows, filter→Enter replay, 80x24 golden,
       determinism, stubbed-pipeline wrapper tests, live-store parity probe)
-      + `tests/clip_perf.rs` cold-ingest gate (see M5).
+      + `flex-rice/tests/clip_perf.rs` cold-ingest gate (see M5).
 - [x] `center` (M5 cutover DONE 2026-09-15): 5-tab `Menu` builder
       (`src/providers/center.rs`) with control-center.sh row-set parity
       (tab order, labels/metas, `flex_bar`/gauge formulas machine-checked
@@ -198,12 +198,12 @@ Risk register drove this order — highest-unknown work is pulled earliest:
       overrides); keybind `SUPER+X` repointed, `control-center.sh` deleted,
       `app-cache.sh` KEPT intentionally (orphaned reference for the row
       set), `flex-tui.sh`/`popup.sh` kept (power-menu/kill-menu/
-      wallpaper-picker still need them). Tests: `tests/center.rs` (27:
+      wallpaper-picker still need them). Tests: `flex-rice/tests/center.rs` (27:
       fixtures per tab, 125x30 golden + gauge states, key-seq replays,
       stubbed-pipeline wrapper tests) + 7 provider unit tests;
       `tests/fixtures/center/` reference snapshots.
 - [ ] Provider golden tests with `fixtures/*.txt` stdout captures.
-      (Launch uses `tests/fixtures/launch/*.desktop` + `tests/launch.rs` instead —
+      (Launch uses `tests/fixtures/launch/*.desktop` + `flex-rice/tests/launch.rs` instead —
       `.desktop` fixtures, not stdout captures.)
 
 ## M3 — Widgets + remaining subcommands
@@ -228,15 +228,15 @@ Risk register drove this order — highest-unknown work is pulled earliest:
       Keybinds repointed (`SUPER+s` → `flex-shot.sh`, `SUPER+T` →
       `flex-theme.sh`); `screenshot.sh` deleted; `theme-switcher.sh pick()`
       is now a delegating stub (`list/current/activate/delete/rofi`
-      intact, verified live). Tests: `tests/shot.rs` (10) + `tests/theme.rs`
+      intact, verified live). Tests: `flex-rice/tests/shot.rs` (10) + `flex-rice/tests/theme.rs`
       (12) — exact row fixtures, golden default view @80x24, key-seq
       replays (navigate/filter → `Enter` → correct `ACTION:`), `Esc`/`Delete`
       chains, `FLEX_TEST` determinism, stubbed-pipeline wrapper tests.
 - [x] `center` grid layout @1000x600 (M5 cutover DONE 2026-09-15):
       standard spec rows on all 5 tabs (Launchers keeps its `Terminal`
       meta, not bare-rows); wide-viewport golden @125x30 in
-      `tests/center.rs` (5-tab bar + gauge states 0/50/100/muted/offline).
-- [ ] `tests/golden.rs` additions: danger row, gauge online/offline, truncation @80x24.
+      `flex-rice/tests/center.rs` (5-tab bar + gauge states 0/50/100/muted/offline).
+- [ ] `flex-rice/tests/golden.rs` additions: danger row, gauge online/offline, truncation @80x24.
 
 ## M4 — Wrappers + cutover (launcher BEFORE power)
 
@@ -245,7 +245,7 @@ Risk register drove this order — highest-unknown work is pulled earliest:
       All six land as `flex-rice/wrappers/flex-<provider>.sh` (`power` LAST, M6).
 - [x] `clip` cutover DONE (M4, ahead of M4 schedule): `flex-rice/wrappers/flex-clip.sh`
       + `pick()` delegating stub + `README.md` cutover table ✅.
-- [x] `center` cutover DONE (M5): `flex/wrappers/flex-center.sh`
+- [x] `center` cutover DONE (M5): `flex-rice/wrappers/flex-center.sh`
       + `README.md` cutover table ✅ + `control-center.sh` deleted
       (keybind `SUPER+X` repointed). Remaining wrapper (`power`) still
       lands here in M4, `power` LAST.
@@ -266,7 +266,7 @@ Risk register drove this order — highest-unknown work is pulled earliest:
       `picker-chrome.sh` was deleted in the M7 wallpaper cutover (below);
       `rofi/scripts/wifi.sh` became a delegating stub in the M8 Wi-Fi
       cutover (below).
-- [x] `flex-tui.sh` dispatcher updated; stow packaging verified (`flex/target/` ignored).
+- [x] `flex-tui.sh` dispatcher updated; stow packaging verified (`target/` ignored).
       (M6: bash dispatcher deleted — superseded by the six `flex-*` binaries;
       `stow -n flex` dry-run links everything except `target/`.)
 
@@ -285,7 +285,7 @@ across rather than drop it.
       hidden `flex wallpaper --resolve <id>` (clip's Q2 pattern, so the
       space-delimited `ACTION:` line stays parseable), `Row::preview_image`
       carrying the path to the pane.
-- [x] `src/preview.rs` DONE (kitty graphics): `preview::pane` geometry (45 %
+- [x] `flex-core/src/preview.rs` DONE (kitty graphics): `preview::pane` geometry (45 %
       of the frame, right-aligned, one gutter column, `MIN_LIST_WIDTH` 24,
       dropped under 40 columns), `place_escape` (`a=T,f=100,t=f,i=<fixed>,
       c/r, C=1, q=2` with the base64 path as payload), `delete_escape`,
@@ -302,8 +302,8 @@ across rather than drop it.
 - [x] `wrappers/flex-wallpaper.sh` DONE (hex-id validation → `--resolve` →
       `[[ -f ]]` → `set-wallpaper.sh`, `SET_WALLPAPER` override; the old
       picker is a delegating stub, `picker-chrome.sh` deleted).
-- [x] `SUPER+W` repointed to `flex-wallpaper.sh`; `tests/wallpaper.rs` (21) +
-      preview/wallpaper unit tests (20) + `tests/wrappers.rs` entry.
+- [x] `SUPER+W` repointed to `flex-wallpaper.sh`; `flex-rice/tests/wallpaper.rs` (21) +
+      preview/wallpaper unit tests (20) + `flex-rice/tests/wrappers.rs` entry.
 
 ## M8 — Wi-Fi dialog cutover (network popup)
 
@@ -332,10 +332,10 @@ makes the dialog a flex provider instead of a package dependency.
       for secured ones (`FLEX_WIFI_PASSWORD` seam), selecting the connected
       network drops it (rofi parity). `NMCLI`/`NOTIFY_SEND` overrides for
       tests; `bash -n` + `zsh -n` clean (shellcheck still absent, B-004).
-- [x] Waybar `network.on-click` → `$HOME/dotfiles/flex/flex-rice/wrappers/flex-wifi.sh`;
+- [x] Waybar `network.on-click` → `~/.local/bin/flex-wifi.sh`;
       `rofi/scripts/wifi.sh` reduced to a delegating stub (external callers
       keep working) — `wifi.rasi`/`wifi-prompt.rasi` are now unused assets.
-- [x] `tests/wifi.rs` (32) + `tests/wrappers.rs` entry: row-set fixtures,
+- [x] `flex-rice/tests/wifi.rs` (32) + `flex-rice/tests/wrappers.rs` entry: row-set fixtures,
       offline/empty/radio-off degradation, live `$WIFI_*` seam path,
       cached-first opening (placeholder + scan swap, focus identity across a
       reorder, filter survival, idle tick is a no-op), key-seq replays, 80x24
@@ -374,11 +374,11 @@ makes the dialog a flex provider instead of a package dependency.
 
 ## M5 — Perf + hardening
 
-- [ ] `benches/rerank.rs` (criterion): 10k-row rerank regression; budget documented.
-- [x] `tests/clip_perf.rs`: automated perf gate (fails on budget breach) —
+- [ ] `flex-core/benches/rerank.rs` (criterion): 10k-row rerank regression; budget documented.
+- [x] `flex-rice/tests/clip_perf.rs`: automated perf gate (fails on budget breach) —
       M4-enforced (was M1 spike): cold 3200-row file ingest → first frame
       @80x24 ≤ 0.5 s in debug AND release (release measured 6.4 ms).
-- [ ] `tests/dwidth.rs` + `tests/fuzzy_corpus.rs` expanded; `cargo test` full matrix green.
+- [ ] `flex-core/tests/dwidth.rs` + `flex-core/tests/fuzzy_corpus.rs` expanded; `cargo test` full matrix green.
 - [ ] CI grep check: reject `serde`/`toml` (`rg` gate in CI + documented here).
 - [ ] Clippy pedantic + fmt clean; `cargo tree` single-crossterm re-verified.
 
@@ -406,7 +406,7 @@ makes the dialog a flex provider instead of a package dependency.
       (`generate_rasi()`, `generate-static-theme.sh`'s heredoc, the saved-theme
       file list, and `theme-switcher.sh`'s theme-validity check), and every
       saved theme's `colors.rasi`/`theme.rasi` was deleted.
-- [x] M6 hardening extras: `tests/keys.rs` seed table 12 → 29 cases
+- [x] M6 hardening extras: `flex-core/tests/keys.rs` seed table 12 → 29 cases
       (`TODO(M6)` closed; shifted runes, `Left`/`Right` wrap matrix,
       out-of-range digits, gaugeless `F1`, mark persistence, `Ctrl-w` shapes,
       empty-view keys + empty-app/empty-tab targeted tests); render-path
@@ -427,15 +427,15 @@ makes the dialog a flex provider instead of a package dependency.
 
 | Suite | File | What it gates |
 |---|---|---|
-| Golden (TestBackend) | `tests/golden.rs` | Empty tab bar, danger, gauge on/offline, truncation @80x24 |
-| Key state machine | `tests/keys.rs` | Q1 digit/Alt-digit, Q6 q-quit, danger confirm timing (29-case `FLEX_TEST` seed table + empty-app safeties) |
-| Power cutover | `tests/power.rs` | Bash-exact rows, single-Enter-never-confirms gate, hold/expiry replays, armed-danger golden, wrapper dry-run + dispatch |
-| Fuzzy corpus | `tests/fuzzy_corpus.rs` | Tier ordering 100/80/60/40/10, penalties, subsequence-required |
-| Display width | `tests/dwidth.rs` | Truncation/pad, `…`, non-CJK widths |
-| Clip perf | `tests/clip_perf.rs` | 10k rerank+render budget |
-| Wallpaper cutover | `tests/wallpaper.rs` | Bash-exact scan (`-maxdepth 2 -iname` + `sort -u`), hash id ↔ `--resolve` round trip, pane geometry/goldens, key-seq replays, stubbed wrapper dispatch (bad/unknown ids refused) |
-| Wi-Fi dialog cutover | `tests/wifi.rs` | Radio/scan row set (incl. offline, empty scan, radio off), live `$WIFI_*` seam path, cached-first open + background rescan swap (placeholder, focus identity across a reorder, filter survival, idle tick no-op), filter/navigate/Esc replays, 80x24 standard-mode golden, stubbed `nmcli` dispatch (open/secure/connected-toggle/noop/cancel + bad/unknown ids refused) |
-| Bench | `benches/rerank.rs` | Criterion regression signal |
+| Golden (TestBackend) | `flex-rice/tests/golden.rs` | Empty tab bar, danger, gauge on/offline, truncation @80x24 |
+| Key state machine | `flex-core/tests/keys.rs` | Q1 digit/Alt-digit, Q6 q-quit, danger confirm timing (29-case `FLEX_TEST` seed table + empty-app safeties) |
+| Power cutover | `flex-rice/tests/power.rs` | Bash-exact rows, single-Enter-never-confirms gate, hold/expiry replays, armed-danger golden, wrapper dry-run + dispatch |
+| Fuzzy corpus | `flex-core/tests/fuzzy_corpus.rs` | Tier ordering 100/80/60/40/10, penalties, subsequence-required |
+| Display width | `flex-core/tests/dwidth.rs` | Truncation/pad, `…`, non-CJK widths |
+| Clip perf | `flex-rice/tests/clip_perf.rs` | 10k rerank+render budget |
+| Wallpaper cutover | `flex-rice/tests/wallpaper.rs` | Bash-exact scan (`-maxdepth 2 -iname` + `sort -u`), hash id ↔ `--resolve` round trip, pane geometry/goldens, key-seq replays, stubbed wrapper dispatch (bad/unknown ids refused) |
+| Wi-Fi dialog cutover | `flex-rice/tests/wifi.rs` | Radio/scan row set (incl. offline, empty scan, radio off), live `$WIFI_*` seam path, cached-first open + background rescan swap (placeholder, focus identity across a reorder, filter survival, idle tick no-op), filter/navigate/Esc replays, 80x24 standard-mode golden, stubbed `nmcli` dispatch (open/secure/connected-toggle/noop/cancel + bad/unknown ids refused) |
+| Bench | `flex-core/benches/rerank.rs` | Criterion regression signal |
 | Lints/fmt/tree | CI gates | `fmt --check`, `clippy -D warnings`, single crossterm, no serde/toml grep |
 
 Viewport matrix for all golden tests: `640x420` + `1000x600` @ `font_size 10`
