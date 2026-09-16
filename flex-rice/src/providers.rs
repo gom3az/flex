@@ -10,6 +10,7 @@ pub mod theme_;
 pub mod center;
 pub mod clip;
 pub mod launch;
+pub mod net;
 pub mod power;
 pub mod proc;
 pub mod shot;
@@ -50,6 +51,9 @@ pub fn tick_hook(menu: &mut Menu) {
     }
     if menu.provider == proc::PROVIDER {
         proc::refresh(menu);
+    }
+    if menu.provider == net::PROVIDER {
+        net::refresh(menu);
     }
 }
 

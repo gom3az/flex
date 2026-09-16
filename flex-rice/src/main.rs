@@ -102,6 +102,12 @@ enum Command {
         #[arg(long)]
         print_action: bool,
     },
+    /// Network monitor and top bandwidth consumers.
+    Net {
+        /// Print the selected `ACTION:` line without executing it.
+        #[arg(long)]
+        print_action: bool,
+    },
 }
 
 /// Non-interactive `clip` verbs forwarded to `flex-clip` (mirrors the
@@ -224,6 +230,7 @@ fn run() -> Result<()> {
         ),
         Command::Wifi { print_action } => reexec(Provider::Wifi, style, *print_action, &[]),
         Command::Proc { print_action } => reexec(Provider::Proc, style, *print_action, &[]),
+        Command::Net { print_action } => reexec(Provider::Net, style, *print_action, &[]),
     }
 }
 
