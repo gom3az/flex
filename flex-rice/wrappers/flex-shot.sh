@@ -88,7 +88,9 @@ cap_pid=$!
 
 # Close popup window so slurp/grim get a clean screen.
 popup_pid=$(pgrep -f 'kitty --class kitty-menu' | head -1)
-[[ -n "$popup_pid" ]] && kill "$popup_pid" 2>/dev/null || true
+if [[ -n "$popup_pid" ]]; then
+    kill "$popup_pid" 2>/dev/null || true
+fi
 
 # Wait for popup window to disappear.
 for _ in {1..20}; do
