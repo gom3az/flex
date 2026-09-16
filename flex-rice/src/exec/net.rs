@@ -5,7 +5,7 @@
 //! (`/proc/net/route`, `/sys/class/net/<iface>/statistics/`, `/proc/net/dev`, and `/proc/<pid>/io`)
 //! against a lightweight timestamped stat cache.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -131,7 +131,14 @@ fn read_proc_stat_cache(path: &Path) -> HashMap<u32, ProcIoSample> {
         let Some(wchar) = fields.next().and_then(|s| s.parse::<u64>().ok()) else {
             continue;
         };
-        map.insert(pid, ProcIoSample { ts_ms, rchar, wchar });
+        map.insert(
+            pid,
+            ProcIoSample {
+                ts_ms,
+                rchar,
+                wchar,
+            },
+        );
     }
     map
 }
@@ -318,6 +325,64 @@ pub fn read_proc_io(io_file: &Path) -> Option<(u64, u64)> {
     }
 }
 
+/// Collect all open INET (TCP, UDP, RAW) socket inodes from `/proc/net/`.
+#[must_use]
+pub fn collect_inet_socket_inodes() -> HashSet<u64> {
+    let mut inodes = HashSet::new();
+    let tables = [
+        "/proc/net/tcp",
+        "/proc/net/tcp6",
+        "/proc/net/udp",
+        "/proc/net/udp6",
+        "/proc/net/raw",
+        "/proc/net/raw6",
+    ];
+    for table in tables {
+        let Ok(content) = std::fs::read_to_string(table) else {
+            continue;
+        };
+        for line in content.lines().skip(1) {
+            let mut fields = line.split_whitespace();
+            if let Some(inode_str) = fields.nth(9) {
+                if let Ok(inode) = inode_str.parse::<u64>() {
+                    if inode > 0 {
+                        inodes.insert(inode);
+                    }
+                }
+            }
+        }
+    }
+    inodes
+}
+
+/// Check if a process has at least one open file descriptor matching an INET socket inode.
+#[must_use]
+pub fn has_network_sockets<S: std::hash::BuildHasher>(
+    pid: u32,
+    inet_inodes: &HashSet<u64, S>,
+) -> bool {
+    let fd_dir = PathBuf::from(format!("/proc/{pid}/fd"));
+    let Ok(entries) = std::fs::read_dir(fd_dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let Ok(target) = std::fs::read_link(entry.path()) else {
+            continue;
+        };
+        let target_str = target.to_string_lossy();
+        if let Some(rest) = target_str.strip_prefix("socket:[") {
+            if let Some(inode_str) = rest.strip_suffix(']') {
+                if let Ok(inode) = inode_str.parse::<u64>() {
+                    if inet_inodes.contains(&inode) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Scan `/proc` to collect and calculate per-process network I/O rates.
 #[must_use]
 #[allow(clippy::cast_precision_loss)]
@@ -337,6 +402,9 @@ pub fn scan_top_talkers() -> Vec<ProcessBandwidth> {
         *guard = read_proc_stat_cache(&proc_stat_path);
     }
 
+    let inet_inodes = collect_inet_socket_inodes();
+    let current_pid = std::process::id();
+
     let proc_dir = Path::new("/proc");
     let Ok(entries) = std::fs::read_dir(proc_dir) else {
         return Vec::new();
@@ -353,6 +421,15 @@ pub fn scan_top_talkers() -> Vec<ProcessBandwidth> {
         let Ok(pid) = name_str.parse::<u32>() else {
             continue;
         };
+
+        if pid == current_pid {
+            continue;
+        }
+
+        // Only monitor processes with actual network/internet sockets (filters out local IPC/pipes/Wayland)
+        if !has_network_sockets(pid, &inet_inodes) {
+            continue;
+        }
 
         let io_file = entry.path().join("io");
         let stat_file = entry.path().join("stat");
