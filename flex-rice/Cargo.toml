@@ -46,6 +46,10 @@ path = "src/bin/flex-wallpaper.rs"
 name = "flex-wifi"
 path = "src/bin/flex-wifi.rs"
 
+[[bin]]
+name = "flex-proc"
+path = "src/bin/flex-proc.rs"
+
 [dependencies]
 # The engine, built from the sibling `flex-core` member (see the workspace root).
 flex-core.workspace = true

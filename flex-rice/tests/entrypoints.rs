@@ -46,6 +46,7 @@ fn every_binary_answers_help_with_exit_0() {
         env!("CARGO_BIN_EXE_flex-center"),
         env!("CARGO_BIN_EXE_flex-wallpaper"),
         env!("CARGO_BIN_EXE_flex-wifi"),
+        env!("CARGO_BIN_EXE_flex-proc"),
     ];
     for bin in bins {
         let output = std::process::Command::new(bin)
@@ -96,6 +97,7 @@ fn provider_binaries_answer_version_with_exit_0() {
         env!("CARGO_BIN_EXE_flex-center"),
         env!("CARGO_BIN_EXE_flex-wallpaper"),
         env!("CARGO_BIN_EXE_flex-wifi"),
+        env!("CARGO_BIN_EXE_flex-proc"),
     ];
     for bin in bins {
         let output = std::process::Command::new(bin)

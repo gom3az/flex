@@ -11,6 +11,7 @@ pub mod center;
 pub mod clip;
 pub mod launch;
 pub mod power;
+pub mod proc;
 pub mod shot;
 pub mod wallpaper;
 pub mod wifi;
@@ -34,17 +35,21 @@ pub fn empty_row(label: &str) -> Row {
     Row::new(RowId::new(NOOP_ID), label)
 }
 
-/// Per-tick refresh for the two providers whose rows go stale while the menu
-/// is open: `center` re-reads volume/brightness into its gauge in place, and
-/// `wifi` swaps in a background scan once it finishes.
+/// Per-tick refresh for the providers whose rows go stale while the menu is
+/// open: `center` re-reads volume/brightness into its gauge in place, `wifi`
+/// swaps in a background scan once it finishes, and `proc` re-sweeps `/proc`
+/// keeping the cursor on the same pid.
 ///
-/// Installed by [`menu`]; filter, focus and scroll survive both refreshes.
+/// Installed by [`menu`]; filter, focus and scroll survive all refreshes.
 pub fn tick_hook(menu: &mut Menu) {
     if menu.provider == center::PROVIDER {
         center::refresh_gauges(menu);
     }
     if menu.provider == wifi::PROVIDER {
         wifi::refresh_scan(menu);
+    }
+    if menu.provider == proc::PROVIDER {
+        proc::refresh(menu);
     }
 }
 

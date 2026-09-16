@@ -90,6 +90,12 @@ enum Command {
         #[arg(long)]
         print_action: bool,
     },
+    /// Process manager (kill menu): filter and signal processes.
+    Proc {
+        /// Print the selected `ACTION:` line without executing it.
+        #[arg(long)]
+        print_action: bool,
+    },
 }
 
 /// Non-interactive `clip` verbs forwarded to `flex-clip` (mirrors the
@@ -162,6 +168,7 @@ fn run() -> Result<()> {
             reexec(Provider::Wallpaper, style, *print_action, &[])
         }
         Command::Wifi { print_action } => reexec(Provider::Wifi, style, *print_action, &[]),
+        Command::Proc { print_action } => reexec(Provider::Proc, style, *print_action, &[]),
     }
 }
 
