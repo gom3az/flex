@@ -15,7 +15,7 @@ name = "flex"
 path = "src/main.rs"
 
 [dependencies]
-# The engine, from its own repository (see the workspace root for the pin).
+# The engine, built from the sibling `flex-core` member (see the workspace root).
 flex-core.workspace = true
 anyhow.workspace = true
 clap.workspace = true

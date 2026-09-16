@@ -1,21 +1,20 @@
 [package]
 name = "flex-core"
 description = "Reusable Rust TUI menu engine: menu rendering, fuzzy filtering, key handling and kitty-graphics previews"
-version = "1.0.0"
-edition = "2021"
-license = "MIT OR Apache-2.0"
-authors = ["flex contributors"]
-repository = "https://github.com/gom3az/flex"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
 keywords = ["tui", "menu", "launcher", "ratatui"]
 categories = ["command-line-utilities"]
 
 [dependencies]
-anyhow = "1"
-crossterm = "0.28"
+anyhow.workspace = true
+crossterm.workspace = true
 # Pinned: layout must match the wiremix-derived design system exactly.
-ratatui = { version = "=0.29.0", features = ["crossterm"] }
-# Non-CJK widths: ambiguous codepoints are narrow (default-features off drops
-# the `cjk` feature that would make them wide). See `src/width.rs`.
+ratatui.workspace = true
+# Non-CJK widths: narrow ambiguous codepoints (no `cjk` feature). See `src/width.rs`.
 unicode-width.workspace = true
 
 [dev-dependencies]
@@ -25,9 +24,5 @@ criterion = { version = "0.5", features = ["html_reports"] }
 name = "rerank"
 harness = false
 
-[lints.rust]
-unsafe_code = "deny"
-
-[lints.clippy]
-all = "deny"
-pedantic = "deny"
+[lints]
+workspace = true
