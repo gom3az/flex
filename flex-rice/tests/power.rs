@@ -7,6 +7,8 @@
 //! Danger confirm reuses the shared `keys` flow (proven by the center
 //! danger tests); these replays lock the power surface onto it.
 
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -15,6 +17,7 @@ use ratatui::Terminal;
 
 use flex_core::keys::{handle_key, KeyOutcome, ARM_CONFIRM_DELAY, ARM_EXPIRE, EXIT_CANCELLED};
 use flex_core::{backend, run, width, Menu};
+use flex_rice::exec::power as exec_power;
 use flex_rice::providers::power;
 
 fn power_menu() -> Menu {
@@ -399,9 +402,9 @@ fn run_wrapper_with_stubs(
     // The popup re-exec is bind-path behavior; wrapper tests emulate the
     // in-popup half (stubbed HOME has no popup.sh).
     cmd.env("POPUP_KITTY", "1");
-    if dry_run {
-        cmd.env("DRY_RUN", "1");
-    }
+    // Pin DRY_RUN explicitly: the wrapper reads the inherited process env, and
+    // sibling executor tests mutate it under `ENV_LOCK`.
+    cmd.env("DRY_RUN", if dry_run { "1" } else { "0" });
     let output = cmd.output().expect("run wrapper");
     (dir, output)
 }
@@ -515,4 +518,468 @@ fn wrapper_rejects_unknown_action_ids() {
     let (dir, output) = run_wrapper_with_stubs("unknown", "ACTION: power format Format", true);
     assert!(!output.status.success(), "unknown id must fail");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// --- exec::power tests -------------------------------------------------------
+
+/// Serialises every test that mutates process env (`DRY_RUN`, the `STUB_LOG`
+/// seam): the executor tests read them in-process, so a leaked value would
+/// race a sibling test (the harness runs tests in parallel). Wrapper tests
+/// spawn `bash` with an explicit env and stay lock-free.
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+/// Save/restore process env around an executor call (see [`ENV_LOCK`]).
+struct EnvGuard {
+    saved: Vec<(String, Option<String>)>,
+}
+
+impl EnvGuard {
+    fn set(pairs: &[(&str, &str)]) -> Self {
+        let mut saved = Vec::with_capacity(pairs.len());
+        for (key, value) in pairs {
+            saved.push(((*key).to_string(), std::env::var(key).ok()));
+            std::env::set_var(key, value);
+        }
+        Self { saved }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        for (key, prev) in self.saved.drain(..) {
+            match prev {
+                Some(value) => std::env::set_var(&key, value),
+                None => std::env::remove_var(&key),
+            }
+        }
+    }
+}
+
+fn write_exe(path: &Path, body: &str) {
+    std::fs::write(path, body).expect("write stub");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+}
+
+/// Executor stub dir (distinct prefix from the wrapper's [`stub_dir`]).
+fn exec_stub_dir(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("flex-power-exec-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("stub dir");
+    dir
+}
+
+/// Per-tool logging stub: `basename` + args to `$STUB_LOG`, always exit 0
+/// (the center port's `LOG_STUB`, so wrapper and executor call logs compare
+/// byte-for-byte).
+const LOG_STUB: &str = r#"#!/usr/bin/env bash
+printf '%s %s\n' "$(basename "$0")" "$*" >> "$STUB_LOG"
+exit 0
+"#;
+
+fn install_log_stubs(dir: &Path) {
+    for tool in ["hyprlock", "systemctl", "pkill"] {
+        write_exe(&dir.join(tool), LOG_STUB);
+    }
+}
+
+/// `PATH` shadow for executor calls: stub dir first, ambient `PATH` after
+/// (the stubs are `bash` scripts, so they still need real `basename`).
+fn exec_path_env(dir: &Path) -> String {
+    format!(
+        "{}:{}",
+        dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    )
+}
+
+fn read_exec_log(dir: &Path) -> String {
+    std::fs::read_to_string(dir.join("calls.log")).unwrap_or_default()
+}
+
+/// Full action matrix: `describe` produces byte-exact command
+/// strings matching the wrapper's `would run:` output.
+#[test]
+fn executor_describe_matches_wrapper_commands() {
+    assert_eq!(
+        exec_power::describe(&exec_power::Step::Hyprlock),
+        "hyprlock"
+    );
+    assert_eq!(
+        exec_power::describe(&exec_power::Step::SystemctlSuspend),
+        "systemctl suspend"
+    );
+    assert_eq!(
+        exec_power::describe(&exec_power::Step::SystemctlReboot),
+        "systemctl reboot"
+    );
+    assert_eq!(
+        exec_power::describe(&exec_power::Step::SystemctlPoweroff),
+        "systemctl poweroff"
+    );
+    assert_eq!(
+        exec_power::describe(&exec_power::Step::PkillHyprland),
+        "pkill -SIGTERM Hyprland"
+    );
+}
+
+/// Full action matrix: `plan` produces the right steps and
+/// `describe_plan` matches the wrapper's would-run lines.
+#[test]
+fn executor_plan_snapshot_matches_wrapper() {
+    let cases = [
+        (exec_power::PlannedAction::Lock, vec!["would run: hyprlock"]),
+        (
+            exec_power::PlannedAction::Suspend,
+            vec!["would run: systemctl suspend"],
+        ),
+        (
+            exec_power::PlannedAction::Reboot,
+            vec!["would run: systemctl reboot"],
+        ),
+        (
+            exec_power::PlannedAction::Off,
+            vec!["would run: systemctl poweroff"],
+        ),
+        (
+            exec_power::PlannedAction::Logout,
+            vec!["would run: pkill -SIGTERM Hyprland"],
+        ),
+    ];
+    for (planned, expected_lines) in cases {
+        let steps = exec_power::plan(&planned);
+        let lines: Vec<String> = steps
+            .iter()
+            .map(|s| format!("would run: {}", exec_power::describe(s)))
+            .collect();
+        assert_eq!(lines, expected_lines, "{planned:?}");
+    }
+}
+
+/// Full action matrix through one shared call log: every action id really
+/// dispatches its tool, and the call sequence matches the wrapper's shapes
+/// (one line per `describe` step).
+#[test]
+fn executor_matrix_runs_every_action_through_stub_tools() {
+    let _lock = ENV_LOCK.lock().expect("env lock");
+    let dir = exec_stub_dir("matrix");
+    install_log_stubs(&dir);
+    let log = dir.join("calls.log");
+    let _guard = EnvGuard::set(&[("DRY_RUN", "0"), ("STUB_LOG", log.to_str().expect("utf8"))]);
+    let path_env = exec_path_env(&dir);
+    for (id, detail) in [
+        ("lock", "lock"),
+        ("suspend", "suspend"),
+        ("reboot", "reboot"),
+        ("poweroff", "poweroff"),
+        ("logout", "logout"),
+    ] {
+        let report = exec_power::execute(id, Some(&path_env)).expect("executor succeeds");
+        assert_eq!(report.action_id, id);
+        assert_eq!(report.detail, detail);
+        assert_eq!(report.dry_run, None, "{id} really ran");
+    }
+    assert_eq!(
+        read_exec_log(&dir).lines().collect::<Vec<_>>(),
+        vec![
+            // `hyprlock` takes no args; `LOG_STUB` joins name + space + args.
+            "hyprlock ",
+            "systemctl suspend",
+            "systemctl reboot",
+            "systemctl poweroff",
+            "pkill -SIGTERM Hyprland",
+        ],
+        "one tool call per action (describe: one line per step)",
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Blast-radius gate: every action id dry-runs to the wrapper's exact
+/// `would run: …` line, returns it as the effect, and spawns nothing.
+#[test]
+fn executor_dry_run_emits_the_wrapper_lines_and_spawns_nothing() {
+    let _lock = ENV_LOCK.lock().expect("env lock");
+    let dir = exec_stub_dir("dry");
+    install_log_stubs(&dir);
+    let log = dir.join("calls.log");
+    let _guard = EnvGuard::set(&[("DRY_RUN", "1"), ("STUB_LOG", log.to_str().expect("utf8"))]);
+    let path_env = exec_path_env(&dir);
+    for (id, expected) in [
+        ("lock", "would run: hyprlock"),
+        ("suspend", "would run: systemctl suspend"),
+        ("reboot", "would run: systemctl reboot"),
+        ("poweroff", "would run: systemctl poweroff"),
+        ("logout", "would run: pkill -SIGTERM Hyprland"),
+    ] {
+        let report = exec_power::execute(id, Some(&path_env)).expect("dry run succeeds");
+        assert_eq!(report.dry_run, Some(vec![expected.to_string()]), "{id}");
+        assert_eq!(report.detail, id);
+    }
+    assert!(!log.exists(), "dry-run spawns nothing for any id");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Danger-row dry-run verification: Reboot and Poweroff return their effect
+/// and never spawn any tool — the stub log stays unwritten.
+#[test]
+fn executor_dry_run_danger_rows_never_spawn() {
+    let _lock = ENV_LOCK.lock().expect("env lock");
+    let dir = exec_stub_dir("danger-rows");
+    install_log_stubs(&dir);
+    let log = dir.join("calls.log");
+    let _guard = EnvGuard::set(&[("DRY_RUN", "1"), ("STUB_LOG", log.to_str().expect("utf8"))]);
+    let path_env = exec_path_env(&dir);
+    for (id, expected) in [
+        ("reboot", "would run: systemctl reboot"),
+        ("poweroff", "would run: systemctl poweroff"),
+    ] {
+        let report = exec_power::execute(id, Some(&path_env)).expect("danger dry-run succeeds");
+        assert_eq!(report.dry_run, Some(vec![expected.to_string()]), "{id}");
+    }
+    assert!(!log.exists(), "danger dry-run executes nothing");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Malformed ids (`bad id`, the wrapper's guard) and well-formed but
+/// unsupported ids (`unknown action`, the wrapper's `*)` arm) are errors with
+/// no `flex:` prefix of their own — the runner adds the single prefix at the
+/// binary boundary (see `tests/prefix.rs`).
+#[test]
+fn executor_rejects_bad_and_unknown_ids_without_its_own_prefix() {
+    for (id, expected) in [
+        ("", "power: bad id ''"),
+        ("bad/id", "power: bad id 'bad/id'"),
+        ("bad\nid", "power: bad id 'bad\nid'"),
+        ("format", "power: unknown action: format"),
+    ] {
+        let err = exec_power::execute(id, None).expect_err("must fail");
+        let message = format!("{err:#}");
+        assert!(
+            message.starts_with(expected),
+            "{id:?}: {message:?} must start with {expected:?}"
+        );
+        assert!(
+            !message.contains("flex:"),
+            "{id:?}: no prefix of its own: {message:?}"
+        );
+    }
+}
+
+/// `execute` accepts every valid action id (the parse path; the dispatch
+/// matrix above proves the tools actually run).
+#[test]
+fn executor_valid_ids_parse_correctly() {
+    for id in ["lock", "suspend", "reboot", "poweroff", "logout"] {
+        assert!(exec_power::PowerAction::parse(id).is_some(), "{id} parses");
+    }
+}
+
+/// `is_dry_run` is dry only for the exact value `1` (the wrapper's
+/// `[[ "$dry_run" == "1" ]]`), so `0`/empty/unset execute.
+#[test]
+fn executor_dry_run_flag_is_exactly_one() {
+    let _lock = ENV_LOCK.lock().expect("env lock");
+    let _guard = EnvGuard::set(&[("DRY_RUN", "1")]);
+    assert!(exec_power::is_dry_run(), "DRY_RUN=1 is dry");
+    std::env::set_var("DRY_RUN", "0");
+    assert!(!exec_power::is_dry_run(), "DRY_RUN=0 is not dry");
+    std::env::set_var("DRY_RUN", "");
+    assert!(!exec_power::is_dry_run(), "DRY_RUN='' is not dry");
+    std::env::remove_var("DRY_RUN");
+    assert!(!exec_power::is_dry_run(), "unset DRY_RUN is not dry");
+}
+
+// --- Parity with the untouched wrapper --------------------------------------
+//
+// For every action id the wrapper supports, the wrapper (under stub `PATH`,
+// with and without `DRY_RUN=1`) and the executor must produce byte-identical
+// dry-run lines and tool-call sequences. The one deliberate departure is
+// `pkill`'s quiet failure handling (see the executor module docs); with
+// stubs that exit 0 the sequences are identical.
+
+/// The wrapper's stub log is `echo "<tool> $@"` and the executor's is
+/// `printf '%s %s' "$(basename "$0")" "$*"`, so both spell a zero-arg call
+/// `hyprlock ` (trailing space) and compare byte-for-byte.
+#[test]
+fn parity_executor_matches_the_wrapper() {
+    let _lock = ENV_LOCK.lock().expect("env lock");
+    let cases = [
+        (
+            "lock",
+            "ACTION: power lock Lock Screen",
+            "would run: hyprlock",
+            "hyprlock ",
+        ),
+        (
+            "suspend",
+            "ACTION: power suspend Suspend",
+            "would run: systemctl suspend",
+            "systemctl suspend",
+        ),
+        (
+            "reboot",
+            "ACTION: power reboot Reboot",
+            "would run: systemctl reboot",
+            "systemctl reboot",
+        ),
+        (
+            "poweroff",
+            "ACTION: power poweroff Power Off",
+            "would run: systemctl poweroff",
+            "systemctl poweroff",
+        ),
+        (
+            "logout",
+            "ACTION: power logout Logout",
+            "would run: pkill -SIGTERM Hyprland",
+            "pkill -SIGTERM Hyprland",
+        ),
+    ];
+    for (id, action_line, dry_line, dispatch_line) in cases {
+        // Wrapper, DRY_RUN=1.
+        let (wrap_dir, output) =
+            run_wrapper_with_stubs(&format!("parity-dry-{id}"), action_line, true);
+        assert!(output.status.success(), "{id}: wrapper dry-run exits 0");
+        let wrap_stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        assert_eq!(wrap_stdout, format!("{dry_line}\n"), "{id}: wrapper line");
+        assert!(
+            !wrap_dir.join("calls.log").exists(),
+            "{id}: wrapper dry-run spawns nothing"
+        );
+
+        // Executor, DRY_RUN=1: the returned effect must be byte-identical.
+        let exec_dir = exec_stub_dir(&format!("parity-dry-{id}"));
+        install_log_stubs(&exec_dir);
+        let exec_log = exec_dir.join("calls.log");
+        let guard = EnvGuard::set(&[
+            ("DRY_RUN", "1"),
+            ("STUB_LOG", exec_log.to_str().expect("utf8")),
+        ]);
+        let path_env = exec_path_env(&exec_dir);
+        let report = exec_power::execute(id, Some(&path_env)).expect("dry run succeeds");
+        let mut exec_stdout = String::new();
+        for line in report.dry_run.expect("dry-run effect") {
+            exec_stdout.push_str(&line);
+            exec_stdout.push('\n');
+        }
+        assert_eq!(exec_stdout, wrap_stdout, "{id}: dry-run output byte-exact");
+        assert!(!exec_log.exists(), "{id}: executor dry-run spawns nothing");
+        drop(guard);
+
+        // Wrapper, live.
+        let (wrap_live, output) =
+            run_wrapper_with_stubs(&format!("parity-live-{id}"), action_line, false);
+        assert!(output.status.success(), "{id}: wrapper live exits 0");
+        let wrap_calls = std::fs::read_to_string(wrap_live.join("calls.log")).unwrap_or_default();
+        assert_eq!(
+            wrap_calls,
+            format!("{dispatch_line}\n"),
+            "{id}: wrapper call"
+        );
+
+        // Executor, live: byte-identical tool-call sequence.
+        let exec_live = exec_stub_dir(&format!("parity-live-{id}"));
+        install_log_stubs(&exec_live);
+        let exec_live_log = exec_live.join("calls.log");
+        let guard = EnvGuard::set(&[
+            ("DRY_RUN", "0"),
+            ("STUB_LOG", exec_live_log.to_str().expect("utf8")),
+        ]);
+        let path_env = exec_path_env(&exec_live);
+        let report = exec_power::execute(id, Some(&path_env)).expect("live succeeds");
+        assert_eq!(report.dry_run, None, "{id}: live has no dry effect");
+        assert_eq!(
+            read_exec_log(&exec_live),
+            wrap_calls,
+            "{id}: tool-call sequences byte-identical"
+        );
+        drop(guard);
+
+        let _ = std::fs::remove_dir_all(&wrap_dir);
+        let _ = std::fs::remove_dir_all(&exec_dir);
+        let _ = std::fs::remove_dir_all(&wrap_live);
+        let _ = std::fs::remove_dir_all(&exec_live);
+    }
+}
+
+// --- Binary tests (no pty) ---------------------------------------------------
+
+/// Binary level without a pty: the menu cannot start, so the binary exits 1
+/// with exactly one `flex: error:` prefix (the runner owns it; executor
+/// errors carry none). `setsid` detaches the controlling terminal so no
+/// harness tty can satisfy the TUI init.
+#[test]
+fn binary_errors_carry_a_single_prefix() {
+    let output = std::process::Command::new("setsid")
+        .arg(env!("CARGO_BIN_EXE_flex-power"))
+        .env("POPUP_KITTY", "1")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("run flex-power without a pty");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty(), "no stdout on error");
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(
+        stderr.starts_with("flex: error: "),
+        "runner prefix first: {stderr:?}"
+    );
+    assert_eq!(
+        stderr.matches("flex: error:").count(),
+        1,
+        "exactly one prefix: {stderr:?}"
+    );
+}
+
+/// Outside a popup the binary re-execs into the `menu` popup (the shared
+/// runner guard); the kitty spawn is asserted against a stub `PATH`.
+#[test]
+fn binary_outside_a_popup_reexecs_into_the_menu_popup() {
+    let dir = exec_stub_dir("guard");
+    let home = exec_stub_dir("guard-home");
+    let kitty_log = dir.join("kitty.log");
+    write_exe(&dir.join("pgrep"), "#!/usr/bin/env bash\nexit 1\n");
+    write_exe(
+        &dir.join("kitty"),
+        &format!(
+            "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > '{}.tmp'\nmv '{}.tmp' '{}'\n",
+            kitty_log.display(),
+            kitty_log.display(),
+            kitty_log.display(),
+        ),
+    );
+    let path_env = exec_path_env(&dir);
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_flex-power"))
+        .env("PATH", &path_env)
+        .env("HOME", &home)
+        .env_remove("POPUP_KITTY")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("run flex-power outside a popup");
+    assert!(
+        output.status.success(),
+        "toggle exits 0: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let logged = loop {
+        if let Ok(body) = std::fs::read_to_string(&kitty_log) {
+            break body.lines().map(str::to_string).collect::<Vec<_>>();
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "kitty spawn never logged"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    assert!(
+        logged.contains(&String::from("--class"))
+            && logged.contains(&String::from("flex-menu"))
+            && logged.contains(&String::from("POPUP_KITTY=1")),
+        "re-exec uses the menu popup template: {logged:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&home);
 }

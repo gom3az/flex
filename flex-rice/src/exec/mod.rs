@@ -10,6 +10,7 @@
 pub mod center;
 pub mod clip;
 pub mod launch;
+pub mod power;
 pub mod shot;
 pub mod theme;
 pub mod wallpaper;

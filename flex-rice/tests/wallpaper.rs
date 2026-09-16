@@ -918,7 +918,9 @@ fn binary_errors_carry_a_single_prefix() {
 fn binary_outside_a_popup_reexecs_into_the_wide_popup() {
     let _env = ENV_LOCK.lock().expect("env lock");
     let dir = scratch("exec-guard");
+    let home = scratch("exec-guard-home");
     std::fs::create_dir_all(&dir).expect("stub dir");
+    std::fs::create_dir_all(&home).expect("home dir");
     let kitty_log = dir.join("kitty.log");
     std::fs::write(dir.join("pgrep"), "#!/usr/bin/env bash\nexit 1\n").expect("pgrep stub");
     std::fs::set_permissions(dir.join("pgrep"), std::fs::Permissions::from_mode(0o755))
@@ -943,7 +945,6 @@ fn binary_outside_a_popup_reexecs_into_the_wide_popup() {
         .stdin(std::process::Stdio::null())
         .output()
         .expect("run flex-wallpaper outside a popup");
-    }
     assert!(
         output.status.success(),
         "toggle exits 0: {:?}",
