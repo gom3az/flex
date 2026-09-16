@@ -434,7 +434,7 @@ makes the dialog a flex provider instead of a package dependency.
 | Suite | File | What it gates |
 |---|---|---|
 | Golden (TestBackend) | `flex-rice/tests/golden.rs` | Empty tab bar, danger, gauge on/offline, truncation @80x24 |
-| Entry-point contract | `flex-rice/tests/entrypoints.rs` | `--help`/`--version` on all nine binaries |
+| Entry-point contract | `flex-rice/tests/entrypoints.rs` | `--help`/`--version` on all binaries |
 | Error prefix | `flex-rice/tests/prefix.rs` | Exactly one `flex: error:` across the provider binaries |
 | Key state machine | `flex-core/tests/keys.rs` | Q1 digit/Alt-digit, Q6 q-quit, danger confirm timing (29-case `FLEX_TEST` seed table + empty-app safeties) |
 | Power cutover | `flex-rice/tests/power.rs` | Bash-exact rows, single-Enter-never-confirms gate, hold/expiry replays, armed-danger golden, executor dry-run + dispatch |
@@ -448,3 +448,33 @@ makes the dialog a flex provider instead of a package dependency.
 
 Viewport matrix for all golden tests: `640x420` + `1000x600` @ `font_size 10`
 (see `UI_UX_doc.md`); terminal grid reference `80x24` for `TestBackend` goldens.
+
+
+---
+
+## Post-cutover extension: the remaining shell (2026-09-16)
+
+With the eight wrapper binaries already retired, the remaining hand-written
+shell that flex depended on was ported too, so the call path is now fully
+bash-free:
+
+- **`cliphist.sh add|pin|unpin|current`** → `flex-clip` verbs
+  (`exec::clip::{add,pin,unpin,current}`, `CLIPHIST_CURRENT` seam). The
+  `wl-paste --watch` hook and the pin bind call the binary directly.
+- **`kill-menu.sh` (htop)** → **`flex-proc`**, a native `/proc` process
+  manager: label `<comm> <pid>`, meta `<cpu%> <mem%> <user>`, 1 s tick with
+  focus preserved by pid; Enter = SIGTERM, Delete = SIGKILL, `m` =
+  SIGSTOP/SIGCONT; kernel threads hidden unless `FLEX_PROC_KTHREADS`.
+- **`theme-switcher.sh list|current|activate|delete`** → `flex-theme` verbs;
+  **`set-wallpaper.sh`** → `flex-wallpaper set <path>`; both reuse the
+  already-ported native activator/setter.
+- **`recording-start/status/stop.sh`** → **`flex-record`** (the drop-in
+  `[-a] [-g GEOM] FILE` start shape plus `status`/`stop`); `flex-shot`'s
+  `RECORDING_START` default points at it (`FLEX_RECORD_INFO` seam).
+
+`setup.sh` now links eleven binaries. New suites: `clip_verbs`,
+`theme_verbs`, `wallpaper_verbs`, `proc`, `record`.
+
+The theme/wallpaper generators (`generate-theme.sh`,
+`generate-static-theme.sh`, `extract-colors.py`) remain bash/Python: they are
+manual, offline tooling, not on any runtime call path.

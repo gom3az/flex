@@ -949,6 +949,17 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
+    /// Serialize the tests that mutate `FLEX_WIFI_PASSWORD`: the process env
+    /// is global, so parallel set/remove races produced a real flake
+    /// (a stored-password test reading the fallback's removed value).
+    fn password_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        match LOCK.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
     /// `read_password_with` sources without a live tty: `None` tty plus a
     /// piped-stdin `Cursor` (the stdin-fallback path, byte for byte).
     fn no_tty(stdin: &[u8]) -> (Option<&mut dyn BufRead>, Cursor<Vec<u8>>) {
@@ -1118,6 +1129,7 @@ mod tests {
 
     #[test]
     fn stored_password_skips_the_prompt_entirely() {
+        let _guard = password_env_lock();
         let saved = std::env::var("FLEX_WIFI_PASSWORD").ok();
         std::env::set_var("FLEX_WIFI_PASSWORD", "s3cret");
         let (tty, mut stdin) = no_tty(b"ignored\n");
@@ -1136,6 +1148,7 @@ mod tests {
 
     #[test]
     fn prompt_goes_to_stderr_and_stdin_fallback_answers() {
+        let _guard = password_env_lock();
         let saved = std::env::var("FLEX_WIFI_PASSWORD").ok();
         std::env::remove_var("FLEX_WIFI_PASSWORD");
         // No tty: the piped-stdin fallback answers (mandate 2).
@@ -1156,6 +1169,7 @@ mod tests {
 
     #[test]
     fn empty_answer_prints_the_explicit_line() {
+        let _guard = password_env_lock();
         let saved = std::env::var("FLEX_WIFI_PASSWORD").ok();
         std::env::remove_var("FLEX_WIFI_PASSWORD");
         // EOF on piped stdin reads as empty (mandate 3).
@@ -1175,6 +1189,7 @@ mod tests {
 
     #[test]
     fn tty_is_read_first_and_stdin_only_on_tty_failure() {
+        let _guard = password_env_lock();
         let saved = std::env::var("FLEX_WIFI_PASSWORD").ok();
         std::env::remove_var("FLEX_WIFI_PASSWORD");
         // A live tty answers: stdin stays untouched (the wrapper's

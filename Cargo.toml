@@ -5,10 +5,11 @@
 #   flex-core   the reusable TUI menu engine (rendering, filtering, keys,
 #               design system, kitty-graphics previews). No machine-specific
 #               paths; stays publishable.
-#   flex-rice   this rice's glue: the eight providers that adapt
-#               hyprpaper/cliphist/nmcli/wpctl/… to the engine, the `flex`
-#               binary, and the shell wrappers that Hyprland and Waybar call.
-#               Machine-specific by nature (`publish = false`).
+#   flex-rice   this rice's glue: the providers that adapt
+#               hyprpaper/cliphist/nmcli/wpctl/proc/… to the engine, the
+#               `flex` dispatcher, and the `flex-<provider>` provider
+#               binaries plus the `flex-record` helper that Hyprland and
+#               Waybar call. Machine-specific by nature (`publish = false`).
 #
 # Dependencies run one way (`flex-rice` → `flex-core`, a path dependency —
 # no tags, no `[patch]` dance). Profiles and lints are honoured only here.

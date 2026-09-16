@@ -7,12 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Per-provider-binary migration: the eight providers now execute **in-process**
+Per-provider-binary migration: the providers now execute **in-process**
 in Rust, and the shell wrappers are retired. The `ACTION:` wire protocol is no
 longer consumed by anything — each binary selects a row and runs its effect
 directly.
 
 ### Added
+- `flex-clip add|pin|unpin|current`, `flex-theme list|current|activate|delete`
+  and `flex-wallpaper set <path>`: the retired `cliphist.sh` /
+  `theme-switcher.sh` / `set-wallpaper.sh` entry points as non-interactive
+  verbs (`flex <provider> <verb>` forwards through the dispatcher).
+- `flex-proc`: a native process manager (filter `/proc`; Enter = SIGTERM,
+  Delete = SIGKILL, `m` = stop/continue) replacing the htop-based
+  `kill-menu.sh`. `FLEX_PROC_KTHREADS` includes kernel threads.
+- `flex-record`: the `recording-start.sh`/`recording-status.sh`/
+  `recording-stop.sh` helpers as one binary (the drop-in `[-a] [-g GEOM]
+  FILE` start shape plus `status`/`stop`); `FLEX_RECORD_INFO` overrides the
+  registry path.
 - `flex popup <variant> <cmd…>`: the dispatcher's popup toggle/spawn helper
   (used by dotfiles `kill-menu.sh`), keyed on the variant class.
 - `flex-rice/src/exec/*.rs`: one executor module per provider, porting the
@@ -20,18 +31,23 @@ directly.
   (`runner::popup_guard` → `runner::build_menu` → `flex_core::run::run_capture`
   → `exec::<provider>::execute`).
 - `flex-rice/tests/entrypoints.rs`: the `--help`/`--version` contract for the
-  nine binaries (replacing `tests/wrappers.rs`).
+  binaries (replacing `tests/wrappers.rs`).
 
 ### Changed
-- The eight providers are eight `flex-<provider>` binaries over the shared
-  `runner`, alongside the `flex` compat dispatcher — nine entry points in all.
+- The shell call path is fully retired: `cliphist.sh`, `kill-menu.sh`,
+  `theme-switcher.sh`, `set-wallpaper.sh` and `recording-*.sh` are gone, and
+  `flex-shot`'s recording helper defaults to the `flex-record` binary.
+- `flex-proc` joins the wide popup variant (`flex-menu-wide`).
+- `setup.sh` links the eleven release binaries into `~/.local/bin`, and
+  `setup.sh --check` is the gate that all eleven resolve to executables.
+- The providers are `flex-<provider>` binaries over the shared `runner`,
+  alongside the `flex` compat dispatcher and the `flex-record` helper —
+  eleven entry points in all.
 - Popups are terminal-agnostic: the host terminal comes from `$TERMINAL`
   (kitty template; unknown/empty warns once and falls back to kitty, never
   exits `1`).
 - Popup window classes are `flex-menu` / `flex-menu-wide` (the old
   `kitty-menu*` names are gone); toggle stays keyed on the variant.
-- `setup.sh` links the nine release binaries into `~/.local/bin`, and
-  `setup.sh --check` is the gate that all nine resolve to executables.
 - `--print-action` is the only remaining producer of an `ACTION:` line: an
   end-to-end row→action probe with no execution.
 - `Terminal=true` desktop entries are hosted by `$TERMINAL` (the

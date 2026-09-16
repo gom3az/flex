@@ -1,6 +1,6 @@
 [package]
 name = "flex-rice"
-description = "Hyprland-rice glue for flex-core: the eight providers and the `flex` dispatcher"
+description = "Hyprland-rice glue for flex-core: the providers and the `flex` dispatcher"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

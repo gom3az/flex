@@ -1,9 +1,10 @@
 # flex — reusable Rust TUI menu library
 
 `flex` powers the dotfiles popup menus (`power`, `launch`, `clip`, `center`,
-`shot`, `theme`, `wallpaper`, `wifi`). Every provider is a Rust binary that
-renders its menu and executes the selected row **in-process** — the retired
-shell wrappers and the `ACTION:` wire protocol are no longer on the call path.
+`shot`, `theme`, `wallpaper`, `wifi`, `proc`). Every provider is a Rust binary
+that renders its menu and executes the selected row **in-process** — the
+retired shell wrappers and the `ACTION:` wire protocol are no longer on the
+call path.
 
 ## Workspace layout
 
@@ -12,7 +13,7 @@ Both halves of flex live in this repo as workspace members:
 | Crate | Where it lives | Publishable |
 |---|---|---|
 | `flex-core` | This repo, `flex-core/`: the engine — menu/list rendering, fuzzy filtering, key handling, the design system, kitty-graphics previews. No machine-specific paths. | Yes |
-| `flex-rice` | This repo, `flex-rice/`: the eight providers, their executors (`exec/`), the `flex` dispatcher and the eight `flex-<provider>` binaries. Reads `~/.config/themes`, `hyprpaper.conf`, `~/.cache/cliphist` and ML4W's wallpaper cache. | No (`publish = false`) |
+| `flex-rice` | This repo, `flex-rice/`: the nine providers, their executors (`exec/`), the `flex` dispatcher and the `flex-<provider>` binaries. Reads `~/.config/themes`, `hyprpaper.conf`, `~/.cache/cliphist`, `/proc` and ML4W's wallpaper cache. | No (`publish = false`) |
 
 Dependencies run one way (`flex-rice` → `flex-core`). The engine's only former
 reach into providers is now a seam: `Menu::on_tick` takes a `TickHook`, and
@@ -21,7 +22,7 @@ finished `wifi` scan — build menus in this repo with `flex_rice::menu(…)`,
 which installs it.
 
 ```sh
-cargo test                       # the whole workspace (479 passed, 1 ignored)
+cargo test                       # the whole workspace
 cargo build --release            # → target/release/{flex,flex-power,…}
 cargo clippy --locked --all-targets -- -D warnings
 ```
@@ -33,20 +34,22 @@ see `Docs/project_structure.md` → "Working on the engine".
 
 ## Entry points
 
-Nine binaries are built from `flex-rice`: the `flex` dispatcher plus one
-binary per provider.
+Eleven binaries are built from `flex-rice`: the `flex` dispatcher, one binary
+per provider, and the `flex-record` helper.
 
 | Binary | Provider | What it does |
 |---|---|---|
-| `flex` | dispatcher | `flex popup …`, `flex <provider> [args…]` |
+| `flex` | dispatcher | `flex popup …`, `flex <provider> [verb] [args…]` |
 | `flex-power` | power | Shutdown/reboot/logout menu: `hyprlock`, `systemctl suspend\|reboot\|poweroff`, `pkill -SIGTERM Hyprland` |
 | `flex-launch` | launch | Application launcher: scans `.desktop` entries and detaches the chosen app with `setsid -f` (`$TERMINAL -e` for `Terminal=true`) |
-| `flex-shot` | shot | Screenshot/recording flow: `slurp`, `grim`, `wl-copy`, `notify-send`, or the `RECORDING_START` helper |
-| `flex-theme` | theme | Theme switcher: scans `~/.config/themes/available` and activates the selection in-process (`$THEME_SWITCHER` overrides with `<switcher> activate <name>`) |
-| `flex-clip` | clip | Clipboard history: `wl-copy` a selection, delete it, pin/unpin it |
+| `flex-shot` | shot | Screenshot/recording flow: `slurp`, `grim`, `wl-copy`, `notify-send`, or the `flex-record` helper (`RECORDING_START` overrides) |
+| `flex-theme` | theme | Theme switcher: scans `~/.config/themes/available` and activates the selection in-process; `list`/`current`/`activate`/`delete` verbs (`$THEME_SWITCHER` overrides with `<switcher> activate <name>`) |
+| `flex-clip` | clip | Clipboard history: `wl-copy` a selection, delete it, pin/unpin it; `add`/`pin`/`unpin`/`current` verbs |
 | `flex-center` | center | Control center: volume/brightness/network/bluetooth/power/theme tabs |
-| `flex-wallpaper` | wallpaper | Wallpaper picker with a kitty-graphics preview pane; sets the selection in-process (hyprpaper socket + `hyprpaper.conf`; `$SET_WALLPAPER` overrides with `<setter> <path>`) |
+| `flex-wallpaper` | wallpaper | Wallpaper picker with a kitty-graphics preview pane; sets the selection in-process (hyprpaper socket + `hyprpaper.conf`); `set <path>` verb (`$SET_WALLPAPER` overrides with `<setter> <path>`) |
 | `flex-wifi` | wifi | Wi-Fi picker: radio on/off, disconnect, connect (saved profile or password prompt) |
+| `flex-proc` | proc | Native process manager: filter `/proc`, Enter = SIGTERM, Delete = SIGKILL, `m` = stop/continue |
+| `flex-record` | — | Recording helper: `[-a] [-g GEOM] FILE` (start), `status`, `stop` |
 
 Every provider binary runs the same shared flow:
 
@@ -61,14 +64,16 @@ module (`flex-rice/src/exec/*.rs`) owns that provider's side effects. They run
 
 ## The `flex` dispatcher
 
-`flex` (`flex-rice/src/main.rs`) is a compat dispatcher over the eight
-provider binaries:
+`flex` (`flex-rice/src/main.rs`) is a compat dispatcher over the provider
+binaries:
 
 - `flex popup <menu|menu-wide> <cmd…>` toggles (or spawns) the popup running
-  `cmd`; the dotfiles `kill-menu.sh` helper uses this.
-- `flex <provider> [args…]` re-execs the sibling `flex-<provider>` binary,
-  reconstructing the global flags (`-s/-t/-p/--filter-mode`) in canonical
-  order, so `flex -t nocolor launch` ≡ `flex launch -t nocolor`.
+  `cmd` (the helper dotfiles scripts such as the mixer popup use).
+- `flex <provider> [verb] [args…]` re-execs the sibling `flex-<provider>`
+  binary, reconstructing the global flags (`-s/-t/-p/--filter-mode`) in
+  canonical order, so `flex -t nocolor launch` ≡ `flex launch -t nocolor`.
+  Verb-bearing providers accept the non-interactive verbs (`flex clip add`,
+  `flex theme list`, `flex wallpaper set <path>`).
 
 The executors resolve row ids in-process via the library resolver functions
 (`flex_rice::providers::{clip,wallpaper,launch,theme_}`), so no lookup is a
@@ -113,14 +118,16 @@ These are direct `Command` spawns of the named tools, not shell invocations.
 | `SET_WALLPAPER` | wallpaper | Wallpaper-setting override; unset/empty runs the in-process setter |
 | `DRY_RUN` | power | When exactly `1`, print `would run: <cmd>` instead of executing |
 | `FLEX_WIFI_PASSWORD`, `FLEX_CENTER_PASSWORD` | wifi, center | Skip the `/dev/tty` password prompt |
-| `SCREENSHOT_DIR`, `RECORDING_START` | shot | Capture output dir / recording helper override |
-| `CLIPHIST_FILE`, `CLIPHIST_PINS` | clip | History and pins store overrides |
+| `SCREENSHOT_DIR`, `RECORDING_START` | shot | Capture output dir / recording helper override (defaults to `flex-record`) |
+| `CLIPHIST_FILE`, `CLIPHIST_PINS`, `CLIPHIST_CURRENT` | clip | History, pins and current-entry store overrides |
+| `FLEX_PROC_KTHREADS` | proc | Show kernel threads (empty cmdline) in the process list |
+| `FLEX_RECORD_INFO` | record | Recording registry path override (default `/tmp/recording.info`) |
 | `TERMINAL` | popups | Terminal used to host a popup (see below) |
 
 ## Popups
 
 Popups use the window classes `flex-menu` (compact variant: power/shot/theme/
-wifi) and `flex-menu-wide` (wide variant: launch/clip/center/wallpaper).
+wifi) and `flex-menu-wide` (wide variant: launch/clip/center/wallpaper/proc).
 Toggle is keyed on the **variant**, not the provider, so opening `wifi` while
 the `power` popup is up closes it instead of stacking. The hosting terminal
 comes from `$TERMINAL`; an unknown or empty value warns once on stderr and
@@ -129,8 +136,8 @@ falls back to kitty, never exits `1` (`flex-rice/src/popup.rs`,
 
 ## `setup.sh`
 
-`setup.sh` symlinks the nine release binaries from `target/release/` into
-`~/.local/bin`; `setup.sh --check` is the gate that all nine resolve to
+`setup.sh` symlinks the eleven release binaries from `target/release/` into
+`~/.local/bin`; `setup.sh --check` is the gate that all eleven resolve to
 executables.
 
 ## Image previews (`wallpaper`)
