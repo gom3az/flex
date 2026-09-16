@@ -75,6 +75,9 @@ struct ProcIoSample {
     wchar: u64,
 }
 
+/// Fallback base directory for process stat storage.
+const DEFAULT_PROC_STAT_FILE: &str = "flex-net-proc.stat";
+
 /// Static process I/O sample cache across ticks.
 fn proc_io_cache() -> &'static Mutex<HashMap<u32, ProcIoSample>> {
     static CACHE: OnceLock<Mutex<HashMap<u32, ProcIoSample>>> = OnceLock::new();
@@ -95,6 +98,51 @@ fn stat_file_path() -> PathBuf {
     }
     let user = std::env::var("USER").unwrap_or_else(|_| "default".to_string());
     std::env::temp_dir().join(format!("{DEFAULT_STAT_FILE}-{user}"))
+}
+
+/// Resolve the process stat cache file path.
+fn proc_stat_file_path() -> PathBuf {
+    if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
+        if !runtime_dir.is_empty() {
+            return PathBuf::from(runtime_dir).join(DEFAULT_PROC_STAT_FILE);
+        }
+    }
+    let user = std::env::var("USER").unwrap_or_else(|_| "default".to_string());
+    std::env::temp_dir().join(format!("{DEFAULT_PROC_STAT_FILE}-{user}"))
+}
+
+/// Read cached process samples from disk.
+fn read_proc_stat_cache(path: &Path) -> HashMap<u32, ProcIoSample> {
+    let mut map = HashMap::new();
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return map;
+    };
+    for line in content.lines() {
+        let mut fields = line.split_whitespace();
+        let Some(pid) = fields.next().and_then(|s| s.parse::<u32>().ok()) else {
+            continue;
+        };
+        let Some(ts_ms) = fields.next().and_then(|s| s.parse::<u128>().ok()) else {
+            continue;
+        };
+        let Some(rchar) = fields.next().and_then(|s| s.parse::<u64>().ok()) else {
+            continue;
+        };
+        let Some(wchar) = fields.next().and_then(|s| s.parse::<u64>().ok()) else {
+            continue;
+        };
+        map.insert(pid, ProcIoSample { ts_ms, rchar, wchar });
+    }
+    map
+}
+
+/// Write process samples to disk.
+fn write_proc_stat_cache(path: &Path, samples: &HashMap<u32, ProcIoSample>) {
+    let mut buf = String::with_capacity(samples.len() * 40);
+    for (pid, s) in samples {
+        let _ = writeln!(buf, "{} {} {} {}", pid, s.ts_ms, s.rchar, s.wchar);
+    }
+    let _ = std::fs::write(path, buf);
 }
 
 /// Find the default network interface name from `/proc/net/route`.
@@ -284,6 +332,11 @@ pub fn scan_top_talkers() -> Vec<ProcessBandwidth> {
         Err(p) => p.into_inner(),
     };
 
+    let proc_stat_path = proc_stat_file_path();
+    if guard.is_empty() {
+        *guard = read_proc_stat_cache(&proc_stat_path);
+    }
+
     let proc_dir = Path::new("/proc");
     let Ok(entries) = std::fs::read_dir(proc_dir) else {
         return Vec::new();
@@ -340,6 +393,7 @@ pub fn scan_top_talkers() -> Vec<ProcessBandwidth> {
         );
     }
 
+    write_proc_stat_cache(&proc_stat_path, &fresh_cache);
     *guard = fresh_cache;
 
     // Calculate bandwidth share
