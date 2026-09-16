@@ -1,15 +1,26 @@
 //! `flex-clip` binary: the clipboard history.
 //!
 //! Thin shell over the shared [`runner`]: popup guard, menu construction,
-//! then select+print. The execute phase is still a stub (see the
-//! `TODO(executor)` below); the shell wrapper owns the side effects.
+//! then select+execute through [`exec::clip`] (the port of
+//! `wrappers/flex-clip.sh`, which stays live until cutover). `--print-action`
+//! keeps the end-to-end probe of the row→action mapping with no execution.
+//!
+//! Clip rows are deletable, so unlike `shot`/`theme`/`wallpaper`/`launch`
+//! (whose bins bail on `Delete`/`Toggle` as unexpected) this bin handles
+//! `Outcome::Delete` (remove the entry) and `Outcome::Toggle` (flip the pin)
+//! via [`exec::clip`]; only `Outcome::Target` bails (clip rows carry no
+//! dropdown targets).
 //!
 //! [`runner`]: flex_rice::runner
+//! [`exec::clip`]: flex_rice::exec::clip
 
 use clap::Parser;
+use flex_core::backend::EXIT_CANCELLED;
+use flex_core::Outcome;
+use flex_rice::exec::clip::{self, ClipOp};
 use flex_rice::runner::{self, GlobalStyle, Provider};
 
-/// Clipboard history: select a row, print `ACTION:`, let the wrapper act.
+/// Clipboard history: select a row and copy, delete, or (un)pin it.
 #[derive(Debug, Parser)]
 #[command(name = "flex-clip", version, about = "Clipboard history")]
 struct Cli {
@@ -30,12 +41,13 @@ fn main() {
     }
 }
 
-/// Parse args, guard the popup, then select.
+/// Parse args, guard the popup, then select+execute.
 ///
 /// # Errors
 ///
-/// Returns an error when the popup toggle or the select loop fails. The
-/// error carries no `flex:` prefix; `main` adds it via the runner.
+/// Returns an error when the popup toggle or the select loop fails, the
+/// action id is unknown, or the copy/delete/toggle cannot run. The error
+/// carries no `flex:` prefix; `main` adds it via the runner.
 fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let style = cli.style.options();
@@ -44,7 +56,28 @@ fn run() -> anyhow::Result<()> {
         // Probe path: exercise the real row→action mapping, never execute.
         return runner::run_select(Provider::Clip, style);
     }
-    // TODO(executor): the execute phase is a stub — selection prints the
-    // ACTION: line and exits 0; the real clip executor lands later.
-    runner::run_select(Provider::Clip, style)
+    let menu = runner::build_menu(Provider::Clip, style)?;
+    match flex_core::run::run_capture(menu)? {
+        Outcome::Chosen { action_id, .. } => {
+            clip::execute(ClipOp::Copy, &action_id, None)?;
+            Ok(())
+        }
+        Outcome::Delete { action_id, .. } => {
+            clip::execute(ClipOp::Delete, &action_id, None)?;
+            Ok(())
+        }
+        Outcome::Toggle { action_id, .. } => {
+            clip::execute(ClipOp::Toggle, &action_id, None)?;
+            Ok(())
+        }
+        Outcome::Target { row, .. } => {
+            anyhow::bail!("clip: unexpected target outcome for '{row}'")
+        }
+        Outcome::Quit { code } => {
+            std::process::exit(code);
+        }
+        Outcome::Cancelled => {
+            std::process::exit(EXIT_CANCELLED);
+        }
+    }
 }

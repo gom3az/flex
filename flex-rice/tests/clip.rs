@@ -222,6 +222,8 @@ fn clip_tab_is_standard_deletable() {
 
 #[test]
 fn env_overrides_select_the_store() {
+    // Serialised with the executor tests below (shared process env).
+    let _env = EXEC_ENV_LOCK.lock().expect("env lock");
     let dir = scratch("env");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
@@ -721,5 +723,649 @@ fn unknown_resolve_id_is_reported_with_a_single_prefix() {
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
         "flex: error: clip: unknown id 'deadbeef'\n"
+    );
+}
+
+// --- Executor (`flex-rice/src/exec/clip.rs`) ----------------------------------
+//
+// The clip port of the `exec::shot` template: `ClipAction::parse` validates
+// the id (`^[0-9a-f]+$`, plus the shared `noop` short-circuit), `execute`
+// resolves the hash in-process (no `flex clip --resolve` subprocess) and
+// runs the copy/delete/toggle steps through the stub-`PATH` tool seam
+// (`wl-copy` piped, `notify-send` inherited) plus exact-line store edits
+// (`CLIPHIST_FILE`/`CLIPHIST_PINS`, empty values fall back like the
+// wrapper's `${VAR:-default}`). No TUI, no pty: stub `PATH` + scratch
+// stores. New process-env mutations are held under `EXEC_ENV_LOCK` (shared
+// with the one pre-existing env-mutating test above).
+//
+// Like the shot suite, the popup guard itself lives in the shared runner
+// (covered by `popup.rs`), with one binary-level re-exec probe below.
+
+/// Serialises the executor tests below: each mutates `CLIPHIST_FILE` /
+/// `CLIPHIST_PINS` (the seams `execute` reads) and the harness runs tests in
+/// parallel, so the mutations are held under one lock with restores in
+/// [`ExecEnvGuard`].
+static EXEC_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Save/restore one process env var around an executor call.
+struct ExecEnvGuard {
+    key: &'static str,
+    old: Option<String>,
+}
+
+fn set_exec_env(key: &'static str, value: &std::path::Path) -> ExecEnvGuard {
+    let old = std::env::var(key).ok();
+    std::env::set_var(key, value);
+    ExecEnvGuard { key, old }
+}
+
+impl Drop for ExecEnvGuard {
+    fn drop(&mut self) {
+        match &self.old {
+            Some(value) => std::env::set_var(self.key, value),
+            None => std::env::remove_var(self.key),
+        }
+    }
+}
+
+/// Write an executable stub script.
+fn write_exe(path: &std::path::Path, body: &str) {
+    std::fs::write(path, body).expect("stub script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+}
+
+fn exec_stub_path(dir: &std::path::Path) -> String {
+    format!(
+        "{}:{}",
+        dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    )
+}
+
+/// `wl-copy` stub capturing stdin to `copied.bin` plus `notify-send` stub,
+/// both appending `argv`-joined call lines (the wrapper-parity shape).
+fn install_clip_tool_stubs(dir: &std::path::Path) {
+    write_exe(
+        &dir.join("wl-copy"),
+        &format!(
+            "#!/usr/bin/env bash\ncat > \"{}/copied.bin\"\necho \"wl-copy $@\" >> \"{}/calls.log\"\n",
+            dir.display(),
+            dir.display()
+        ),
+    );
+    write_exe(
+        &dir.join("notify-send"),
+        &format!(
+            "#!/usr/bin/env bash\necho \"notify-send $@\" >> \"{}/calls.log\"\n",
+            dir.display()
+        ),
+    );
+}
+
+/// Scratch store + stubs for one executor case: returns the dir, the store
+/// paths, and the stub `PATH`. Callers hold `EXEC_ENV_LOCK` and set the two
+/// store env vars themselves (so the test body shows the seam wiring).
+fn setup_exec_case(name: &str, hist: &[u8], pins: &[u8]) -> (PathBuf, PathBuf, PathBuf, String) {
+    let dir = scratch(&format!("exec-{name}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("stub dir");
+    install_clip_tool_stubs(&dir);
+    let hist_path = dir.join("cliphist");
+    let pins_path = dir.join("cliphist.pins");
+    std::fs::write(&hist_path, hist).expect("hist");
+    std::fs::write(&pins_path, pins).expect("pins");
+    let path_env = exec_stub_path(&dir);
+    (dir, hist_path, pins_path, path_env)
+}
+
+fn read_call_log(dir: &std::path::Path) -> String {
+    std::fs::read_to_string(dir.join("calls.log")).unwrap_or_default()
+}
+
+/// Full copy matrix: placeholder, glob, and long entries all copy decoded
+/// bytes through the `wl-copy` seam with one notify each, stores untouched.
+#[test]
+fn executor_copy_matrix_copies_decoded_bytes_through_wl_copy() {
+    use flex_rice::exec::clip::ClipOp;
+    let _env = EXEC_ENV_LOCK.lock().expect("env lock");
+    let long = "L".repeat(200);
+    let raws = [
+        "alpha<NEWLINE>beta gamma".to_string(),
+        "glob *[abc]? {x,y}".to_string(),
+        long.clone(),
+    ];
+    let mut hist = String::new();
+    for raw in &raws {
+        hist.push_str(raw);
+        hist.push('\n');
+    }
+    let (dir, hist_path, pins_path, path_env) = setup_exec_case("copy", hist.as_bytes(), b"");
+    let _hist_env = set_exec_env(clip::HIST_ENV, &hist_path);
+    let _pins_env = set_exec_env(clip::PINS_ENV, &pins_path);
+    for raw in &raws {
+        let id = content_hash_hex(raw);
+        let report = flex_rice::exec::clip::execute(ClipOp::Copy, &id, Some(&path_env))
+            .expect("copy succeeds");
+        assert_eq!(report.op, Some(ClipOp::Copy));
+        assert_eq!(report.raw.as_deref(), Some(raw.as_str()));
+        assert_eq!(report.pinned, None, "copy reports no pin state");
+        let copied = std::fs::read(dir.join("copied.bin")).expect("wl-copy stdin");
+        let mut expected = clip::decode(raw).into_bytes();
+        expected.push(b'\n');
+        assert_eq!(
+            copied, expected,
+            "placeholder decoded, trailing newline kept"
+        );
+    }
+    assert_eq!(
+        read_call_log(&dir),
+        format!(
+            "wl-copy \n\
+             notify-send -a Cliphist Copied to clipboard alpha<NEWLINE>beta gamma\n\
+             wl-copy \n\
+             notify-send -a Cliphist Copied to clipboard glob *[abc]? {{x,y}}\n\
+             wl-copy \n\
+             notify-send -a Cliphist Copied to clipboard {}\n",
+            "L".repeat(50),
+        ),
+        "one piped wl-copy plus one notify per entry; 50-byte preview on the long one \
+         (describe: `wl-copy`, `notify-send -a Cliphist <summary> <preview>`)",
+    );
+    assert_eq!(
+        std::fs::read(&hist_path).expect("hist"),
+        hist.as_bytes(),
+        "copy never touches the history file"
+    );
+    assert!(
+        std::fs::read(&pins_path).expect("pins").is_empty(),
+        "copy never touches the pins file"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Delete removes the exact line from both files and notifies once.
+#[test]
+fn executor_delete_scrubs_both_store_files() {
+    use flex_rice::exec::clip::ClipOp;
+    let _env = EXEC_ENV_LOCK.lock().expect("env lock");
+    let (dir, hist_path, pins_path, path_env) = setup_exec_case(
+        "delete",
+        b"doomed entry\nkeep me\ndoomextended\n",
+        b"doomed entry\nkeep pin\n",
+    );
+    let _hist_env = set_exec_env(clip::HIST_ENV, &hist_path);
+    let _pins_env = set_exec_env(clip::PINS_ENV, &pins_path);
+    let id = content_hash_hex("doomed entry");
+    let report = flex_rice::exec::clip::execute(ClipOp::Delete, &id, Some(&path_env))
+        .expect("delete succeeds");
+    assert_eq!(report.op, Some(ClipOp::Delete));
+    assert_eq!(report.raw.as_deref(), Some("doomed entry"));
+    assert_eq!(report.pinned, None, "delete reports no pin state");
+    assert_eq!(
+        std::fs::read(&hist_path).expect("hist"),
+        b"keep me\ndoomextended\n",
+        "exact-line match only, rest kept byte-identical"
+    );
+    assert_eq!(
+        std::fs::read(&pins_path).expect("pins"),
+        b"keep pin\n",
+        "pins scrubbed too"
+    );
+    assert_eq!(
+        read_call_log(&dir),
+        "notify-send -a Cliphist Deleted doomed entry\n",
+        "delete is one notify, no wl-copy \
+         (describe: `remove <raw> from history and pins`)"
+    );
+    assert!(
+        !dir.join("cliphist.tmp").exists() && !dir.join("cliphist.pins.tmp").exists(),
+        "tmp rewrites are renamed away"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Delete skips a missing file instead of creating it (the wrapper's
+/// `[[ -f … ]]` guard).
+#[test]
+fn executor_delete_skips_a_missing_history_file() {
+    use flex_rice::exec::clip::ClipOp;
+    let _env = EXEC_ENV_LOCK.lock().expect("env lock");
+    let (dir, hist_path, pins_path, path_env) =
+        setup_exec_case("delete-missing", b"doomed entry\n", b"doomed entry\n");
+    std::fs::remove_file(&hist_path).expect("remove hist");
+    let _hist_env = set_exec_env(clip::HIST_ENV, &hist_path);
+    let _pins_env = set_exec_env(clip::PINS_ENV, &pins_path);
+    let id = content_hash_hex("doomed entry");
+    flex_rice::exec::clip::execute(ClipOp::Delete, &id, Some(&path_env)).expect("delete succeeds");
+    assert!(!hist_path.exists(), "missing history stays missing");
+    assert_eq!(
+        std::fs::read(&pins_path).expect("pins"),
+        b"",
+        "pins still scrubbed"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Toggle appends an unpinned entry, then removes it again; reports carry
+/// the post-run pin state.
+#[test]
+fn executor_toggle_pins_then_unpins() {
+    use flex_rice::exec::clip::ClipOp;
+    let _env = EXEC_ENV_LOCK.lock().expect("env lock");
+    let (dir, hist_path, pins_path, path_env) =
+        setup_exec_case("toggle", b"flip me\nother\n", b"existing pin\n");
+    let _hist_env = set_exec_env(clip::HIST_ENV, &hist_path);
+    let _pins_env = set_exec_env(clip::PINS_ENV, &pins_path);
+    let id = content_hash_hex("flip me");
+    let report =
+        flex_rice::exec::clip::execute(ClipOp::Toggle, &id, Some(&path_env)).expect("pin succeeds");
+    assert_eq!(report.pinned, Some(true), "now pinned");
+    assert_eq!(
+        std::fs::read(&pins_path).expect("pins"),
+        b"existing pin\nflip me\n",
+        "toggle appends the pin"
+    );
+    let report = flex_rice::exec::clip::execute(ClipOp::Toggle, &id, Some(&path_env))
+        .expect("unpin succeeds");
+    assert_eq!(report.pinned, Some(false), "now unpinned");
+    assert_eq!(
+        std::fs::read(&pins_path).expect("pins"),
+        b"existing pin\n",
+        "toggle removes the pin"
+    );
+    assert_eq!(
+        read_call_log(&dir),
+        "notify-send -a Cliphist Pinned to history flip me\n\
+         notify-send -a Cliphist Unpinned flip me\n",
+        "pin then unpin notifies each way (describe: `append <raw> to pins` / \
+         `remove <raw> from pins`)"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Toggle creates a missing pins file including parent dirs (the wrapper's
+/// `mkdir -p` + `touch`).
+#[test]
+fn executor_toggle_creates_a_missing_pins_file() {
+    use flex_rice::exec::clip::ClipOp;
+    let _env = EXEC_ENV_LOCK.lock().expect("env lock");
+    let (dir, hist_path, _pins_path, path_env) =
+        setup_exec_case("toggle-new", b"flip me\n", b"existing pin\n");
+    let nested = dir.join("nested").join("cliphist.pins");
+    let _hist_env = set_exec_env(clip::HIST_ENV, &hist_path);
+    let _pins_env = set_exec_env(clip::PINS_ENV, &nested);
+    let id = content_hash_hex("flip me");
+    let report =
+        flex_rice::exec::clip::execute(ClipOp::Toggle, &id, Some(&path_env)).expect("pin succeeds");
+    assert_eq!(report.pinned, Some(true));
+    assert_eq!(
+        std::fs::read(&nested).expect("pins"),
+        b"flip me\n",
+        "missing pins file created with the entry"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The `noop` placeholder exits 0 before resolving or touching anything
+/// (B-026): even unusable store paths cannot fail it, for every op.
+#[test]
+fn executor_noop_short_circuits_before_store_and_tools() {
+    use flex_rice::exec::clip::ClipOp;
+    let _env = EXEC_ENV_LOCK.lock().expect("env lock");
+    let dir = scratch("exec-noop");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("stub dir");
+    let missing_hist = dir.join("no-such-hist");
+    let missing_pins = dir.join("no-such-pins");
+    let _hist_env = set_exec_env(clip::HIST_ENV, &missing_hist);
+    let _pins_env = set_exec_env(clip::PINS_ENV, &missing_pins);
+    for op in [ClipOp::Copy, ClipOp::Delete, ClipOp::Toggle] {
+        let report = flex_rice::exec::clip::execute(op, "noop", Some(&exec_stub_path(&dir)))
+            .expect("noop is Ok");
+        assert_eq!(report.op, None, "{op:?}: no op ran");
+        assert_eq!(report.raw, None, "{op:?}: nothing resolved");
+        assert_eq!(report.pinned, None, "{op:?}: no pin state");
+    }
+    assert!(
+        !missing_hist.exists() && !missing_pins.exists(),
+        "noop creates no store files"
+    );
+    assert!(!dir.join("calls.log").exists(), "noop spawns no tools");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Malformed ids (`bad id`, mirroring the wrapper check) and well-formed but
+/// unresolvable hashes (`unknown id`) are errors with no `flex:` prefix of
+/// their own — the runner adds the single prefix at the binary boundary.
+#[test]
+fn executor_rejects_bad_and_unknown_ids_without_its_own_prefix() {
+    use flex_rice::exec::clip::ClipOp;
+    let _env = EXEC_ENV_LOCK.lock().expect("env lock");
+    let (dir, hist_path, pins_path, path_env) = setup_exec_case("bad-ids", b"real entry\n", b"");
+    let _hist_env = set_exec_env(clip::HIST_ENV, &hist_path);
+    let _pins_env = set_exec_env(clip::PINS_ENV, &pins_path);
+    let ghost_id = content_hash_hex("ghost entry");
+    let cases = [
+        ("", "clip: bad id ''"),
+        ("a/b", "clip: bad id 'a/b'"),
+        ("a\nb", "clip: bad id 'a\nb'"),
+        ("ABCDEF", "clip: bad id 'ABCDEF'"),
+        ("deadbeef!", "clip: bad id 'deadbeef!'"),
+        (ghost_id.as_str(), "clip: unknown id"),
+    ];
+    for op in [ClipOp::Copy, ClipOp::Delete, ClipOp::Toggle] {
+        for (id, expected) in &cases {
+            let err = flex_rice::exec::clip::execute(op, id, Some(&path_env))
+                .expect_err("bad/unknown id must fail");
+            let message = format!("{err:#}");
+            assert!(
+                message.starts_with(expected),
+                "{op:?} {id:?}: unexpected message: {message:?}"
+            );
+            assert!(
+                !message.contains("flex:"),
+                "no runner prefix below the runner: {message:?}"
+            );
+        }
+    }
+    assert!(
+        !dir.join("calls.log").exists(),
+        "no id failure reaches the tools"
+    );
+    assert_eq!(
+        std::fs::read(&hist_path).expect("hist"),
+        b"real entry\n",
+        "no id failure touches the store"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A failing or missing tool is a loud error, never a quiet cancel: clip
+/// has no `slurp`-like user-cancellable step, so every tool failure exits
+/// non-zero through the runner (the menu-cancel 130 lives in the binary's
+/// `Outcome::Cancelled` arm, shared with shot, and needs a pty).
+#[test]
+fn executor_tool_failure_is_a_loud_error_not_a_quiet_cancel() {
+    use flex_rice::exec::clip::ClipOp;
+    let _env = EXEC_ENV_LOCK.lock().expect("env lock");
+    let (dir, hist_path, pins_path, path_env) = setup_exec_case("tool-fail", b"entry one\n", b"");
+    write_exe(&dir.join("wl-copy"), "#!/usr/bin/env bash\nexit 3\n");
+    let _hist_env = set_exec_env(clip::HIST_ENV, &hist_path);
+    let _pins_env = set_exec_env(clip::PINS_ENV, &pins_path);
+    let id = content_hash_hex("entry one");
+    let err = flex_rice::exec::clip::execute(ClipOp::Copy, &id, Some(&path_env))
+        .expect_err("a failing wl-copy must fail");
+    assert_eq!(format!("{err:#}"), "clip: wl-copy failed");
+    // Missing tool with a tool-less PATH: resolution fails cleanly.
+    let bare = dir.join("bare");
+    std::fs::create_dir_all(&bare).expect("bare dir");
+    let err = flex_rice::exec::clip::execute(ClipOp::Copy, &id, Some(&bare.display().to_string()))
+        .expect_err("a missing wl-copy must fail");
+    assert_eq!(format!("{err:#}"), "clip: wl-copy not found on PATH");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Binary level without a pty: the menu builds from the scratch store, then
+/// the select loop cannot start, so the binary exits 1 with exactly one
+/// `flex: error:` prefix (the runner owns it; executor errors carry none).
+/// `setsid` detaches the controlling terminal so no harness tty can satisfy
+/// the TUI init.
+#[test]
+fn binary_errors_carry_a_single_prefix() {
+    let home = scratch("clip-binary-error");
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(home.join(".cache")).expect("cache dir");
+    std::fs::write(home.join(".cache/cliphist"), b"entry one\n").expect("hist");
+    let output = std::process::Command::new("setsid")
+        .arg(env!("CARGO_BIN_EXE_flex-clip"))
+        .env("HOME", &home)
+        .env("POPUP_KITTY", "1")
+        .env_remove("CLIPHIST_FILE")
+        .env_remove("CLIPHIST_PINS")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("run flex-clip without a pty");
+    let _ = std::fs::remove_dir_all(&home);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty(), "no stdout on error");
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(
+        stderr.starts_with("flex: error: "),
+        "runner prefix first: {stderr:?}"
+    );
+    assert_eq!(
+        stderr.matches("flex: error:").count(),
+        1,
+        "exactly one prefix: {stderr:?}"
+    );
+}
+
+/// Outside a popup the binary re-execs into the `menu-wide` popup (the
+/// shared runner guard); the kitty spawn is asserted against a stub `PATH`.
+#[test]
+fn binary_outside_a_popup_reexecs_into_the_wide_popup() {
+    let dir = scratch("exec-guard");
+    std::fs::create_dir_all(&dir).expect("stub dir");
+    let kitty_log = dir.join("kitty.log");
+    write_exe(&dir.join("pgrep"), "#!/usr/bin/env bash\nexit 1\n");
+    write_exe(
+        &dir.join("kitty"),
+        &format!(
+            "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > '{}.tmp'\nmv '{}.tmp' '{}'\n",
+            kitty_log.display(),
+            kitty_log.display(),
+            kitty_log.display(),
+        ),
+    );
+    let path_env = exec_stub_path(&dir);
+    let saved_path = std::env::var("PATH").ok();
+    std::env::set_var("PATH", &path_env);
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).expect("scratch HOME");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_flex-clip"))
+        .env("HOME", &home)
+        .env_remove("POPUP_KITTY")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("run flex-clip outside a popup");
+    match saved_path {
+        Some(value) => std::env::set_var("PATH", value),
+        None => std::env::remove_var("PATH"),
+    }
+    assert!(
+        output.status.success(),
+        "toggle exits 0: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let logged = loop {
+        if let Ok(body) = std::fs::read_to_string(&kitty_log) {
+            break body.lines().map(str::to_string).collect::<Vec<_>>();
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "kitty spawn never logged"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    assert!(
+        logged.contains(&String::from("--class"))
+            && logged.contains(&String::from("flex-menu-wide"))
+            && logged.contains(&String::from("POPUP_KITTY=1")),
+        "re-exec uses the menu-wide popup template: {logged:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// --- Parity with the untouched wrapper --------------------------------------
+//
+// For every action the wrapper supports (copy, delete, toggle both ways),
+// the wrapper (under stub `PATH` with a canned `flex`) and the executor
+// (over an identical store) must produce byte-identical tool-call sequences
+// and byte-identical store files. The one deliberate departure: the
+// wrapper's `flex clip --resolve` subprocess is resolved in-process (same
+// `clip::resolve` scan the hidden `--resolve` lookup uses), so the wrapper
+// makes one extra `flex` call the executor never spawns — asserted below.
+
+/// `flex` stub answering both wrapper calls: the `ACTION:` line and the
+/// `--resolve` lookup with the canned raw line.
+fn write_parity_flex_stub(dir: &std::path::Path, action_line: &str, raw: &str) {
+    write_exe(
+        &dir.join("flex"),
+        &format!(
+            "#!/usr/bin/env bash\necho \"flex $@\" >> \"{}/flex.log\"\nif [[ \"${{2:-}}\" == \"--resolve\" ]]; then\nprintf '%s\\n' \"{raw}\"\nexit 0\nfi\nprintf '%s\\n' \"{action_line}\"\n",
+            dir.display()
+        ),
+    );
+}
+
+/// Run one parity case: identical stores under `wrap/` (wrapper, canned
+/// `flex`) and `exec/` (the executor), same tool stubs both sides; then
+/// byte-compare the call logs, the copied bytes (copy only), and the store
+/// files.
+fn run_clip_parity(
+    name: &str,
+    op: flex_rice::exec::clip::ClipOp,
+    action_word: &str,
+    raw: &str,
+    hist: &[u8],
+    pins: &[u8],
+) {
+    let _env = EXEC_ENV_LOCK.lock().expect("env lock");
+    let base = scratch(&format!("parity-{name}"));
+    let _ = std::fs::remove_dir_all(&base);
+    let wrap = base.join("wrap");
+    let exec = base.join("exec");
+    for dir in [&wrap, &exec] {
+        std::fs::create_dir_all(dir).expect("parity dir");
+        std::fs::write(dir.join("hist"), hist).expect("hist");
+        std::fs::write(dir.join("pins"), pins).expect("pins");
+        install_clip_tool_stubs(dir);
+    }
+    let hash = content_hash_hex(raw);
+    write_parity_flex_stub(&wrap, &format!("{action_word} clip {hash} {raw}"), raw);
+    let system_path = std::env::var("PATH").unwrap_or_default();
+    let wrapper_out = std::process::Command::new("bash")
+        .arg(wrapper_path())
+        .env("PATH", format!("{}:{system_path}", wrap.display()))
+        .env("CLIPHIST_FILE", wrap.join("hist"))
+        .env("CLIPHIST_PINS", wrap.join("pins"))
+        .env("POPUP_KITTY", "1")
+        .output()
+        .expect("run wrapper");
+    assert!(
+        wrapper_out.status.success(),
+        "{name}: wrapper failed, stderr: {:?}",
+        String::from_utf8_lossy(&wrapper_out.stderr)
+    );
+    let wrap_hist = wrap.join("hist");
+    let wrap_pins = wrap.join("pins");
+    let exec_hist = exec.join("hist");
+    let exec_pins = exec.join("pins");
+    let _hist_env = set_exec_env(clip::HIST_ENV, &exec_hist);
+    let _pins_env = set_exec_env(clip::PINS_ENV, &exec_pins);
+    let exec_result = flex_rice::exec::clip::execute(
+        op,
+        &hash,
+        Some(&format!("{}:{system_path}", exec.display())),
+    );
+    assert!(
+        exec_result.is_ok(),
+        "{name}: executor failed: {exec_result:?}"
+    );
+    assert_eq!(
+        std::fs::read(wrap.join("calls.log")).unwrap_or_default(),
+        std::fs::read(exec.join("calls.log")).unwrap_or_default(),
+        "{name}: tool-call sequences must be byte-identical"
+    );
+    assert_eq!(
+        std::fs::read(wrap.join("copied.bin")).unwrap_or_default(),
+        std::fs::read(exec.join("copied.bin")).unwrap_or_default(),
+        "{name}: wl-copy stdin bytes must be byte-identical"
+    );
+    assert_eq!(
+        std::fs::read(&wrap_hist).unwrap_or_default(),
+        std::fs::read(&exec_hist).unwrap_or_default(),
+        "{name}: history files must be byte-identical"
+    );
+    assert_eq!(
+        std::fs::read(wrap_pins).unwrap_or_default(),
+        std::fs::read(exec_pins).unwrap_or_default(),
+        "{name}: pins files must be byte-identical"
+    );
+    for dir in [&wrap, &exec] {
+        let tmps: Vec<PathBuf> = std::fs::read_dir(dir)
+            .expect("list dir")
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.extension().is_some_and(|ext| ext == "tmp"))
+            .collect();
+        assert!(
+            tmps.is_empty(),
+            "{name}: no .tmp files left behind: {tmps:?}"
+        );
+    }
+    // The wrapper resolves through a `flex clip --resolve` subprocess; the
+    // executor resolves in-process, so only the wrapper logs it.
+    let flex_log = std::fs::read_to_string(wrap.join("flex.log")).unwrap_or_default();
+    assert!(
+        flex_log.lines().any(|line| line.contains("--resolve")),
+        "{name}: wrapper must show the elided resolve subprocess: {flex_log:?}"
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn parity_copy_matches_the_wrapper_byte_for_byte() {
+    use flex_rice::exec::clip::ClipOp;
+    run_clip_parity(
+        "copy",
+        ClipOp::Copy,
+        "ACTION:",
+        "alpha<NEWLINE>beta gamma",
+        b"alpha<NEWLINE>beta gamma\nother\n",
+        b"",
+    );
+}
+
+#[test]
+fn parity_delete_matches_the_wrapper_byte_for_byte() {
+    use flex_rice::exec::clip::ClipOp;
+    run_clip_parity(
+        "delete",
+        ClipOp::Delete,
+        "ACTION:DELETE",
+        "doomed entry",
+        b"doomed entry\nkeep me\n",
+        b"doomed entry\nkeep pin\n",
+    );
+}
+
+#[test]
+fn parity_toggle_pin_matches_the_wrapper_byte_for_byte() {
+    use flex_rice::exec::clip::ClipOp;
+    run_clip_parity(
+        "toggle-pin",
+        ClipOp::Toggle,
+        "ACTION:TOGGLE",
+        "flip me",
+        b"flip me\nother\n",
+        b"existing pin\n",
+    );
+}
+
+#[test]
+fn parity_toggle_unpin_matches_the_wrapper_byte_for_byte() {
+    use flex_rice::exec::clip::ClipOp;
+    run_clip_parity(
+        "toggle-unpin",
+        ClipOp::Toggle,
+        "ACTION:TOGGLE",
+        "flip me",
+        b"flip me\nother\n",
+        b"flip me\nexisting pin\n",
     );
 }
