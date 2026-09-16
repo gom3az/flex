@@ -40,13 +40,13 @@ fn row_set_matches_bash_cap_rows_exactly() {
     assert_eq!(
         rows,
         vec![
-            ("area-shot", "  Area Screenshot", Some("PNG")),
-            ("full-shot", "🖥  Full Screenshot", Some("PNG")),
-            ("win-shot", "  Window Screenshot", Some("PNG")),
-            ("area-rec", "  Area Recording", Some("MP4")),
-            ("area-rec-audio", "  Area Recording + Audio", Some("MP4")),
-            ("full-rec", "🖥  Full Recording", Some("MP4")),
-            ("full-rec-audio", "🖥  Full Recording + Audio", Some("MP4")),
+            ("area-shot", "Area Screenshot", Some("PNG")),
+            ("full-shot", "Full Screenshot", Some("PNG")),
+            ("win-shot", "Window Screenshot", Some("PNG")),
+            ("area-rec", "Area Recording", Some("MP4")),
+            ("area-rec-audio", "Area Recording + Audio", Some("MP4")),
+            ("full-rec", "Full Recording", Some("MP4")),
+            ("full-rec-audio", "Full Recording + Audio", Some("MP4")),
         ]
     );
 }
@@ -67,7 +67,7 @@ fn keyseq_down_down_enter_selects_window_shot() {
     assert_eq!(outcome, KeyOutcome::Select);
     let row = menu.app.focused_row().expect("focused row");
     assert_eq!(row.id.as_str(), "win-shot");
-    assert_eq!(row.label, "  Window Screenshot");
+    assert_eq!(row.label, "Window Screenshot");
     // The wrapper's ACTION: line for this selection:
     // `ACTION: shot win-shot   Window Screenshot` (exit 0).
     assert_eq!(menu.provider, "shot");

@@ -1,6 +1,7 @@
 //! Launch provider (M2): `.desktop` scan into rows for `flex launch`.
 //!
-//! Row-set parity with `scripts/.config/scripts/app-cache.sh`:
+//! Row-set parity with the retired `scripts/.config/scripts/app-cache.sh`
+//! (the script has since been removed; these rules are the source of truth):
 //!
 //! - Directories (in order): `/usr/share/applications`, then
 //!   `$HOME/.local/share/applications`. Later directories win on duplicate
@@ -245,7 +246,7 @@ pub fn find_exec_in(dirs: &[PathBuf], id: &str) -> Option<(String, bool)> {
 
 /// Strip `.desktop` field codes (` %U`, ` %F`, …) and surrounding spaces.
 ///
-/// Mirrors `app-cache.sh`: `sed -E 's/ %[A-Za-z]//g; s/^ *//; s/ *$//'`.
+/// The regex is `sed -E 's/ %[A-Za-z]//g; s/^ *//; s/ *$//'`.
 #[must_use]
 pub fn strip_field_codes(exec: &str) -> String {
     let chars: Vec<char> = exec.chars().collect();

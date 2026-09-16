@@ -26,6 +26,14 @@ struct Cli {
     #[command(flatten)]
     style: GlobalStyle,
 
+    /// Sort order (mem, cpu, pid, name). Defaults to memory consumption.
+    #[arg(short = 'o', long, default_value = "mem", value_name = "FIELD")]
+    sort: String,
+
+    /// Expand all services by default.
+    #[arg(long)]
+    expand_services: bool,
+
     /// Print the selected `ACTION:` line without executing it: an end-to-end
     /// probe of the real binary's row→action mapping with no pty.
     #[arg(long)]
@@ -48,6 +56,10 @@ fn main() {
 /// the runner.
 fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    if cli.expand_services {
+        std::env::set_var("FLEX_PROC_EXPAND", "all");
+    }
+    std::env::set_var("FLEX_PROC_SORT", &cli.sort);
     let style = cli.style.options();
     runner::popup_guard(Provider::Proc)?;
     if cli.print_action {
@@ -68,8 +80,9 @@ fn run() -> anyhow::Result<()> {
             proc::toggle(&action_id, None)?;
             Ok(())
         }
-        Outcome::Target { row, .. } => {
-            anyhow::bail!("proc: unexpected target outcome for '{row}'")
+        Outcome::Target { target, .. } => {
+            proc::signal(&target, Signal::Term, None)?;
+            Ok(())
         }
         Outcome::Quit { code } => {
             std::process::exit(code);

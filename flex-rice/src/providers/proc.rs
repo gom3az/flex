@@ -17,11 +17,11 @@
 //! Everything is best-effort and panic-free: a `/proc` entry that vanishes
 //! mid-scan is skipped, and unparsable fields degrade to `0`/`?`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
-use flex_core::{Menu, Row, RowId, Tab};
+use flex_core::{Menu, Row, RowId, Tab, Target};
 
 /// Provider name for the `ACTION:` line.
 pub const PROVIDER: &str = "proc";
@@ -31,6 +31,103 @@ pub const TAB_NAME: &str = "Processes";
 const KTHREADS_ENV: &str = "FLEX_PROC_KTHREADS";
 /// `procfs` mount point.
 const PROC_ROOT: &str = "/proc";
+
+/// Sort order for process rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SortBy {
+    /// Sort by memory consumption (RSS) descending (default).
+    #[default]
+    Mem,
+    /// Sort by CPU% delta descending.
+    Cpu,
+    /// Sort by PID ascending.
+    Pid,
+    /// Sort by process/service name ascending.
+    Name,
+}
+
+impl SortBy {
+    /// Parse from string (CLI or env).
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "mem" | "memory" | "rss" => Some(Self::Mem),
+            "cpu" => Some(Self::Cpu),
+            "pid" => Some(Self::Pid),
+            "name" | "comm" => Some(Self::Name),
+            _ => None,
+        }
+    }
+}
+
+/// The active sort order (`FLEX_PROC_SORT`, defaulting to memory).
+#[must_use]
+pub fn sort_order() -> SortBy {
+    std::env::var("FLEX_PROC_SORT")
+        .ok()
+        .and_then(|v| SortBy::parse(&v))
+        .unwrap_or_default()
+}
+
+/// Format memory in KB to human-readable string (e.g. `512K`, `12.5M`, `1.4G`).
+#[must_use]
+pub fn format_memory_kb(kb: u64) -> String {
+    if kb >= 1024 * 1024 {
+        #[allow(clippy::cast_precision_loss)]
+        let gb = kb as f64 / (1024.0 * 1024.0);
+        format!("{gb:.1}G")
+    } else if kb >= 1024 {
+        #[allow(clippy::cast_precision_loss)]
+        let mb = kb as f64 / 1024.0;
+        format!("{mb:.1}M")
+    } else {
+        format!("{kb}K")
+    }
+}
+
+/// Expanded services state (survives refreshes).
+fn expanded_services() -> &'static Mutex<HashSet<String>> {
+    static EXPANDED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    EXPANDED.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// Toggle expansion of `service`.
+pub fn toggle_service_expanded(service: &str) {
+    let mut guard = match expanded_services().lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    if guard.contains(service) {
+        guard.remove(service);
+    } else {
+        guard.insert(service.to_string());
+    }
+}
+
+/// Whether `service` is currently expanded.
+#[must_use]
+pub fn is_service_expanded(service: &str) -> bool {
+    if std::env::var("FLEX_PROC_EXPAND").is_ok_and(|v| v == "all" || v == "1") {
+        return true;
+    }
+    let guard = match expanded_services().lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    guard.contains(service)
+}
+
+/// PIDs belonging to `service`.
+#[must_use]
+pub fn service_pids(service: &str) -> Vec<u32> {
+    let mut pids_out = Vec::new();
+    for pid in pids() {
+        if read_service(pid).as_deref() == Some(service) {
+            pids_out.push(pid);
+        }
+    }
+    pids_out
+}
 
 /// Previous jiffy counters for one pid (for the CPU delta).
 #[derive(Debug, Clone, Copy)]
@@ -53,29 +150,102 @@ fn users() -> &'static HashMap<u32, String> {
     USERS.get_or_init(load_passwd)
 }
 
-/// Build the `Processes` tab: standard rows, `deletable` (Delete = SIGKILL).
+/// Build the `Processes` tab: visible search bar, deletable (Delete = SIGKILL).
 #[must_use]
 pub fn proc_tab() -> Tab {
     let mut tab = Tab::with_rows(TAB_NAME, scan());
+    tab.bare_rows = false;
+    tab.filterable = true;
     tab.deletable = true;
     tab
 }
 
-/// One `/proc` sweep into CPU-sorted rows.
-#[must_use]
-pub fn scan() -> Vec<Row> {
-    let total = read_total_jiffies().unwrap_or(0);
-    let mem_total = read_mem_total_kb().unwrap_or(0);
-    let show_kthreads = kthreads_enabled();
-    let users = users();
-    let mut samples = match samples().lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    };
+#[derive(Debug, Clone)]
+struct RawProc {
+    pid: u32,
+    comm: String,
+    cpu: f32,
+    rss_kb: u64,
+    user: String,
+    service: Option<String>,
+}
 
-    let mut fresh: HashMap<u32, Sample> = HashMap::with_capacity(samples.len());
-    // (cpu%, pid, row) so the CPU sort does not re-parse the meta string.
-    let mut collected: Vec<(f32, u32, Row)> = Vec::new();
+enum ItemGroup {
+    Single(RawProc),
+    Service {
+        name: String,
+        procs: Vec<RawProc>,
+        total_cpu: f32,
+        total_rss_kb: u64,
+        user: String,
+    },
+}
+
+impl ItemGroup {
+    fn total_rss_kb(&self) -> u64 {
+        match self {
+            Self::Single(p) => p.rss_kb,
+            Self::Service { total_rss_kb, .. } => *total_rss_kb,
+        }
+    }
+
+    fn total_cpu(&self) -> f32 {
+        match self {
+            Self::Single(p) => p.cpu,
+            Self::Service { total_cpu, .. } => *total_cpu,
+        }
+    }
+
+    fn name(&self) -> &str {
+        match self {
+            Self::Single(p) => &p.comm,
+            Self::Service { name, .. } => name,
+        }
+    }
+
+    fn primary_pid(&self) -> u32 {
+        match self {
+            Self::Single(p) => p.pid,
+            Self::Service { procs, .. } => procs.first().map_or(0, |p| p.pid),
+        }
+    }
+}
+
+fn sort_procs(procs: &mut [RawProc], sort: SortBy) {
+    procs.sort_by(|a, b| match sort {
+        SortBy::Mem => b
+            .rss_kb
+            .cmp(&a.rss_kb)
+            .then_with(|| {
+                b.cpu
+                    .partial_cmp(&a.cpu)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| a.pid.cmp(&b.pid)),
+        SortBy::Cpu => b
+            .cpu
+            .partial_cmp(&a.cpu)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.rss_kb.cmp(&a.rss_kb))
+            .then_with(|| a.pid.cmp(&b.pid)),
+        SortBy::Pid => a.pid.cmp(&b.pid),
+        SortBy::Name => a
+            .comm
+            .to_lowercase()
+            .cmp(&b.comm.to_lowercase())
+            .then_with(|| b.rss_kb.cmp(&a.rss_kb)),
+    });
+}
+
+/// Collect raw process entries from `/proc`.
+fn collect_processes(
+    samples: &HashMap<u32, Sample>,
+    total: u64,
+    show_kthreads: bool,
+    users: &HashMap<u32, String>,
+) -> (Vec<RawProc>, HashMap<u32, Sample>) {
+    let mut fresh = HashMap::with_capacity(samples.len());
+    let mut collected = Vec::new();
     for pid in pids() {
         let Some((comm, utime, stime)) = read_stat(pid) else {
             continue;
@@ -89,18 +259,171 @@ pub fn scan() -> Vec<Row> {
             continue;
         }
         let (uid, rss_kb) = read_status(pid).unwrap_or((0, 0));
-        let mem = mem_percent(rss_kb, mem_total);
         let user = users.get(&uid).cloned().unwrap_or_else(|| uid.to_string());
-        collected.push((cpu, pid, proc_row(pid, &comm, cpu, mem, &user)));
+        let service = read_service(pid);
+        collected.push(RawProc {
+            pid,
+            comm,
+            cpu,
+            rss_kb,
+            user,
+            service,
+        });
     }
+    (collected, fresh)
+}
+
+/// Group processes by systemd service when they have multiple members.
+fn group_processes(collected: Vec<RawProc>) -> Vec<ItemGroup> {
+    let mut by_service: HashMap<String, Vec<RawProc>> = HashMap::new();
+    let mut singles: Vec<RawProc> = Vec::new();
+
+    for proc_item in collected {
+        if let Some(ref svc) = proc_item.service {
+            by_service.entry(svc.clone()).or_default().push(proc_item);
+        } else {
+            singles.push(proc_item);
+        }
+    }
+
+    let mut groups: Vec<ItemGroup> = Vec::new();
+    for (name, procs) in by_service {
+        if procs.len() > 1 {
+            let total_cpu: f32 = procs.iter().map(|p| p.cpu).sum();
+            let total_rss_kb: u64 = procs.iter().map(|p| p.rss_kb).sum();
+            let user = procs
+                .first()
+                .map_or_else(|| String::from("?"), |p| p.user.clone());
+            groups.push(ItemGroup::Service {
+                name,
+                procs,
+                total_cpu,
+                total_rss_kb,
+                user,
+            });
+        } else {
+            for p in procs {
+                groups.push(ItemGroup::Single(p));
+            }
+        }
+    }
+    for p in singles {
+        groups.push(ItemGroup::Single(p));
+    }
+    groups
+}
+
+/// Build rows for a single item group.
+fn push_group_rows(group: ItemGroup, sort: SortBy, rows: &mut Vec<Row>) {
+    match group {
+        ItemGroup::Single(p) => {
+            let mem_str = format_memory_kb(p.rss_kb);
+            let label = format!("{} {}", p.comm, p.pid);
+            let meta = format!("{mem_str:>7} {:5.1}% {}", p.cpu, p.user);
+            let mut row = Row::with_meta(RowId::new(p.pid.to_string()), label, meta);
+            row.confirmable = true;
+            rows.push(row);
+        }
+        ItemGroup::Service {
+            name,
+            mut procs,
+            total_cpu,
+            total_rss_kb,
+            user,
+        } => {
+            let count = procs.len();
+            let mem_str = format_memory_kb(total_rss_kb);
+            let meta = format!("{mem_str:>7} {total_cpu:5.1}% {user}");
+            let targets: Vec<Target> = procs
+                .iter()
+                .map(|p| {
+                    let p_mem = format_memory_kb(p.rss_kb);
+                    Target::new(
+                        RowId::new(p.pid.to_string()),
+                        format!("{} {} ({p_mem})", p.comm, p.pid),
+                    )
+                })
+                .collect();
+
+            let expanded = is_service_expanded(&name);
+            let label = if expanded {
+                format!("▼ {name} ({count})")
+            } else {
+                format!("▶ {name} ({count})")
+            };
+            let mut row =
+                Row::with_targets(RowId::new(format!("service:{name}")), label, targets, 0);
+            row.meta = Some(meta);
+            row.confirmable = true;
+            rows.push(row);
+
+            if expanded {
+                sort_procs(&mut procs, sort);
+                for (i, p) in procs.iter().enumerate() {
+                    let p_mem = format_memory_kb(p.rss_kb);
+                    let p_meta = format!("{p_mem:>7} {:5.1}% {}", p.cpu, p.user);
+                    let prefix = if i + 1 == count {
+                        "  └─ "
+                    } else {
+                        "  ├─ "
+                    };
+                    let p_label = format!("{prefix}{} {}", p.comm, p.pid);
+                    let mut child = Row::with_meta(RowId::new(p.pid.to_string()), p_label, p_meta);
+                    child.confirmable = true;
+                    rows.push(child);
+                }
+            }
+        }
+    }
+}
+
+/// One `/proc` sweep into sorted rows.
+#[must_use]
+pub fn scan() -> Vec<Row> {
+    let total = read_total_jiffies().unwrap_or(0);
+    let show_kthreads = kthreads_enabled();
+    let users = users();
+    let mut samples = match samples().lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+
+    let (collected, fresh) = collect_processes(&samples, total, show_kthreads, users);
     *samples = fresh;
 
-    collected.sort_by(|a, b| {
-        b.0.partial_cmp(&a.0)
+    let mut groups = group_processes(collected);
+
+    let sort = sort_order();
+    groups.sort_by(|a, b| match sort {
+        SortBy::Mem => b
+            .total_rss_kb()
+            .cmp(&a.total_rss_kb())
+            .then_with(|| {
+                b.total_cpu()
+                    .partial_cmp(&a.total_cpu())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| a.primary_pid().cmp(&b.primary_pid())),
+        SortBy::Cpu => b
+            .total_cpu()
+            .partial_cmp(&a.total_cpu())
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.1.cmp(&b.1))
+            .then_with(|| b.total_rss_kb().cmp(&a.total_rss_kb()))
+            .then_with(|| a.primary_pid().cmp(&b.primary_pid())),
+        SortBy::Pid => a.primary_pid().cmp(&b.primary_pid()),
+        SortBy::Name => a
+            .name()
+            .to_lowercase()
+            .cmp(&b.name().to_lowercase())
+            .then_with(|| b.total_rss_kb().cmp(&a.total_rss_kb())),
     });
-    collected.into_iter().map(|(_, _, row)| row).collect()
+
+    let mut rows = Vec::new();
+    for group in groups {
+        push_group_rows(group, sort, &mut rows);
+    }
+
+    rows
 }
 
 /// Per-tick refresh: rebuild the rows and keep the cursor on the same pid
@@ -140,16 +463,6 @@ fn visible_position(menu: &Menu, pred: impl Fn(&Row) -> bool) -> Option<usize> {
         .position(|index| rows.get(index).is_some_and(&pred))
 }
 
-/// One process row: label `<comm> <pid>`, meta `<cpu%> <mem%> <user>`,
-/// `confirmable` (danger arm).
-fn proc_row(pid: u32, comm: &str, cpu: f32, mem: f32, user: &str) -> Row {
-    let label = format!("{comm} {pid}");
-    let meta = format!("{cpu:5.1}% {mem:5.1}% {user}");
-    let mut row = Row::with_meta(RowId::new(pid.to_string()), label, meta);
-    row.confirmable = true;
-    row
-}
-
 /// CPU% from the jiffy deltas; `0.0` when there is no baseline.
 ///
 /// `#[allow]`: a display percentage does not need `u64`-exact precision.
@@ -161,18 +474,6 @@ fn cpu_percent(prev: &Sample, jiffies: u64, total: u64) -> f32 {
         0.0
     } else {
         100.0 * delta_proc as f32 / delta_total as f32
-    }
-}
-
-/// Resident-set percentage of total memory; `0.0` when total is unknown.
-///
-/// `#[allow]`: a display percentage does not need `u64`-exact precision.
-#[allow(clippy::cast_precision_loss)]
-fn mem_percent(rss_kb: u64, total_kb: u64) -> f32 {
-    if total_kb == 0 {
-        0.0
-    } else {
-        100.0 * rss_kb as f32 / total_kb as f32
     }
 }
 
@@ -259,6 +560,30 @@ fn is_userspace(pid: u32) -> bool {
     std::fs::read(proc_path(pid, "cmdline")).is_ok_and(|bytes| !bytes.is_empty())
 }
 
+/// Read the systemd `.service` name from `/proc/<pid>/cgroup` if present.
+fn read_service(pid: u32) -> Option<String> {
+    let data = std::fs::read_to_string(proc_path(pid, "cgroup")).ok()?;
+    parse_service(&data)
+}
+
+/// Parse systemd `.service` name from cgroup data (excluding user session root).
+fn parse_service(data: &str) -> Option<String> {
+    for line in data.lines() {
+        let trimmed = line.trim();
+        let path = trimmed.split("::").nth(1).unwrap_or(trimmed);
+        let mut svc = None;
+        for part in path.split('/') {
+            if part.ends_with(".service") && !part.starts_with("user@") {
+                svc = Some(part.to_string());
+            }
+        }
+        if let Some(s) = svc {
+            return Some(s);
+        }
+    }
+    None
+}
+
 /// Total system jiffies from `/proc/stat` (`cpu …` line, all fields summed).
 fn read_total_jiffies() -> Option<u64> {
     let data = std::fs::read_to_string(PathBuf::from(PROC_ROOT).join("stat")).ok()?;
@@ -268,17 +593,6 @@ fn read_total_jiffies() -> Option<u64> {
         return None;
     }
     Some(fields.filter_map(|field| field.parse::<u64>().ok()).sum())
-}
-
-/// `MemTotal` in kB from `/proc/meminfo`.
-fn read_mem_total_kb() -> Option<u64> {
-    let data = std::fs::read_to_string(PathBuf::from(PROC_ROOT).join("meminfo")).ok()?;
-    for line in data.lines() {
-        if let Some(value) = line.strip_prefix("MemTotal:") {
-            return value.split_whitespace().next()?.parse::<u64>().ok();
-        }
-    }
-    None
 }
 
 /// Whether kernel threads should be shown (`FLEX_PROC_KTHREADS` non-empty and
@@ -349,6 +663,30 @@ mod tests {
             cpu_percent(&prev, 100, 1_000).abs() < f32::EPSILON,
             "no total delta"
         );
+    }
+
+    #[test]
+    fn format_memory_kb_formats_units() {
+        assert_eq!(format_memory_kb(512), "512K");
+        assert_eq!(format_memory_kb(2048), "2.0M");
+        assert_eq!(format_memory_kb(150 * 1024), "150.0M");
+        assert_eq!(format_memory_kb(2 * 1024 * 1024), "2.0G");
+    }
+
+    #[test]
+    fn parse_service_extracts_service_units() {
+        assert_eq!(
+            parse_service("0::/system.slice/bluetooth.service\n"),
+            Some(String::from("bluetooth.service"))
+        );
+        assert_eq!(
+            parse_service(
+                "0::/user.slice/user-1001.slice/user@1001.service/app.slice/docker.service\n"
+            ),
+            Some(String::from("docker.service"))
+        );
+        assert_eq!(parse_service("0::/init.scope\n"), None);
+        assert_eq!(parse_service("0::/\n"), None);
     }
 
     #[test]

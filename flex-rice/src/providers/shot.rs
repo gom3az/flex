@@ -35,37 +35,37 @@ pub struct ShotRow {
 pub const ROWS: [ShotRow; 7] = [
     ShotRow {
         id: "area-shot",
-        label: "  Area Screenshot",
+        label: "Area Screenshot",
         meta: "PNG",
     },
     ShotRow {
         id: "full-shot",
-        label: "\u{1f5a5}  Full Screenshot",
+        label: "Full Screenshot",
         meta: "PNG",
     },
     ShotRow {
         id: "win-shot",
-        label: "  Window Screenshot",
+        label: "Window Screenshot",
         meta: "PNG",
     },
     ShotRow {
         id: "area-rec",
-        label: "  Area Recording",
+        label: "Area Recording",
         meta: "MP4",
     },
     ShotRow {
         id: "area-rec-audio",
-        label: "  Area Recording + Audio",
+        label: "Area Recording + Audio",
         meta: "MP4",
     },
     ShotRow {
         id: "full-rec",
-        label: "\u{1f5a5}  Full Recording",
+        label: "Full Recording",
         meta: "MP4",
     },
     ShotRow {
         id: "full-rec-audio",
-        label: "\u{1f5a5}  Full Recording + Audio",
+        label: "Full Recording + Audio",
         meta: "MP4",
     },
 ];

@@ -163,3 +163,24 @@ fn proc_filter_matches_the_pid() {
         "filtering by pid keeps this process visible"
     );
 }
+
+#[test]
+fn proc_tab_enables_visible_search_and_deletable() {
+    let tab = flex_rice::providers::proc::proc_tab();
+    assert!(
+        !tab.bare_rows,
+        "proc must use standard rows for visible search bar"
+    );
+    assert!(tab.filterable, "proc tab must be filterable");
+    assert!(tab.deletable, "proc tab must be deletable for SIGKILL");
+}
+
+#[test]
+fn service_toggle_expands_and_collapses() {
+    let svc = "test-service.service";
+    assert!(!flex_rice::providers::proc::is_service_expanded(svc));
+    flex_rice::providers::proc::toggle_service_expanded(svc);
+    assert!(flex_rice::providers::proc::is_service_expanded(svc));
+    flex_rice::providers::proc::toggle_service_expanded(svc);
+    assert!(!flex_rice::providers::proc::is_service_expanded(svc));
+}

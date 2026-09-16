@@ -72,44 +72,59 @@ fn parse_pid(pid: &str) -> Result<u32> {
         .map_err(|_| anyhow::anyhow!("proc: bad pid '{pid}'"))
 }
 
-/// Send `sig` to `pid` via `kill -s`, with an explicit `PATH` seam.
+/// Send `sig` to `target` (PID or `service:<name>`) via `kill -s`, with an explicit `PATH` seam.
 ///
 /// # Errors
 ///
-/// When the pid is malformed, `kill` is missing, or it exits non-zero
+/// When the target is malformed, `kill` is missing, or it exits non-zero
 /// (including a vanished process). Messages carry no `flex:` prefix; the
 /// runner reports them.
-pub fn signal(pid: &str, sig: Signal, path_env: Option<&str>) -> Result<()> {
-    let _ = parse_pid(pid)?;
+pub fn signal(target: &str, sig: Signal, path_env: Option<&str>) -> Result<()> {
+    let pids = if let Some(service) = target.strip_prefix("service:") {
+        proc_provider::service_pids(service)
+    } else {
+        vec![parse_pid(target)?]
+    };
+    if pids.is_empty() {
+        anyhow::bail!("proc: no running processes found for '{target}'");
+    }
     let path_env = path_env.map_or_else(ambient_path, str::to_string);
     let Some(bin) = resolve_tool("kill", &path_env) else {
         anyhow::bail!("proc: kill not found on PATH");
     };
+    let mut args = vec![String::from("-s"), String::from(sig.as_arg())];
+    for p in &pids {
+        args.push(p.to_string());
+    }
     let status = Command::new(&bin)
-        .args(["-s", sig.as_arg(), pid])
+        .args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status_retrying()
         .context("proc: failed to run kill")?;
     if !status.success() {
-        anyhow::bail!("proc: kill -{} {pid} failed", sig.as_arg());
+        anyhow::bail!("proc: kill -{} failed for '{target}'", sig.as_arg());
     }
     Ok(())
 }
 
-/// `Toggle`: SIGCONT a stopped process, else SIGSTOP.
+/// `Toggle`: expand/collapse for `service:<name>`, or SIGCONT/SIGSTOP for a process.
 ///
 /// # Errors
 ///
 /// When the pid is malformed or the signal fails.
-pub fn toggle(pid: &str, path_env: Option<&str>) -> Result<()> {
-    let state = parse_pid(pid)?;
-    let sig = match proc_provider::process_state(state) {
+pub fn toggle(target: &str, path_env: Option<&str>) -> Result<()> {
+    if let Some(service) = target.strip_prefix("service:") {
+        proc_provider::toggle_service_expanded(service);
+        return Ok(());
+    }
+    let pid = parse_pid(target)?;
+    let sig = match proc_provider::process_state(pid) {
         Some('T' | 't') => Signal::Cont,
         _ => Signal::Stop,
     };
-    signal(pid, sig, path_env)
+    signal(target, sig, path_env)
 }
 
 #[cfg(test)]
