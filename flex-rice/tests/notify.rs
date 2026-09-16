@@ -46,6 +46,8 @@ fn mock_state() -> NotifyState {
         position_secs: 134,
         length_secs: 248,
         is_playing: true,
+        is_live: false,
+        art_url: None,
     });
 
     // 1. Critical low battery alert
@@ -277,4 +279,32 @@ fn executor_dismiss_and_dnd_dispatch() {
     ));
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn mpris_parser_handles_twitch_livestreams_and_youtube() {
+    // 1. Twitch stream
+    let twitch_line = "brave;;Playing;;Caliathlol;;CoC Comet Oracle - Grand Expeditions;;;;14798847;;9223372036854775807;;file:///tmp/.org.chromium.Chromium.Ir95Tl";
+    let twitch = notify::parse_mpris_line(twitch_line).expect("parses twitch");
+    assert_eq!(twitch.player, "brave");
+    assert_eq!(twitch.artist, "Caliathlol");
+    assert_eq!(twitch.title, "CoC Comet Oracle - Grand Expeditions");
+    assert!(twitch.is_playing);
+    assert!(twitch.is_live);
+    assert_eq!(twitch.position_secs, 14);
+    assert_eq!(twitch.length_secs, 0);
+    assert_eq!(
+        twitch.art_url.as_deref(),
+        Some("/tmp/.org.chromium.Chromium.Ir95Tl")
+    );
+
+    // 2. Standard Spotify track
+    let spotify_line = "spotify;;Paused;;Daft Punk;;Get Lucky;;RAM;;134000000;;248000000;;";
+    let spotify = notify::parse_mpris_line(spotify_line).expect("parses spotify");
+    assert_eq!(spotify.player, "spotify");
+    assert_eq!(spotify.artist, "Daft Punk");
+    assert!(!spotify.is_playing);
+    assert!(!spotify.is_live);
+    assert_eq!(spotify.position_secs, 134);
+    assert_eq!(spotify.length_secs, 248);
 }

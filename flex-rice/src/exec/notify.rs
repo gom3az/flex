@@ -208,6 +208,8 @@ pub struct MprisTrack {
     pub position_secs: u64,
     pub length_secs: u64,
     pub is_playing: bool,
+    pub is_live: bool,
+    pub art_url: Option<String>,
 }
 
 /// Status of connected peripheral batteries.
@@ -244,6 +246,115 @@ impl Default for QuickControls {
             mpris: None,
         }
     }
+}
+
+/// Parse a raw metadata line formatted by `playerctl`.
+#[must_use]
+pub fn parse_mpris_line(line: &str) -> Option<MprisTrack> {
+    let parts: Vec<&str> = line.split(";;").collect();
+    if parts.len() < 7 {
+        return None;
+    }
+
+    let player = parts[0].trim().to_string();
+    let status = parts[1].trim();
+    let artist = parts[2].trim().to_string();
+    let title = parts[3].trim().to_string();
+    let album_raw = parts[4].trim();
+    let album = if album_raw.is_empty() {
+        None
+    } else {
+        Some(album_raw.to_string())
+    };
+
+    let pos_micro: u64 = parts[5].trim().parse().unwrap_or(0);
+    let len_micro: u64 = parts[6].trim().parse().unwrap_or(0);
+
+    let art_url = if parts.len() > 7 {
+        let raw_art = parts[7].trim();
+        if raw_art.is_empty() {
+            None
+        } else {
+            Some(
+                raw_art
+                    .strip_prefix("file://")
+                    .unwrap_or(raw_art)
+                    .to_string(),
+            )
+        }
+    } else {
+        None
+    };
+
+    let position_secs = pos_micro / 1_000_000;
+    // Chromium and Twitch send i64::MAX (9223372036854775807) for live streams.
+    let is_live = len_micro > (86400 * 7 * 1_000_000) || len_micro == 0;
+    let length_secs = if is_live { 0 } else { len_micro / 1_000_000 };
+
+    if title.is_empty() && artist.is_empty() {
+        return None;
+    }
+
+    Some(MprisTrack {
+        player,
+        title: if title.is_empty() {
+            "Unknown Title".to_string()
+        } else {
+            title
+        },
+        artist: if artist.is_empty() {
+            "Unknown Artist".to_string()
+        } else {
+            artist
+        },
+        album,
+        position_secs,
+        length_secs,
+        is_playing: status.eq_ignore_ascii_case("Playing"),
+        is_live,
+        art_url,
+    })
+}
+
+/// Query `playerctl` for the active media player metadata.
+#[must_use]
+pub fn probe_mpris() -> Option<MprisTrack> {
+    let output = std::process::Command::new("playerctl")
+        .args([
+            "metadata",
+            "--format",
+            "{{playerName}};;{{status}};;{{artist}};;{{title}};;{{album}};;{{position}};;{{mpris:length}};;{{mpris:artUrl}}",
+        ])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let first_line = stdout.lines().next()?.trim();
+    if first_line.is_empty() {
+        return None;
+    }
+
+    parse_mpris_line(first_line)
+}
+
+/// Query `wpctl` to determine if the default microphone is muted.
+#[must_use]
+pub fn probe_mic_muted() -> bool {
+    std::process::Command::new("wpctl")
+        .args(["get-volume", "@DEFAULT_AUDIO_SOURCE@"])
+        .output()
+        .ok()
+        .is_some_and(|out| String::from_utf8_lossy(&out.stdout).contains("[MUTED]"))
+}
+
+/// Update hardware & MPRIS statuses in `QuickControls` while preserving active DND state.
+pub fn probe_quick_controls(controls: &mut QuickControls) {
+    controls.mpris = probe_mpris();
+    controls.mic_muted = probe_mic_muted();
 }
 
 /// Complete runtime state stored in `$XDG_RUNTIME_DIR/flex-notify.json`.

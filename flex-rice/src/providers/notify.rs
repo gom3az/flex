@@ -117,14 +117,28 @@ pub fn feed_tab_from(state: &NotifyState, now: u64) -> Tab {
 
     // 2. MPRIS Media Player Card (if present)
     if let Some(mpris) = &state.controls.mpris {
-        let title_label = format!("󰝚 {} — {}", mpris.title, mpris.artist);
-        let time_meta = format!(
-            "{} / {} · {}",
-            notify::format_duration(mpris.position_secs),
-            notify::format_duration(mpris.length_secs),
-            mpris.player
-        );
-        let volume_frac = if mpris.length_secs > 0 {
+        let title_label = if mpris.artist.is_empty() || mpris.artist == "Unknown Artist" {
+            format!("󰝚 {}", mpris.title)
+        } else {
+            format!("󰝚 {} — {}", mpris.title, mpris.artist)
+        };
+
+        let time_meta = if mpris.is_live || mpris.length_secs == 0 {
+            format!(
+                "{} · Live · {}",
+                notify::format_duration(mpris.position_secs),
+                mpris.player
+            )
+        } else {
+            format!(
+                "{} / {} · {}",
+                notify::format_duration(mpris.position_secs),
+                notify::format_duration(mpris.length_secs),
+                mpris.player
+            )
+        };
+
+        let volume_frac = if !mpris.is_live && mpris.length_secs > 0 {
             #[allow(clippy::cast_precision_loss)]
             Some(((mpris.position_secs as f32) / (mpris.length_secs as f32)).clamp(0.0, 1.0))
         } else {
@@ -142,6 +156,16 @@ pub fn feed_tab_from(state: &NotifyState, now: u64) -> Tab {
             ),
             Target::new(RowId::new("next_track"), "Next Track"),
             Target::new(RowId::new("prev_track"), "Previous Track"),
+            Target::new(RowId::new("seek_forward_10"), "Seek Forward +10s"),
+            Target::new(RowId::new("seek_backward_10"), "Seek Backward -10s"),
+            Target::new(
+                RowId::new(format!("focus_player:{}", mpris.player)),
+                format!("Focus {}", mpris.player),
+            ),
+            Target::new(
+                RowId::new(format!("copy_media:{} - {}", mpris.title, mpris.artist)),
+                "Copy Media Info",
+            ),
         ];
         if let Some(target) = mpris_targets.first_mut() {
             target.is_default = true;
@@ -443,16 +467,18 @@ pub fn menu_from(state: &NotifyState, now: u64) -> Menu {
     crate::menu(PROVIDER, tabs)
 }
 
-/// Construct menu using live disk state.
+/// Construct menu using live disk state and live hardware/MPRIS probes.
 #[must_use]
 pub fn menu() -> Menu {
-    let state = notify::load_state(None);
+    let mut state = notify::load_state(None);
+    notify::probe_quick_controls(&mut state.controls);
     menu_from(&state, now_secs())
 }
 
 /// In-place tick hook for background updates.
 pub fn refresh(menu: &mut Menu) {
-    let state = notify::load_state(None);
+    let mut state = notify::load_state(None);
+    notify::probe_quick_controls(&mut state.controls);
     let now = now_secs();
 
     let new_menu = menu_from(&state, now);
@@ -490,6 +516,50 @@ pub fn execute(
                 n.is_dismissed = true;
             }
         }
+    } else if action_id == "play_pause"
+        || action_id == ACTION_MPRIS_TRACK
+        || target_title.contains("Playback")
+    {
+        let _ = std::process::Command::new("playerctl")
+            .arg("play-pause")
+            .status();
+    } else if action_id == "next_track" || target_title.contains("Next Track") {
+        let _ = std::process::Command::new("playerctl").arg("next").status();
+    } else if action_id == "prev_track" || target_title.contains("Previous Track") {
+        let _ = std::process::Command::new("playerctl")
+            .arg("previous")
+            .status();
+    } else if action_id == "seek_forward_10" || target_title.contains("Forward +10s") {
+        let _ = std::process::Command::new("playerctl")
+            .args(["position", "10+"])
+            .status();
+    } else if action_id == "seek_backward_10" || target_title.contains("Backward -10s") {
+        let _ = std::process::Command::new("playerctl")
+            .args(["position", "10-"])
+            .status();
+    } else if let Some(player) = action_id.strip_prefix("focus_player:") {
+        let class_name = if player.starts_with("brave") {
+            "brave-browser"
+        } else {
+            player
+        };
+        let _ = std::process::Command::new("hyprctl")
+            .args([
+                "dispatch",
+                "focuswindow",
+                &format!("class:^({class_name})$"),
+            ])
+            .status();
+    } else if let Some(info) = action_id.strip_prefix("copy_media:") {
+        let _ = std::process::Command::new("wl-copy").arg(info).status();
+    } else if action_id == "toggle_mic" || action_id == ACTION_TOGGLE_MIC {
+        let _ = std::process::Command::new("wpctl")
+            .args(["set-mute", "@DEFAULT_AUDIO_SOURCE@", "toggle"])
+            .status();
+    } else if action_id == "toggle_night" || action_id == ACTION_TOGGLE_NIGHT {
+        let _ = std::process::Command::new("pkill")
+            .args(["-SIGUSR1", "hyprsunset"])
+            .status();
     } else if let Some(id_str) = action_id.strip_prefix("dismiss:") {
         if let Ok(id) = id_str.parse::<u32>() {
             if let Some(n) = state.notifications.iter_mut().find(|n| n.id == id) {

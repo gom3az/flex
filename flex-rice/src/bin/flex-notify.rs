@@ -70,7 +70,8 @@ fn main() {
 }
 
 fn run_waybar_status(state_path: Option<&Path>) {
-    let state = notify::load_state(state_path);
+    let mut state = notify::load_state(state_path);
+    notify::probe_quick_controls(&mut state.controls);
     let now = now_secs();
 
     let active: Vec<_> = state
@@ -100,7 +101,20 @@ fn run_waybar_status(state_path: Option<&Path>) {
     };
 
     let tooltip = if unread_count == 0 {
-        if is_dnd {
+        if let Some(mpris) = &state.controls.mpris {
+            let status_icon = if mpris.is_playing {
+                "Playing"
+            } else {
+                "Paused"
+            };
+            format!(
+                "No unread notifications\n\n󰝚 {}: {} — {}\nStatus: {status_icon} ({})\nClick to open Notification Center",
+                mpris.player,
+                mpris.title,
+                mpris.artist,
+                notify::format_duration(mpris.position_secs)
+            )
+        } else if is_dnd {
             String::from("Do Not Disturb Active\nNo new notifications")
         } else {
             String::from("No unread notifications\nClick to open Notification Center")
@@ -113,6 +127,12 @@ fn run_waybar_status(state_path: Option<&Path>) {
         }
         if unread_count > 5 {
             lines.push(format!("... and {} more", unread_count - 5));
+        }
+        if let Some(mpris) = &state.controls.mpris {
+            lines.push(format!(
+                "\n󰝚 Now Playing: {} — {} ({})",
+                mpris.title, mpris.artist, mpris.player
+            ));
         }
         lines.join("\n")
     };
