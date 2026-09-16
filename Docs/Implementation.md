@@ -35,7 +35,7 @@ Companion specs: `Docs/project_structure.md`, `Docs/UI_UX_doc.md`, `Docs/Bug_tra
 |---|---|---|---|
 | `ratatui` | `=0.29.0` + `crossterm` | Alt-screen TUI, `TestBackend` golden tests | https://docs.rs/ratatui/0.29.0 |
 | `crossterm` | single major via `cargo tree` | `/dev/tty` backend event/terminal control | https://docs.rs/crossterm |
-| `clap` | `4` derive | nine entry points: the `flex` dispatcher + eight `flex-<provider>` binaries | https://docs.rs/clap/4 |
+| `clap` | `4` derive | eleven entry points: the `flex` dispatcher, nine `flex-<provider>` binaries and the `flex-record` helper | https://docs.rs/clap/4 |
 | `anyhow` | `1` | Error context in binary/providers | https://docs.rs/anyhow |
 | `unicode-width` | `0.2` | `flex-core/src/width.rs` display-width truncation | https://docs.rs/unicode-width/0.2 |
 | `criterion` (dev) | `0.5` | `flex-core/benches/rerank.rs` | https://docs.rs/criterion |
