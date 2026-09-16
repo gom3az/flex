@@ -240,7 +240,7 @@ fn keyseq_type_fir_enter_selects_firefox() {
     assert_eq!(row.label, "Firefox");
     // The retired wrapper's ACTION: line for this selection was
     // `ACTION: launch <row-hash> Firefox` (exit 0); the launch executor
-    // resolves the hash with `flex launch --resolve` before launching.
+    // resolves the hash in-process via the library resolver before launching.
     assert_eq!(menu.provider, "launch");
 }
 
@@ -517,8 +517,8 @@ fn engine_errors_are_reported_with_a_single_prefix() {
 // --- Executor (`flex-rice/src/exec/launch.rs`) ---------------------------------
 //
 // The launch port of the `exec::shot` template: `LaunchAction::parse`
-// validates the id, `execute` resolves the hash in-process (no
-// `flex launch --resolve` subprocess) and detaches through the `setsid`
+// validates the id, `execute` resolves the hash in-process via the library
+// resolver and detaches through the `setsid`
 // seam — `Terminal=true` apps run inside the terminal from `$TERMINAL`
 // (via the shared `terminal` helper, kitty fallback). No TUI, no pty:
 // stub `PATH` + scratch `HOME`.

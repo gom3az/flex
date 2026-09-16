@@ -56,6 +56,10 @@ directly.
   `flex-rice/tests/wrappers.rs`; the executor tests are the surviving
   coverage.
 - The `ACTION:` wire protocol from the call path — nothing parses stdout.
+- The hidden `flex <provider> --resolve` CLI lookups; the executors resolve
+  row ids in-process via the library resolver functions
+  (`clip::resolve`, `wallpaper::resolve`, `launch::resolve_id`,
+  `theme_::resolve_name`).
 - The shellcheck CI step (no `.sh` remains in this repo).
 
 Monorepo consolidation: `flex-core` and `flex-rice` live in this repo as

@@ -7,7 +7,7 @@
 //!
 //! - `select launch:<hash>` → resolve the hash to a desktop-id in-process
 //!   (the same [`resolve_id`](crate::providers::launch::resolve_id) the
-//!   hidden `--resolve` lookup uses), re-resolve to `(Exec, Terminal)` via
+//!   library exposes), re-resolve to `(Exec, Terminal)` via
 //!   [`find_exec`](crate::providers::launch::find_exec), strip field codes,
 //!   detach with `setsid -f` (`<terminal> -e` prefixed for `Terminal=true`
 //!   apps, following `$TERMINAL`);
@@ -60,9 +60,9 @@
 //!
 //! Deliberate departures from the wrapper (all tested):
 //!
-//! - No `flex launch --resolve` subprocess: the hash is resolved in-process
-//!   with the same [`resolve_id`](crate::providers::launch::resolve_id) the
-//!   hidden `--resolve` lookup uses (the launch port's departure, repeated).
+//! - No subprocess: the hash is resolved in-process with the same
+//!   [`resolve_id`](crate::providers::launch::resolve_id) the library
+//!   exposes (the launch port's departure, repeated).
 //! - No shell word-splitting in the launch arm: the wrapper `eval`s the
 //!   stripped `Exec` line; the port splits on whitespace and spawns directly
 //!   (the launch port's departure, repeated). Plain `prog --flag` lines — the
@@ -771,7 +771,7 @@ pub struct ExecuteReport {
 }
 
 /// Run the selected center action: validate the id, short-circuit `noop`,
-/// resolve hashes in-process (no `flex … --resolve` subprocess), take fresh
+/// resolve hashes in-process, take fresh
 /// `nmcli`/`bluetoothctl` state where the wrapper does, and run the
 /// [`plan`] steps. `label` is the in-process row label (already raw — no
 /// wire unescape, see the module docs). `path_env` shadows the ambient
@@ -833,8 +833,8 @@ fn decide(
     }
 }
 
-/// Resolve a `launch:<hash>` id to its detached-spawn inputs (in-process,
-/// no `flex launch --resolve` subprocess).
+/// Resolve a `launch:<hash>` id to its detached-spawn inputs (in-process
+/// via the launch library resolver).
 fn decide_launch(hash: &str) -> Result<PlannedAction> {
     let Some(desk_id) = launch::resolve_id(hash) else {
         anyhow::bail!("center: unknown launch id: {hash}");

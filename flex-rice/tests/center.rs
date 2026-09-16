@@ -1040,7 +1040,7 @@ fn executor_matrix_runs_every_action_through_stub_tools() {
     let run = |op: exec_center::CenterOp, id: &str, label: &str| {
         exec_center::execute(op, id, label, Some(&path_env)).expect("executor succeeds")
     };
-    // Launcher rows: the hash resolves in-process (no `flex --resolve`).
+    // Launcher rows: the hash resolves in-process via the library resolver.
     let firefox_id = format!("launch:{}", launch::entry_id("firefox.desktop"));
     let term_id = format!("launch:{}", launch::entry_id("termapp.desktop"));
     for (id, label, desktop_id) in [

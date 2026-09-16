@@ -2,8 +2,7 @@
 //!
 //! Port of the retired `flex-wallpaper.sh` wrapper: after the menu selects a
 //! row, the executor validates the id (16 lowercase hex chars, the FNV-1a
-//! path hash), resolves it back to the image path
-//! (`flex wallpaper --resolve`, i.e. the same
+//! path hash), resolves it back to the image path (the same
 //! [`resolve`](crate::providers::wallpaper::resolve) scan), refuses paths
 //! that are not files, and `exec`s
 //! `$SET_WALLPAPER <path>` (default
@@ -20,10 +19,9 @@
 //!
 //! Two deliberate departures from the wrapper (both tested):
 //!
-//! - No `flex wallpaper --resolve` subprocess: the hash is resolved
-//!   in-process with the same [`resolve`](crate::providers::wallpaper::resolve)
-//!   the hidden `--resolve` lookup uses, so the resolution semantics are
-//!   identical with one fewer spawn.
+//! - No subprocess: the hash is resolved in-process with the same
+//!   [`resolve`](crate::providers::wallpaper::resolve) the library exposes,
+//!   so the resolution semantics are identical with one fewer spawn.
 //! - Exit-code normalisation: the wrapper `exec`s the setter so its exit
 //!   status propagates verbatim; the port maps every failure through the
 //!   shared runner, so any tool failure exits `1` with the single

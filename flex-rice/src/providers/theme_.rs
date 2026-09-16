@@ -16,8 +16,8 @@
 //!   field, so the status is folded into the meta string here.
 //! - Row id = [`entry_id`] hash of the theme name (space-free: a theme
 //!   directory may be named `My Theme`, which would split the `ACTION:`
-//!   id token — B-021); the wrapper resolves it back with
-//!   `flex theme --resolve` and passes the name to `activate`.
+//!   id token — B-021); the theme executor resolves it back with the
+//!   library resolver and passes the name to `activate`.
 //!
 //! JSON is parsed with a std-only string scan (no `serde` in v1).
 //! The library never activates themes; it only selects a row.
@@ -136,8 +136,8 @@ pub fn entry_id(name: &str) -> String {
     content_hash_hex(name)
 }
 
-/// Resolve a row id back to its theme name, for `flex theme --resolve`
-/// (hidden wrapper lookup, like `flex clip --resolve`).
+/// Resolve a row id back to its theme name (the theme executor's
+/// in-process lookup, like `clip::resolve`).
 ///
 /// Searched over the same entry set [`rows`] is built from. Returns `None`
 /// for unknown ids and for ids containing `/`.

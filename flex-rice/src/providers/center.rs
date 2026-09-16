@@ -102,8 +102,8 @@ pub const BT_INFO_DIR_ENV: &str = "CENTER_BT_INFO_DIR";
 /// Launcher row id: `launch:{row-id}` (kind prefix for dispatch).
 ///
 /// The row id is already the space-free [`launch::entry_id`] hash, so the
-/// center executor resolves it back to a desktop-id through
-/// `flex launch --resolve` before launching.
+/// center executor resolves it back to a desktop-id through the launch
+/// library resolver before launching.
 #[must_use]
 pub fn launch_id(row_id: &str) -> String {
     format!("launch:{row_id}")

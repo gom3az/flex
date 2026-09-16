@@ -1,10 +1,11 @@
-//! Kitty-graphics preview pane (wallpaper cutover).
+//! Graphics preview pane (wallpaper cutover).
 //!
 //! The wallpaper picker shows the focused image next to the list. The pane is
 //! reserved by [`render`](crate::render) (pure geometry, golden-testable) and
 //! painted out-of-band here: after every frame the event loop hands the
-//! focused row's image to [`Preview::sync`], which emits kitty graphics
-//! protocol escapes to the terminal.
+//! focused row's image to [`Preview::sync`], which emits protocol escapes to
+//! the terminal through the [`ImageBackend`] seam (today only the kitty
+//! graphics protocol, [`KittyBackend`], is implemented).
 //!
 //! Protocol notes (kitty `docs/graphics-protocol.rst`, kitty 0.47 verified):
 //!
@@ -58,7 +59,12 @@ const MAX_PATH_BYTES: usize = MAX_PAYLOAD_CHARS / 4 * 3 - 3;
 /// pane on a `HiDPI` screen, small enough to convert in a few milliseconds).
 pub const THUMB_BOX: &str = "800x600>";
 
-/// `FLEX_PREVIEW=0|1` forces the pane off/on; unset auto-detects the terminal.
+/// `FLEX_PREVIEW` selects the pane backend.
+///
+/// Accepted values: `auto` (unset default; reserve a pane when the terminal
+/// supports graphics), `kitty` (force the pane on), `off` (force it off), and
+/// the legacy `1`/`0` (force on/off). `sixel` is diagnosed as not implemented
+/// and behaves as `off`; any other value falls back to `auto`.
 pub const PREVIEW_ENV: &str = "FLEX_PREVIEW";
 /// `FLEX_PREVIEW_CACHE` overrides the derived-PNG cache directory.
 pub const CACHE_ENV: &str = "FLEX_PREVIEW_CACHE";
@@ -74,18 +80,118 @@ const PNG_MAGIC: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
 /// Base64 alphabet (RFC 4648, standard).
 const BASE64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
+/// The terminal-image protocol seam.
+///
+/// Only the kitty graphics protocol ([`KittyBackend`]) is implemented today;
+/// keeping escape generation behind this trait lets another protocol slot in
+/// without changing [`Preview`] or its callers.
+pub trait ImageBackend {
+    /// Escape sequence placing `file` at `placement` under `image_id`.
+    ///
+    /// `None` when the placement is empty or the path is too long for one
+    /// escape code; the caller then leaves the pane blank.
+    fn place(&self, image_id: u32, file: &Path, placement: Placement) -> Option<String>;
+
+    /// Escape sequence deleting `image_id` and its transmitted data.
+    fn delete(&self, image_id: u32) -> String;
+}
+
+/// The kitty graphics protocol backend.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct KittyBackend;
+
+impl ImageBackend for KittyBackend {
+    fn place(&self, image_id: u32, file: &Path, placement: Placement) -> Option<String> {
+        if placement.cols == 0 || placement.rows == 0 {
+            return None;
+        }
+        let bytes = file.as_os_str().as_bytes();
+        if bytes.len() > MAX_PATH_BYTES {
+            return None;
+        }
+        let payload = base64(bytes);
+        let (row, col) = (placement.y.saturating_add(1), placement.x.saturating_add(1));
+        // Pixel offsets are only meaningful when non-zero, and must stay below
+        // one cell (protocol rule).
+        let offsets = match (placement.x_px, placement.y_px) {
+            (0, 0) => String::new(),
+            (x, 0) => format!(",X={x}"),
+            (0, y) => format!(",Y={y}"),
+            (x, y) => format!(",X={x},Y={y}"),
+        };
+        Some(format!(
+            "\x1b[{row};{col}H\x1b_Ga=T,f=100,t=f,i={image_id}{offsets},c={},r={},C=1,q=2;{payload}\x1b\\",
+            placement.cols, placement.rows
+        ))
+    }
+
+    fn delete(&self, image_id: u32) -> String {
+        format!("\x1b_Ga=d,d=I,i={image_id},q=2\x1b\\")
+    }
+}
+
+/// The active terminal-image backend.
+#[must_use]
+pub fn backend() -> &'static dyn ImageBackend {
+    &KittyBackend
+}
+
+/// Preview pane modes resolved from [`PREVIEW_ENV`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreviewMode {
+    /// Reserve a pane only when the terminal supports graphics.
+    Auto,
+    /// Always reserve a pane (the kitty protocol is assumed).
+    Kitty,
+    /// Never reserve a pane.
+    Off,
+}
+
+/// Resolve a [`PREVIEW_ENV`] value into a mode and an optional diagnostic.
+///
+/// Mapping is case-sensitive and exact:
+///
+/// - unset or `auto` -> [`PreviewMode::Auto`], no diagnostic
+/// - `kitty` or the legacy `1` -> [`PreviewMode::Kitty`], no diagnostic
+/// - `off`, the legacy `0`, or `""` -> [`PreviewMode::Off`], no diagnostic
+/// - `sixel` -> [`PreviewMode::Off`] with a "not implemented" diagnostic
+/// - anything else -> [`PreviewMode::Auto`], no diagnostic (an unknown value
+///   must never disable the pane or error)
+#[must_use]
+pub fn parse_preview(raw: Option<&str>) -> (PreviewMode, Option<String>) {
+    match raw {
+        Some("kitty" | "1") => (PreviewMode::Kitty, None),
+        Some("off" | "0" | "") => (PreviewMode::Off, None),
+        Some("sixel") => (
+            PreviewMode::Off,
+            Some("flex: preview: sixel backend not implemented".to_string()),
+        ),
+        _ => (PreviewMode::Auto, None),
+    }
+}
+
 /// Whether the wallpaper picker should reserve a preview pane.
 ///
-/// `FLEX_PREVIEW=0`/`=1` wins; otherwise a kitty-compatible terminal is
-/// required, because the escapes below are only understood there.
+/// Reads [`PREVIEW_ENV`] once (see [`parse_preview`]), emits any diagnostic
+/// exactly once, then [`PreviewMode::Auto`] defers to terminal detection while
+/// [`PreviewMode::Kitty`]/[`PreviewMode::Off`] force the pane on/off.
 #[must_use]
 pub fn enabled() -> bool {
-    match std::env::var(PREVIEW_ENV).ok().as_deref() {
-        Some("0" | "") => return false,
-        Some("1") => return true,
-        _ => {}
+    let raw = std::env::var(PREVIEW_ENV).ok();
+    let (mode, diagnostic) = parse_preview(raw.as_deref());
+    if let Some(message) = diagnostic {
+        crate::diag::warn(&message);
     }
-    terminal_supports_graphics()
+    enabled_for(mode, terminal_supports_graphics())
+}
+
+/// Decide the pane for a resolved `mode` and terminal `graphics` support.
+fn enabled_for(mode: PreviewMode, graphics: bool) -> bool {
+    match mode {
+        PreviewMode::Off => false,
+        PreviewMode::Kitty => true,
+        PreviewMode::Auto => graphics,
+    }
 }
 
 /// Detect a kitty graphics capable terminal from the environment.
@@ -270,37 +376,18 @@ pub fn placement(pane: Rect, image: Option<(u32, u32)>, cell: (f32, f32)) -> Pla
 
 /// Escape sequence placing `file` at `placement` (`a=T,f=100,t=f,…,C=1,q=2`).
 ///
-/// `None` when the placement is empty or the path is too long for one escape
-/// code ([`MAX_PAYLOAD_CHARS`]); the caller then leaves the pane blank.
+/// Delegates to [`ImageBackend::place`] on the active [`backend`].
 #[must_use]
 pub fn place_escape(image_id: u32, file: &Path, placement: Placement) -> Option<String> {
-    if placement.cols == 0 || placement.rows == 0 {
-        return None;
-    }
-    let bytes = file.as_os_str().as_bytes();
-    if bytes.len() > MAX_PATH_BYTES {
-        return None;
-    }
-    let payload = base64(bytes);
-    let (row, col) = (placement.y.saturating_add(1), placement.x.saturating_add(1));
-    // Pixel offsets are only meaningful when non-zero, and must stay below one
-    // cell (protocol rule).
-    let offsets = match (placement.x_px, placement.y_px) {
-        (0, 0) => String::new(),
-        (x, 0) => format!(",X={x}"),
-        (0, y) => format!(",Y={y}"),
-        (x, y) => format!(",X={x},Y={y}"),
-    };
-    Some(format!(
-        "\x1b[{row};{col}H\x1b_Ga=T,f=100,t=f,i={image_id}{offsets},c={},r={},C=1,q=2;{payload}\x1b\\",
-        placement.cols, placement.rows
-    ))
+    backend().place(image_id, file, placement)
 }
 
 /// Escape sequence deleting the preview image and its data (`a=d,d=I`).
+///
+/// Delegates to [`ImageBackend::delete`] on the active [`backend`].
 #[must_use]
 pub fn delete_escape(image_id: u32) -> String {
-    format!("\x1b_Ga=d,d=I,i={image_id},q=2\x1b\\")
+    backend().delete(image_id)
 }
 
 /// Escape sequence parking the cursor at a 0-based cell (1-based CUP).
@@ -512,7 +599,7 @@ impl Preview {
         if unchanged {
             return Ok(());
         }
-        let Some(escape) = place_escape(IMAGE_ID, &file, placed) else {
+        let Some(escape) = backend().place(IMAGE_ID, &file, placed) else {
             return self.hide(out);
         };
         out.write_all(escape.as_bytes())?;
@@ -547,7 +634,7 @@ impl Preview {
         if self.shown.take().is_none() {
             return Ok(());
         }
-        out.write_all(delete_escape(IMAGE_ID).as_bytes())?;
+        out.write_all(backend().delete(IMAGE_ID).as_bytes())?;
         out.flush()
     }
 
@@ -738,6 +825,59 @@ mod tests {
         assert_eq!(delete_escape(3), "\x1b_Ga=d,d=I,i=3,q=2\x1b\\");
         assert_eq!(park_escape((0, 0)), "\x1b[1;1H");
         assert_eq!(park_escape((3, 7)), "\x1b[8;4H");
+    }
+
+    #[test]
+    fn parse_preview_covers_every_documented_value() {
+        let cases: [(Option<&str>, PreviewMode, Option<&str>); 10] = [
+            (None, PreviewMode::Auto, None),
+            (Some("auto"), PreviewMode::Auto, None),
+            (Some("kitty"), PreviewMode::Kitty, None),
+            (Some("1"), PreviewMode::Kitty, None),
+            (Some("off"), PreviewMode::Off, None),
+            (Some("0"), PreviewMode::Off, None),
+            (Some(""), PreviewMode::Off, None),
+            (
+                Some("sixel"),
+                PreviewMode::Off,
+                Some("flex: preview: sixel backend not implemented"),
+            ),
+            (Some("KITTY"), PreviewMode::Auto, None),
+            (Some("garbage"), PreviewMode::Auto, None),
+        ];
+        for (raw, mode, diagnostic) in cases {
+            assert_eq!(
+                parse_preview(raw),
+                (mode, diagnostic.map(str::to_string)),
+                "value {raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn enabled_for_combines_mode_and_terminal_support() {
+        assert!(!enabled_for(PreviewMode::Off, true));
+        assert!(!enabled_for(PreviewMode::Off, false));
+        assert!(enabled_for(PreviewMode::Kitty, false));
+        assert!(enabled_for(PreviewMode::Kitty, true));
+        assert!(enabled_for(PreviewMode::Auto, true));
+        assert!(!enabled_for(PreviewMode::Auto, false));
+    }
+
+    #[test]
+    fn kitty_backend_matches_the_free_escapes() {
+        let file = Path::new("/a/b.png");
+        let placed = placement_of(40, 1, 36, 20);
+        assert_eq!(
+            KittyBackend.place(7, file, placed),
+            place_escape(7, file, placed)
+        );
+        assert_eq!(
+            KittyBackend.place(7, file, placement_of(0, 0, 0, 10)),
+            place_escape(7, file, placement_of(0, 0, 0, 10))
+        );
+        assert_eq!(KittyBackend.delete(3), delete_escape(3));
+        assert_eq!(backend().delete(3), "\x1b_Ga=d,d=I,i=3,q=2\x1b\\");
     }
 
     /// The live popup grid: 158x72 cells of 8.0x19.2 px (kitty @ ls +

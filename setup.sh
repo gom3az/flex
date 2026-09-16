@@ -3,7 +3,7 @@
 #
 # Usage:
 #   ./setup.sh          create (or refresh) the nine symlinks
-#   ./setup.sh --check  assert all nine resolve to existing executables
+#   ./setup.sh --check  assert all nine resolve into the current target/release
 #
 # The links point at ./target/release/ (build with `cargo build --release`
 # first); `--check` is the CI gate that the dispatcher and the eight
@@ -52,8 +52,15 @@ if [[ "$check_mode" == "1" ]]; then
     missing=0
     for name in "${BINS[@]}"; do
         link="$BIN_DIR/$name"
-        if [[ ! -x "$link" ]]; then
+        expected="$(readlink -f "$SRC_DIR/$name" 2>/dev/null || true)"
+        if [[ ! -L "$link" || ! -x "$link" ]]; then
             echo "setup.sh: missing executable: $link" >&2
+            missing=1
+            continue
+        fi
+        resolved="$(readlink -f "$link" 2>/dev/null || true)"
+        if [[ "$resolved" != "$expected" ]]; then
+            echo "setup.sh: $link resolves to $resolved, not $expected" >&2
             missing=1
         fi
     done

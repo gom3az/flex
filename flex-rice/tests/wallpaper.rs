@@ -266,7 +266,7 @@ fn resolve_round_trips_ids_to_paths() {
     assert_eq!(
         wallpaper::resolve_in(std::slice::from_ref(&walls), &id).as_deref(),
         Some(image.as_path()),
-        "the wrapper's hidden lookup returns the absolute path"
+        "the library resolver returns the absolute path"
     );
     assert!(wallpaper::resolve_in(&[walls], "deadbeefdeadbeef").is_none());
 
@@ -520,33 +520,11 @@ fn row_without_a_utf8_path_loses_only_its_preview() {
     assert!(rows[0].preview_image.is_none());
 }
 
-// --- Resolve error format (B-022) -----------------------------------------------
-
-/// Same contract as `clip`: `main` owns the single `flex: error:` prefix,
-/// so an unknown wallpaper id is reported without repeating it.
-#[test]
-fn unknown_resolve_id_is_reported_with_a_single_prefix() {
-    let _env = ENV_LOCK.lock().expect("env lock");
-    let home = scratch("resolve-error");
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_flex"))
-        .args(["wallpaper", "--resolve", "deadbeef"])
-        .env("HOME", &home)
-        .env_remove("WALLPAPER_DIRS")
-        .output()
-        .expect("run flex wallpaper --resolve");
-    let _ = std::fs::remove_dir_all(&home);
-    assert!(!output.status.success(), "unknown id exits non-zero");
-    assert_eq!(
-        String::from_utf8_lossy(&output.stderr),
-        "flex: error: wallpaper: unknown id 'deadbeef'\n"
-    );
-}
-
 // --- Executor (`flex-rice/src/exec/wallpaper.rs`) ------------------------------
 //
 // The wallpaper port of the `exec::shot` template: `WallpaperAction::parse`
 // validates the 16-char lowercase-hex id, `execute` resolves the hash
-// in-process (no `flex wallpaper --resolve` subprocess) and runs
+// in-process via the library resolver and runs
 // `<setter> <path>` through the `SET_WALLPAPER` seam. No TUI, no pty: stub
 // `PATH` + scratch dirs.
 //

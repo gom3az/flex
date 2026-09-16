@@ -4,7 +4,7 @@
 //! row, the executor validates the id (non-empty, no `/`, no newline),
 //! short-circuits
 //! the `noop` empty-scan placeholder (exit `0`, B-026), resolves the row
-//! hash back to the desktop-id (`flex launch --resolve`, i.e. the same
+//! hash back to the desktop-id (the same
 //! [`resolve_id`](crate::providers::launch::resolve_id) scan), re-resolves
 //! the desktop-id to its raw `(Exec, Terminal)` pair (the same
 //! [`find_exec`](crate::providers::launch::find_exec) parse the provider
@@ -22,10 +22,10 @@
 //!
 //! Four deliberate departures from the wrapper (all tested):
 //!
-//! - No `flex launch --resolve` subprocess: the hash is resolved in-process
-//!   with the same [`resolve_id`](crate::providers::launch::resolve_id)
-//!   the hidden `--resolve` lookup uses, so the resolution semantics are
-//!   identical with one fewer spawn.
+//! - No subprocess: the hash is resolved in-process with the same
+//!   [`resolve_id`](crate::providers::launch::resolve_id) the library
+//!   exposes, so the resolution semantics are identical with one fewer
+//!   spawn.
 //! - No shell word-splitting: the wrapper `eval`s the stripped `Exec` line
 //!   (so shell quotes in `Exec` group arguments); the port splits the line
 //!   on whitespace and spawns directly (the pilot's generated-script removal

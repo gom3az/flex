@@ -3,8 +3,7 @@
 //! `flex <provider> [flags]` re-execs the matching `flex-<provider>` binary
 //! with flags reconstructed in canonical order (so `flex -t nocolor launch`
 //! ≡ `flex launch -t nocolor`); `flex popup <menu|menu-wide> <cmd…>`
-//! toggles the popup for dotfiles `kill-menu.sh`. Hidden `--resolve`
-//! lookups are handled inline, exactly as before. All providers run the
+//! toggles the popup for dotfiles `kill-menu.sh`. All providers run the
 //! full TUI event loop and execute the selected row in-process
 //! (`exec/*.rs`); the wrappers are retired.
 
@@ -51,11 +50,6 @@ enum Command {
         /// Print the selected `ACTION:` line without executing it.
         #[arg(long)]
         print_action: bool,
-        /// Resolve a row-hash id to its desktop-id (`firefox.desktop`).
-        /// Hidden id lookup: the retired launch/center wrappers used it to
-        /// turn a space-free hash back into the `.desktop` file (B-021).
-        #[arg(long, hide = true)]
-        resolve: Option<String>,
     },
     /// Screenshot flow.
     Shot {
@@ -68,22 +62,12 @@ enum Command {
         /// Print the selected `ACTION:` line without executing it.
         #[arg(long)]
         print_action: bool,
-        /// Resolve a row-hash id to its theme (directory) name. Hidden id
-        /// lookup: the retired theme wrapper used it before handing the
-        /// name to `theme-switcher.sh`.
-        #[arg(long, hide = true)]
-        resolve: Option<String>,
     },
     /// Clipboard history.
     Clip {
         /// Print the selected `ACTION:` line without executing it.
         #[arg(long)]
         print_action: bool,
-        /// Resolve a content-hash id to its stored (`<NEWLINE>`-encoded)
-        /// line. Hidden id lookup: the retired clip wrapper used it to turn
-        /// the hash back into content.
-        #[arg(long, hide = true)]
-        resolve: Option<String>,
     },
     /// Control center (volume/brightness/network).
     Center {
@@ -96,11 +80,6 @@ enum Command {
         /// Print the selected `ACTION:` line without executing it.
         #[arg(long)]
         print_action: bool,
-        /// Resolve a path-hash id to its absolute wallpaper path. Hidden id
-        /// lookup: the retired wallpaper wrapper used it to turn the id back
-        /// into a path.
-        #[arg(long, hide = true)]
-        resolve: Option<String>,
     },
     /// Wi-Fi picker (connect/disconnect, radio on/off).
     Wifi {
@@ -118,74 +97,28 @@ fn main() {
     }
 }
 
-/// Parse args and dispatch: `popup` toggles, `--resolve` answers inline,
-/// anything else re-execs the provider binary with canonical flags.
+/// Parse args and dispatch: `popup` toggles, anything else re-execs the
+/// provider binary with canonical flags.
 ///
 /// # Errors
 ///
-/// Returns an error when the popup toggle fails, a `--resolve` id is
-/// unknown, the sibling provider binary cannot be located, or its spawn
-/// fails. Messages carry no `flex:` prefix; `main` adds it via the runner.
+/// Returns an error when the popup toggle fails, the sibling provider
+/// binary cannot be located, or its spawn fails. Messages carry no `flex:`
+/// prefix; `main` adds it via the runner.
 fn run() -> Result<()> {
     let cli = Cli::parse();
     let style = cli.style.options();
-    // Hidden id lookups (`flex <provider> --resolve <id>`) print the
-    // provider identity behind a row id and exit; every other invocation
-    // re-execs the provider binary (or toggles a popup).
-    if resolve_lookup(&cli.command)?.is_some() {
-        return Ok(());
-    }
     match &cli.command {
         Command::Popup { variant, cmd } => run_popup(variant, cmd),
         Command::Power { print_action } => reexec(Provider::Power, style, *print_action),
-        Command::Launch { print_action, .. } => reexec(Provider::Launch, style, *print_action),
+        Command::Launch { print_action } => reexec(Provider::Launch, style, *print_action),
         Command::Shot { print_action } => reexec(Provider::Shot, style, *print_action),
-        Command::Theme { print_action, .. } => reexec(Provider::Theme, style, *print_action),
-        Command::Clip { print_action, .. } => reexec(Provider::Clip, style, *print_action),
+        Command::Theme { print_action } => reexec(Provider::Theme, style, *print_action),
+        Command::Clip { print_action } => reexec(Provider::Clip, style, *print_action),
         Command::Center { print_action } => reexec(Provider::Center, style, *print_action),
-        Command::Wallpaper { print_action, .. } => {
-            reexec(Provider::Wallpaper, style, *print_action)
-        }
+        Command::Wallpaper { print_action } => reexec(Provider::Wallpaper, style, *print_action),
         Command::Wifi { print_action } => reexec(Provider::Wifi, style, *print_action),
     }
-}
-
-/// Hidden id lookups: `flex <provider> --resolve <id>` prints the
-/// provider identity the id stands for (desktop-id, theme name, wallpaper
-/// path, clipboard line) and returns `Ok(Some(()))`.
-///
-/// `Ok(None)` means the command is a normal provider invocation. The message
-/// for an unknown id is built here, in one place, and carries no `flex:`
-/// prefix of its own — `main` adds that exactly once via the runner (B-022).
-fn resolve_lookup(command: &Command) -> Result<Option<()>> {
-    use flex_rice::providers;
-    let (provider, id, resolved) = match command {
-        Command::Clip {
-            resolve: Some(hash),
-            ..
-        } => ("clip", hash, providers::clip::resolve(hash)),
-        Command::Wallpaper {
-            resolve: Some(id), ..
-        } => (
-            "wallpaper",
-            id,
-            providers::wallpaper::resolve(id).map(|path| path.display().to_string()),
-        ),
-        Command::Launch {
-            resolve: Some(hash),
-            ..
-        } => ("launch", hash, providers::launch::resolve_id(hash)),
-        Command::Theme {
-            resolve: Some(hash),
-            ..
-        } => ("theme", hash, providers::theme_::resolve_name(hash)),
-        _ => return Ok(None),
-    };
-    let Some(value) = resolved else {
-        anyhow::bail!("{provider}: unknown id '{id}'");
-    };
-    flex_core::diag::note(&value);
-    Ok(Some(()))
 }
 
 /// Toggle a popup variant running `cmd` (the `kill-menu.sh` helper).
@@ -252,7 +185,7 @@ mod tests {
         let cli = Cli::try_parse_from(argv).expect("test argv parses");
         let style = cli.style.options();
         match cli.command {
-            Command::Launch { print_action, .. } => (Provider::Launch, style, print_action),
+            Command::Launch { print_action } => (Provider::Launch, style, print_action),
             other => panic!("expected launch, got {other:?}"),
         }
     }
@@ -294,7 +227,7 @@ mod tests {
     fn print_action_survives_the_reconstruction() {
         let cli = Cli::try_parse_from(["flex", "launch", "--print-action"]).expect("parses");
         let style = cli.style.options();
-        let Command::Launch { print_action, .. } = cli.command else {
+        let Command::Launch { print_action } = cli.command else {
             panic!("expected launch");
         };
         let argv = reexec_argv(Provider::Launch, style, print_action);

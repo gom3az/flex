@@ -4,7 +4,7 @@
 //! the executor handles the select, delete and toggle outcomes (clip rows are
 //! deletable, so unlike `shot`/`theme`/`wallpaper`/`launch` all three are
 //! live), validates the id (`^[0-9a-f]+$`, the content-hash hex), resolves it
-//! back to the stored line (`flex clip --resolve`, i.e. the same
+//! back to the stored line (the same
 //! [`resolve`](crate::providers::clip::resolve) scan), and:
 //!
 //! - `select`: decodes `<NEWLINE>` back to newlines and pipes the entry
@@ -33,10 +33,9 @@
 //!
 //! Five deliberate departures from the wrapper (all tested):
 //!
-//! - No `flex clip --resolve` subprocess: the hash is resolved in-process
-//!   with the same [`resolve`](crate::providers::clip::resolve) the hidden
-//!   `--resolve` lookup uses, so the resolution semantics are identical with
-//!   one fewer spawn.
+//! - No subprocess: the hash is resolved in-process with the same
+//!   [`resolve`](crate::providers::clip::resolve) the library exposes, so
+//!   the resolution semantics are identical with one fewer spawn.
 //! - Exit-code normalisation: the wrapper `exec`s under `set -e` so a tool
 //!   failure propagates verbatim; the port maps every failure through the
 //!   shared runner, so any tool failure exits `1` with the single
@@ -433,8 +432,8 @@ pub struct ExecuteReport {
 }
 
 /// Copy/delete/toggle the selected entry: validate the id, short-circuit
-/// `noop`, resolve the hash to its stored line in-process (no
-/// `flex clip --resolve` subprocess), and run the [`plan`] steps.
+/// `noop`, resolve the hash to its stored line in-process, and run the
+/// [`plan`] steps.
 /// `path_env` shadows the ambient `PATH` when `Some` (the stub seam tests
 /// use); `None` inherits it.
 ///

@@ -185,7 +185,7 @@ fn tab_from_rows(rows: Vec<Row>) -> Tab {
 }
 
 /// Resolve a content-hash id back to its full stored (`<NEWLINE>`-encoded)
-/// line, for the wrapper (`flex clip --resolve`). Returns `None` on unknown
+/// line (the clip executor's in-process lookup). Returns `None` on unknown
 /// (stale) ids or unreadable stores.
 #[must_use]
 pub fn resolve(hash: &str) -> Option<String> {
@@ -197,7 +197,7 @@ pub fn resolve(hash: &str) -> Option<String> {
 pub fn resolve_in(hist: &Path, pins: &Path, hash: &str) -> Option<String> {
     // Walks the store with the same dedup and ordering rules, but builds
     // neither previews nor measurements: the lookup only compares hashes
-    // (B-024 — `flex clip --resolve` runs on every selection).
+    // (B-024 — the resolver runs on every selection).
     let mut found: Option<String> = None;
     visit_unique(hist, pins, |full, entry_hash, _pinned| {
         if found.is_none() && entry_hash == hash {

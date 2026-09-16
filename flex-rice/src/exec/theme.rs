@@ -4,7 +4,7 @@
 //! row, the executor validates the id (non-empty, no `/`, no newline),
 //! short-circuits
 //! the `noop` empty-scan placeholder (exit `0`, B-026), resolves the row
-//! hash back to the theme name (`flex theme --resolve`, i.e. the same
+//! hash back to the theme name (the same
 //! [`resolve_name`](crate::providers::theme_::resolve_name) scan), and
 //! `exec`s `$THEME_SWITCHER activate <name>` (default
 //! `$HOME/.config/scripts/theme-switcher.sh`).
@@ -17,10 +17,10 @@
 //!
 //! Two deliberate departures from the wrapper (both tested):
 //!
-//! - No `flex theme --resolve` subprocess: the hash is resolved in-process
-//!   with the same [`resolve_name`](crate::providers::theme_::resolve_name)
-//!   the hidden `--resolve` lookup uses, so the resolution semantics are
-//!   identical with one fewer spawn.
+//! - No subprocess: the hash is resolved in-process with the same
+//!   [`resolve_name`](crate::providers::theme_::resolve_name) the library
+//!   exposes, so the resolution semantics are identical with one fewer
+//!   spawn.
 //! - Exit-code normalisation: the wrapper `exec`s the switcher so its exit
 //!   status propagates verbatim; the port maps every failure through the
 //!   shared runner, so any tool failure exits `1` with the single

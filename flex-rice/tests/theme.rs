@@ -173,7 +173,8 @@ fn keyseq_down_enter_selects_second_theme() {
     assert_ne!(row.id.as_str(), row.label, "the name is not the id (B-021)");
     // The retired wrapper's ACTION: line for this selection was
     // `ACTION: theme <row-hash> tokyo-night` (exit 0); the theme executor
-    // resolves the hash with `flex theme --resolve` before activating.
+    // resolves the hash in-process via the library resolver before
+    // activating.
     assert_eq!(menu.provider, "theme");
 }
 
@@ -324,8 +325,8 @@ fn empty_scan_shows_the_noop_placeholder() {
 // --- Executor (`flex-rice/src/exec/theme.rs`) ----------------------------------
 //
 // The theme port of the `exec::shot` template: `ThemeAction::parse` validates
-// the id, `execute` resolves the hash in-process (no `flex theme --resolve`
-// subprocess) and runs `<switcher> activate <name>` through the
+// the id, `execute` resolves the hash in-process via the library resolver
+// and runs `<switcher> activate <name>` through the
 // `THEME_SWITCHER` seam. No TUI, no pty: stub `PATH` + scratch `HOME`.
 //
 // Like the shot suite, the popup guard itself lives in the shared runner

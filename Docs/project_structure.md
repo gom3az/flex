@@ -43,7 +43,7 @@ flex/                        # cargo workspace root (two members)
     Cargo.toml               # publish = false; [[bin]] flex + eight flex-<provider>
     src/
       lib.rs                 # pub mod exec/providers/runner/popup/terminal; menu()/tick_hook()
-      main.rs                # `flex` dispatcher: popup toggle, provider re-exec, hidden --resolve
+      main.rs                # `flex` dispatcher: popup toggle, provider re-exec
       runner.rs              # shared flow: popup_guard → build_menu → run_capture → exec
       popup.rs               # popup classes, in-popup detection, toggle helper
       terminal.rs            # $TERMINAL detection + popup spawn argv
@@ -119,15 +119,16 @@ flex/                        # cargo workspace root (two members)
 4. **`RowId` hash hex for clipboard (Q2).** `clip` rows use
    `action_id = hex(blake/simple-hash(content))` — stable across runs so the
    store round-trips. `wallpaper` reuses it over the absolute
-   path and adds a hidden `--resolve` lookup, since paths contain spaces.
-   `launch` and `theme` follow the same rule over the desktop-id / theme
-   name (`launch::entry_id`, `theme_::entry_id`) with `flex launch --resolve`
-   and `flex theme --resolve`: a `.desktop` file or theme directory may be
+   path, since paths contain spaces. `launch` and `theme` follow the same
+   rule over the desktop-id / theme name (`launch::entry_id`,
+   `theme_::entry_id`): a `.desktop` file or theme directory may be
    named `My App.desktop`/`My Theme`, and the `ACTION:` id token is
    whitespace-delimited, so the raw name can never be the id (B-021). A
    provider that puts a free-text value in the id must therefore hash it and
-   ship a resolver — `wifi` is the one exception, and it keeps the SSID in
-   the escaped *label* instead.
+   ship a resolver — the executors call the library resolver functions
+   (`clip::resolve`, `wallpaper::resolve`, `launch::resolve_id`,
+   `theme_::resolve_name`) in-process; `wifi` is the one exception, and it
+   keeps the SSID in the escaped *label* instead.
    (Hash fn: std-only in v1, no extra deps.)
 5. **`target/` gitignored.** Root `.gitignore` carries `/target`; never commit
    build artifacts. `Cargo.lock` IS committed (Q5) — the single lockfile for

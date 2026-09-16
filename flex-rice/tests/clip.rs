@@ -487,35 +487,28 @@ fn parity_with_bash_pipeline_on_reference_data() {
     );
 }
 
-// --- Resolve error format (B-022) -----------------------------------------------
+// --- Resolve lookup (B-021) ------------------------------------------------------
 
-/// An unknown `--resolve` id is one complete diagnostic line: `main` adds
-/// `flex: error:` exactly once, so the message must not carry a second
-/// `flex:` prefix of its own.
+/// An unknown hash resolves to nothing through the library resolver. The
+/// `main`-owned single `flex: error:` prefix now applies at the executor
+/// boundary, so the resolver itself just returns `None`.
 #[test]
-fn unknown_resolve_id_is_reported_with_a_single_prefix() {
-    let home = scratch("resolve-error");
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_flex"))
-        .args(["clip", "--resolve", "deadbeef"])
-        .env("HOME", &home)
-        .env_remove("CLIPHIST_FILE")
-        .env_remove("CLIPHIST_PINS")
-        .output()
-        .expect("run flex clip --resolve");
-    let _ = std::fs::remove_dir_all(&home);
-    assert!(!output.status.success(), "unknown id exits non-zero");
-    assert_eq!(
-        String::from_utf8_lossy(&output.stderr),
-        "flex: error: clip: unknown id 'deadbeef'\n"
+fn unknown_hash_resolves_to_none() {
+    let (dir, _) = corpus_entries();
+    let (hist, pins) = (dir.join("cliphist"), dir.join("cliphist.pins"));
+    assert!(
+        clip::resolve_in(&hist, &pins, "deadbeef").is_none(),
+        "an id absent from the store resolves to None"
     );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // --- Executor (`flex-rice/src/exec/clip.rs`) ----------------------------------
 //
 // The clip port of the `exec::shot` template: `ClipAction::parse` validates
 // the id (`^[0-9a-f]+$`, plus the shared `noop` short-circuit), `execute`
-// resolves the hash in-process (no `flex clip --resolve` subprocess) and
-// runs the copy/delete/toggle steps through the stub-`PATH` tool seam
+// resolves the hash in-process via the library resolver and runs the
+// copy/delete/toggle steps through the stub-`PATH` tool seam
 // (`wl-copy` piped, `notify-send` inherited) plus exact-line store edits
 // (`CLIPHIST_FILE`/`CLIPHIST_PINS`, empty values fall back like the
 // wrapper's `${VAR:-default}`). No TUI, no pty: stub `PATH` + scratch

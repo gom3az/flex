@@ -13,9 +13,8 @@
 //! The ids are the standalone provider's bash-exact arms
 //! ([`crate::providers::power::ROWS`]), not the center surface's
 //! `pw`-prefixed ids. There is no hash to resolve (unlike launch/theme/
-//! wallpaper), so the whole plan follows from the row id: `--resolve` has no
-//! power analog, and the in-process resolution step the other ports perform
-//! is a no-op here.
+//! wallpaper), so the whole plan follows from the row id: the in-process
+//! resolution step the other ports perform is a no-op here.
 //!
 //! Danger rows (`reboot`, `poweroff`) are confirmed UI-side by the shared
 //! double-Enter flow ([`flex_core::keys`]) before SELECT ever arrives: the

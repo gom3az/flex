@@ -101,6 +101,30 @@ fn resolve_tool(name: &str, path_env: &str) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
+/// Retry a process call while it fails with a transient `ETXTBSY`
+/// (`ExecutableFileBusy`).
+///
+/// A tool path is momentarily "busy" while some process holds it open for
+/// writing. That is rare in production but inherent to the stub-`PATH` tests,
+/// which write a tool script and exec it while other tests in the same process
+/// fork; a forked child can inherit the writer's descriptor until its own
+/// `exec`. The condition clears in microseconds, so a short bounded retry is
+/// enough, and every other error propagates unchanged.
+fn retrying<T>(mut run: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    let mut last = None;
+    for _ in 0..50 {
+        match run() {
+            Ok(value) => return Ok(value),
+            Err(err) if err.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                last = Some(err);
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Err(last.unwrap_or_else(|| std::io::Error::other("popup: exec stayed busy")))
+}
+
 /// Whether a popup of `class` is currently open (`pgrep -f "<class> "`).
 ///
 /// `# Errors`: when `pgrep` is missing from `path_env` or cannot be
@@ -110,14 +134,16 @@ fn pgrep_open(class: &str, path_env: &str) -> anyhow::Result<bool> {
     let Some(bin) = resolve_tool("pgrep", path_env) else {
         return Err(anyhow::anyhow!("popup: pgrep not found on PATH"));
     };
-    let output = std::process::Command::new(bin)
-        .arg("-f")
-        .arg(pattern)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .context("popup: failed to run pgrep")?;
+    let output = retrying(|| {
+        std::process::Command::new(&bin)
+            .arg("-f")
+            .arg(&pattern)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+    })
+    .context("popup: failed to run pgrep")?;
     Ok(output.status.success())
 }
 
@@ -131,14 +157,16 @@ fn pkill_class(class: &str, path_env: &str) -> anyhow::Result<()> {
     let Some(bin) = resolve_tool("pkill", path_env) else {
         return Err(anyhow::anyhow!("popup: pkill not found on PATH"));
     };
-    std::process::Command::new(bin)
-        .arg("-f")
-        .arg(pattern)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .context("popup: failed to run pkill")?;
+    retrying(|| {
+        std::process::Command::new(&bin)
+            .arg("-f")
+            .arg(&pattern)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+    })
+    .context("popup: failed to run pkill")?;
     Ok(())
 }
 
@@ -164,13 +192,15 @@ fn spawn_detached(argv: &[String], path_env: &str) -> anyhow::Result<()> {
             }
         }
     };
-    std::process::Command::new(bin)
-        .args(rest)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .context("popup: failed to spawn terminal")?;
+    retrying(|| {
+        std::process::Command::new(&bin)
+            .args(rest)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+    })
+    .context("popup: failed to spawn terminal")?;
     Ok(())
 }
 
@@ -395,6 +425,45 @@ mod tests {
         assert!(
             !stubs.kitty_log.exists(),
             "an open popup closes instead of stacking",
+        );
+        let _ = std::fs::remove_dir_all(&stubs.dir);
+    }
+
+    #[test]
+    fn toggle_closes_the_menu_variant_for_a_different_menu_provider() {
+        let stubs = install_stubs("close-menu-other", 0);
+        // `wifi` shares `menu` with the `power` popup that opened it; the
+        // toggle keys on the variant, so it closes rather than stacks.
+        let cmd = vec!["flex".to_string(), "wifi".to_string()];
+        toggle_impl(TerminalKind::Kitty, MENU_CLASS, &cmd, Some(&stubs.path_env))
+            .expect("toggle close succeeds");
+        assert_eq!(
+            wait_for_log(&stubs.pkill_log),
+            vec!["-f".to_string(), "flex-menu ".to_string()],
+            "pkill probes the shared menu class with the trailing space",
+        );
+        assert!(
+            !stubs.kitty_log.exists(),
+            "a different menu provider closes instead of stacking",
+        );
+        let _ = std::fs::remove_dir_all(&stubs.dir);
+    }
+
+    #[test]
+    fn toggle_closes_the_wide_variant_for_a_different_wide_provider() {
+        let stubs = install_stubs("close-wide-other", 0);
+        // `center` shares `menu-wide` with the `launch` popup that opened it.
+        let cmd = vec!["flex".to_string(), "center".to_string()];
+        toggle_impl(TerminalKind::Kitty, WIDE_CLASS, &cmd, Some(&stubs.path_env))
+            .expect("toggle close succeeds");
+        assert_eq!(
+            wait_for_log(&stubs.pkill_log),
+            vec!["-f".to_string(), "flex-menu-wide ".to_string()],
+            "pkill probes the shared wide class with the trailing space",
+        );
+        assert!(
+            !stubs.kitty_log.exists(),
+            "a different wide provider closes instead of stacking",
         );
         let _ = std::fs::remove_dir_all(&stubs.dir);
     }

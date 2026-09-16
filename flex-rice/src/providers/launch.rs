@@ -22,8 +22,8 @@
 //! strips field codes exactly like `launch_app_row` does. Row ids
 //! are [`entry_id`] hashes of the desktop-id — space-free, because the
 //! `ACTION:` protocol delimits the id on whitespace and a `.desktop` file
-//! may legally be named `My App.desktop` (B-021). `flex launch --resolve
-//! <id>` maps such an id back to the desktop-id; the wrapper then
+//! may legally be named `My App.desktop` (B-021). The launch executor maps
+//! such an id back to the desktop-id with the library resolver, then
 //! re-resolves it to the `.desktop` file to recover `Exec` + `Terminal`.
 
 use std::path::{Path, PathBuf};
@@ -162,8 +162,8 @@ pub fn entry_id(desktop_id: &str) -> String {
     content_hash_hex(desktop_id)
 }
 
-/// Resolve a row id back to its desktop-id, for `flex launch --resolve`
-/// (hidden wrapper lookup, like `flex clip --resolve`).
+/// Resolve a row id back to its desktop-id (the launch executor's
+/// in-process lookup, like `clip::resolve`).
 ///
 /// Searched over the same entry set [`rows`] is built from, so only ids
 /// that can actually be on screen resolve. Returns `None` for unknown ids

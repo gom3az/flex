@@ -38,7 +38,7 @@ binary per provider.
 
 | Binary | Provider | What it does |
 |---|---|---|
-| `flex` | dispatcher | `flex popup …`, `flex <provider> [args…]`, hidden `flex <provider> --resolve <id>` (see below) |
+| `flex` | dispatcher | `flex popup …`, `flex <provider> [args…]` |
 | `flex-power` | power | Shutdown/reboot/logout menu: `hyprlock`, `systemctl suspend\|reboot\|poweroff`, `pkill -SIGTERM Hyprland` |
 | `flex-launch` | launch | Application launcher: scans `.desktop` entries and detaches the chosen app with `setsid -f` (`$TERMINAL -e` for `Terminal=true`) |
 | `flex-shot` | shot | Screenshot/recording flow: `slurp`, `grim`, `wl-copy`, `notify-send`, or the `RECORDING_START` helper |
@@ -69,10 +69,10 @@ provider binaries:
 - `flex <provider> [args…]` re-execs the sibling `flex-<provider>` binary,
   reconstructing the global flags (`-s/-t/-p/--filter-mode`) in canonical
   order, so `flex -t nocolor launch` ≡ `flex launch -t nocolor`.
-- Hidden `flex <provider> --resolve <id>` prints the identity behind a row id
-  (desktop-id, theme name, wallpaper path, clipboard line) and exits. The
-  executors resolve ids in-process, so this is a standalone lookup rather than
-  a step on the call path.
+
+The executors resolve row ids in-process via the library resolver functions
+(`flex_rice::providers::{clip,wallpaper,launch,theme_}`), so no lookup is a
+separate CLI step.
 
 ## `--print-action` probe
 

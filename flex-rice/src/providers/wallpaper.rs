@@ -18,8 +18,8 @@
 //!   uses, and the reason this tab is not bare-rows.
 //! - Row id = [`content_hash_hex`] of the absolute path (Q2 style), so ids
 //!   stay free of spaces and path separators on the `ACTION:` line; the
-//!   wrapper turns the id back into a path with the hidden
-//!   `flex wallpaper --resolve <id>` lookup, exactly like `flex clip`.
+//!   wallpaper executor turns the id back into a path with the library
+//!   resolver, exactly like `clip`.
 //! - Rows also carry [`Row::preview_image`], the path the kitty-graphics
 //!   preview pane draws.
 //!
