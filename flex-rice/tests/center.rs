@@ -1245,3 +1245,1002 @@ fn wrapper_noops_and_rejects() {
     assert!(!output.status.success(), "malformed ACTION: must fail");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// --- Executor tests (`exec::center`) -------------------------------------------------
+//
+// The wrapper tests above stay untouched; these drive the Rust port with the
+// same stub idioms (per-tool logging stubs, byte-compared call logs, scratch
+// `HOME`). Process-env mutations ride under `EXEC_ENV_LOCK` with the shared
+// [`EnvGuard`] save/restore.
+
+use flex_rice::exec::center as exec_center;
+
+/// Serialises the executor/parity tests below: each mutates process env
+/// (`HOME`, `NMCLI`, `FLEX_CENTER_PASSWORD`, …) and the harness runs tests
+/// in parallel, so the mutations are held under one lock with restores in
+/// [`EnvGuard`] (same pattern as the launch port's `EXEC_ENV_LOCK`).
+static EXEC_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// `PATH` shadow for executor calls: stub dir first, ambient `PATH` after
+/// (stubs are `bash` scripts, and the wrapper side needs real `grep`/`awk`).
+fn exec_path_env(dir: &Path) -> String {
+    format!(
+        "{}:{}",
+        dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    )
+}
+
+/// Scratch `HOME` with an applications dir (plain + `Terminal=true` apps)
+/// and a logging theme-switcher at the wrapper-default path. The switcher
+/// logs through `$STUB_LOG` like every other stub, so matrix and parity
+/// tests compare one shared call log.
+fn install_center_home(tag: &str) -> PathBuf {
+    let home = std::env::temp_dir().join(format!("flex-center-exec-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    let apps = home.join(".local/share/applications");
+    std::fs::create_dir_all(&apps).expect("apps dir");
+    std::fs::write(
+        apps.join("firefox.desktop"),
+        "[Desktop Entry]\nName=Firefox\nExec=firefox %U\nTerminal=false\n",
+    )
+    .expect("plain entry");
+    std::fs::write(
+        apps.join("termapp.desktop"),
+        "[Desktop Entry]\nName=Htop\nExec=htop\nTerminal=true\n",
+    )
+    .expect("terminal entry");
+    let switcher = home.join(".config/scripts/theme-switcher.sh");
+    std::fs::create_dir_all(switcher.parent().expect("switcher parent")).expect("switcher dir");
+    write_exe(
+        &switcher,
+        "#!/usr/bin/env bash\nprintf 'switcher %s\\n' \"$*\" >> \"$STUB_LOG\"\n",
+    );
+    home
+}
+
+/// Full action matrix through one shared call log: launch (plain + the
+/// verbatim `kitty` branch), mute, bt connect/disconnect on fresh `info`
+/// state, wifi open connect, all five power arms, theme, and the quiet
+/// `bright`/`noop` rows. Byte-compared against the wrapper's shapes.
+#[test]
+fn executor_matrix_runs_every_action_through_stub_tools() {
+    let _env = EXEC_ENV_LOCK.lock().expect("env lock");
+    let dir = stub_dir("exec-matrix");
+    for name in [
+        "setsid",
+        "wpctl",
+        "systemctl",
+        "hyprlock",
+        "pkill",
+        "notify-send",
+    ] {
+        log_stub(&dir, name, LOG_STUB);
+    }
+    write_exe(&dir.join("nmcli"), NMCLI_STUB);
+    write_exe(&dir.join("bluetoothctl"), BT_STUB);
+    let wifi_list = dir.join("wifi-list.txt");
+    std::fs::write(&wifi_list, ":Coffee Shop:41:--\n").expect("wifi list");
+    let info = dir.join("info.txt");
+    let log = dir.join("calls.log");
+    let home = install_center_home("matrix");
+    let _guard = EnvGuard::set(&[
+        ("HOME", home.to_str().expect("utf8")),
+        ("NMCLI", dir.join("nmcli").to_str().expect("utf8")),
+        (
+            "BLUETOOTHCTL",
+            dir.join("bluetoothctl").to_str().expect("utf8"),
+        ),
+        ("WPCTL", dir.join("wpctl").to_str().expect("utf8")),
+        ("THEME_SWITCHER", ""),
+        ("FLEX_CENTER_PASSWORD", ""),
+        ("STUB_LOG", log.to_str().expect("utf8")),
+        ("WIFI_LIST", wifi_list.to_str().expect("utf8")),
+        ("BT_INFO", info.to_str().expect("utf8")),
+    ]);
+    let path_env = exec_path_env(&dir);
+    let select = exec_center::CenterOp::Select;
+    let run = |op: exec_center::CenterOp, id: &str, label: &str| {
+        exec_center::execute(op, id, label, Some(&path_env)).expect("executor succeeds")
+    };
+    // Launcher rows: the hash resolves in-process (no `flex --resolve`).
+    let firefox_id = format!("launch:{}", launch::entry_id("firefox.desktop"));
+    let term_id = format!("launch:{}", launch::entry_id("termapp.desktop"));
+    assert_eq!(
+        run(select, &firefox_id, "Firefox").detail.as_deref(),
+        Some("firefox.desktop")
+    );
+    assert_eq!(
+        run(select, &term_id, "Htop").detail.as_deref(),
+        Some("termapp.desktop")
+    );
+    run(select, "vol", "Volume  55%  [bar]");
+    std::fs::write(&info, "Device X\n\tConnected: yes\n").expect("info");
+    run(select, "bt:AA:BB:CC:DD:EE:FF", "Headphones");
+    std::fs::write(&info, "Device X\n\tConnected: no\n").expect("info");
+    run(
+        exec_center::CenterOp::Toggle,
+        "bt:11:22:33:44:55:66",
+        "Speaker",
+    );
+    run(select, "wifi", "Coffee Shop");
+    for (id, detail) in [
+        ("pwlock", "pwlock"),
+        ("pwsuspend", "pwsuspend"),
+        ("pwreboot", "pwreboot"),
+        ("pwoff", "pwoff"),
+        ("pwlogout", "pwlogout"),
+    ] {
+        assert_eq!(run(select, id, id).detail.as_deref(), Some(detail));
+    }
+    assert_eq!(
+        run(select, "theme", "Theme: tokyo-night").detail.as_deref(),
+        Some("tokyo-night")
+    );
+    // Quiet rows: no steps, still `Ok`.
+    for id in ["bright", "noop"] {
+        let report = run(select, id, id);
+        assert_eq!(report.detail, None, "{id} carries no detail");
+    }
+    assert_eq!(
+        read_log(&dir).lines().collect::<Vec<_>>(),
+        vec![
+            "setsid -f firefox",
+            "setsid -f kitty -e htop",
+            "wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle",
+            "bt info AA:BB:CC:DD:EE:FF",
+            "bt disconnect AA:BB:CC:DD:EE:FF",
+            "bt info 11:22:33:44:55:66",
+            "bt connect 11:22:33:44:55:66",
+            "nmcli -t -f DEVICE,TYPE device",
+            "nmcli -t -f IN-USE,SSID,SIGNAL,SECURITY device wifi list ifname wlan0",
+            "nmcli device wifi connect Coffee Shop ifname wlan0",
+            "notify-send -a Control Center Connected Coffee Shop",
+            // `hyprlock` takes no args; `LOG_STUB` joins `name + space +
+            // args` unconditionally, so the zero-arg call keeps its space.
+            "hyprlock ",
+            "systemctl suspend",
+            "systemctl reboot",
+            "systemctl poweroff",
+            "pkill -SIGTERM Hyprland",
+            "switcher activate tokyo-night",
+        ],
+        "one tool sequence per action (describe: one line per step)",
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// Secure wifi uses the stored password (no `/dev/tty` read) and notifies.
+#[test]
+fn executor_wifi_secure_uses_the_stored_password() {
+    let _env = EXEC_ENV_LOCK.lock().expect("env lock");
+    let dir = stub_dir("exec-wifi-sec");
+    log_stub(&dir, "notify-send", LOG_STUB);
+    write_exe(&dir.join("nmcli"), NMCLI_STUB);
+    let wifi_list = dir.join("wifi-list.txt");
+    std::fs::write(&wifi_list, ":MyNet:70:WPA2\n").expect("wifi list");
+    let log = dir.join("calls.log");
+    let home = install_center_home("wifi-sec");
+    let _guard = EnvGuard::set(&[
+        ("HOME", home.to_str().expect("utf8")),
+        ("NMCLI", dir.join("nmcli").to_str().expect("utf8")),
+        ("FLEX_CENTER_PASSWORD", "s3cret"),
+        ("STUB_LOG", log.to_str().expect("utf8")),
+        ("WIFI_LIST", wifi_list.to_str().expect("utf8")),
+    ]);
+    let report = exec_center::execute(
+        exec_center::CenterOp::Select,
+        "wifi",
+        "MyNet",
+        Some(&exec_path_env(&dir)),
+    )
+    .expect("secure connect succeeds");
+    assert_eq!(report.detail.as_deref(), Some("MyNet"));
+    assert_eq!(
+        read_log(&dir).lines().collect::<Vec<_>>(),
+        vec![
+            "nmcli -t -f DEVICE,TYPE device",
+            "nmcli -t -f IN-USE,SSID,SIGNAL,SECURITY device wifi list ifname wlan0",
+            "nmcli device wifi connect MyNet password s3cret ifname wlan0",
+            "notify-send -a Control Center Connected MyNet",
+        ],
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A connected row disconnects (fresh `IN-USE` state, unconditional notify).
+#[test]
+fn executor_wifi_connected_disconnects() {
+    let _env = EXEC_ENV_LOCK.lock().expect("env lock");
+    let dir = stub_dir("exec-wifi-disc");
+    log_stub(&dir, "notify-send", LOG_STUB);
+    write_exe(&dir.join("nmcli"), NMCLI_STUB);
+    let wifi_list = dir.join("wifi-list.txt");
+    std::fs::write(&wifi_list, "*:HomeNet:87:WPA2\n").expect("wifi list");
+    let log = dir.join("calls.log");
+    let home = install_center_home("wifi-disc");
+    let _guard = EnvGuard::set(&[
+        ("HOME", home.to_str().expect("utf8")),
+        ("NMCLI", dir.join("nmcli").to_str().expect("utf8")),
+        ("FLEX_CENTER_PASSWORD", ""),
+        ("STUB_LOG", log.to_str().expect("utf8")),
+        ("WIFI_LIST", wifi_list.to_str().expect("utf8")),
+    ]);
+    exec_center::execute(
+        exec_center::CenterOp::Select,
+        "wifi",
+        "HomeNet",
+        Some(&exec_path_env(&dir)),
+    )
+    .expect("disconnect succeeds");
+    assert_eq!(
+        read_log(&dir).lines().collect::<Vec<_>>(),
+        vec![
+            "nmcli -t -f DEVICE,TYPE device",
+            "nmcli -t -f IN-USE,SSID,SIGNAL,SECURITY device wifi list ifname wlan0",
+            "nmcli device disconnect wlan0",
+            "notify-send -a Control Center Disconnected HomeNet",
+        ],
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// No wifi interface (or a failing discovery) is a quiet no-op after the
+/// single discovery call — the interface vanished since the snapshot.
+#[test]
+fn executor_wifi_without_interface_is_a_quiet_noop() {
+    let _env = EXEC_ENV_LOCK.lock().expect("env lock");
+    let dir = stub_dir("exec-wifi-noif");
+    log_stub(&dir, "notify-send", LOG_STUB);
+    write_exe(
+        &dir.join("nmcli"),
+        "#!/usr/bin/env bash\nprintf 'nmcli %s\\n' \"$*\" >> \"$STUB_LOG\"\nprintf 'eth0:ethernet\\n'\n",
+    );
+    let log = dir.join("calls.log");
+    let home = install_center_home("wifi-noif");
+    let _guard = EnvGuard::set(&[
+        ("HOME", home.to_str().expect("utf8")),
+        ("NMCLI", dir.join("nmcli").to_str().expect("utf8")),
+        ("FLEX_CENTER_PASSWORD", ""),
+        ("STUB_LOG", log.to_str().expect("utf8")),
+    ]);
+    let report = exec_center::execute(
+        exec_center::CenterOp::Select,
+        "wifi",
+        "HomeNet",
+        Some(&exec_path_env(&dir)),
+    )
+    .expect("vanished interface is Ok");
+    assert_eq!(report.detail, None);
+    assert_eq!(
+        read_log(&dir).lines().collect::<Vec<_>>(),
+        vec!["nmcli -t -f DEVICE,TYPE device"],
+        "nothing past discovery",
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A stale label (SSID gone from the scan) takes the open arm, like an
+/// empty `$sec` in bash.
+#[test]
+fn executor_wifi_stale_label_treated_as_open() {
+    let _env = EXEC_ENV_LOCK.lock().expect("env lock");
+    let dir = stub_dir("exec-wifi-stale");
+    log_stub(&dir, "notify-send", LOG_STUB);
+    write_exe(&dir.join("nmcli"), NMCLI_STUB);
+    let wifi_list = dir.join("wifi-list.txt");
+    std::fs::write(&wifi_list, ":Other:50:WPA2\n").expect("wifi list");
+    let log = dir.join("calls.log");
+    let home = install_center_home("wifi-stale");
+    let _guard = EnvGuard::set(&[
+        ("HOME", home.to_str().expect("utf8")),
+        ("NMCLI", dir.join("nmcli").to_str().expect("utf8")),
+        ("FLEX_CENTER_PASSWORD", ""),
+        ("STUB_LOG", log.to_str().expect("utf8")),
+        ("WIFI_LIST", wifi_list.to_str().expect("utf8")),
+    ]);
+    exec_center::execute(
+        exec_center::CenterOp::Select,
+        "wifi",
+        "Gone",
+        Some(&exec_path_env(&dir)),
+    )
+    .expect("stale label is Ok");
+    let logged = read_log(&dir);
+    assert!(
+        logged.contains("nmcli device wifi connect Gone ifname wlan0"),
+        "stale label connects open: {logged:?}"
+    );
+    assert!(
+        logged.contains("notify-send -a Control Center Connected Gone"),
+        "success notifies: {logged:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A failing open connect skips its notify (the wrapper's `if`, no `else`);
+/// a failing secure connect notifies `Failed` instead of `Connected`.
+#[test]
+fn executor_wifi_failed_connect_gates_its_notify() {
+    let _env = EXEC_ENV_LOCK.lock().expect("env lock");
+    let dir = stub_dir("exec-wifi-fail");
+    log_stub(&dir, "notify-send", LOG_STUB);
+    write_exe(
+        &dir.join("nmcli"),
+        r#"#!/usr/bin/env bash
+printf 'nmcli %s\n' "$*" >> "$STUB_LOG"
+case "$1" in
+    -t) case "$3" in
+        DEVICE,TYPE) printf 'wlan0:wifi\n' ;;
+        IN-USE,SSID,SIGNAL,SECURITY) cat "$WIFI_LIST" ;;
+    esac ;;
+    device) case "$2" in
+        wifi) exit 3 ;;
+        disconnect) exit 0 ;;
+    esac ;;
+esac
+"#,
+    );
+    let wifi_list = dir.join("wifi-list.txt");
+    std::fs::write(&wifi_list, ":Open:41:--\n:MyNet:70:WPA2\n").expect("wifi list");
+    let log = dir.join("calls.log");
+    let home = install_center_home("wifi-fail");
+    let _guard = EnvGuard::set(&[
+        ("HOME", home.to_str().expect("utf8")),
+        ("NMCLI", dir.join("nmcli").to_str().expect("utf8")),
+        ("FLEX_CENTER_PASSWORD", "s3cret"),
+        ("STUB_LOG", log.to_str().expect("utf8")),
+        ("WIFI_LIST", wifi_list.to_str().expect("utf8")),
+    ]);
+    let path_env = exec_path_env(&dir);
+    // Open failure: connect logged, no notify at all (still `Ok` — quiet).
+    exec_center::execute(
+        exec_center::CenterOp::Select,
+        "wifi",
+        "Open",
+        Some(&path_env),
+    )
+    .expect("failed open connect is quiet");
+    let logged = read_log(&dir);
+    assert!(
+        logged.contains("nmcli device wifi connect Open ifname wlan0"),
+        "connect attempted: {logged:?}"
+    );
+    assert!(
+        !logged.contains("notify-send"),
+        "no notify on failed open connect: {logged:?}"
+    );
+    // Secure failure: `Failed` notify, never `Connected`.
+    std::fs::remove_file(&log).expect("reset log");
+    exec_center::execute(
+        exec_center::CenterOp::Select,
+        "wifi",
+        "MyNet",
+        Some(&path_env),
+    )
+    .expect("failed secure connect is quiet");
+    let logged = read_log(&dir);
+    assert!(
+        logged.contains("notify-send -a Control Center Failed MyNet"),
+        "failure notifies: {logged:?}"
+    );
+    assert!(
+        !logged.contains("Connected MyNet"),
+        "no success notify on failure: {logged:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// Toggle dispatch: `vol` mutes, `bt:*` flips on fresh state, everything
+/// else (bright/theme/launch/wifi/power/noop) is a quiet no-op.
+#[test]
+fn executor_toggle_matrix() {
+    let _env = EXEC_ENV_LOCK.lock().expect("env lock");
+    let dir = stub_dir("exec-toggle");
+    for name in ["setsid", "wpctl", "systemctl", "notify-send"] {
+        log_stub(&dir, name, LOG_STUB);
+    }
+    write_exe(&dir.join("nmcli"), NMCLI_STUB);
+    write_exe(&dir.join("bluetoothctl"), BT_STUB);
+    let wifi_list = dir.join("wifi-list.txt");
+    std::fs::write(&wifi_list, ":MyNet:70:WPA2\n").expect("wifi list");
+    let info = dir.join("info.txt");
+    std::fs::write(&info, "Device X\n\tConnected: yes\n").expect("info");
+    let log = dir.join("calls.log");
+    let home = install_center_home("toggle");
+    let _guard = EnvGuard::set(&[
+        ("HOME", home.to_str().expect("utf8")),
+        ("NMCLI", dir.join("nmcli").to_str().expect("utf8")),
+        (
+            "BLUETOOTHCTL",
+            dir.join("bluetoothctl").to_str().expect("utf8"),
+        ),
+        ("WPCTL", dir.join("wpctl").to_str().expect("utf8")),
+        ("FLEX_CENTER_PASSWORD", "s3cret"),
+        ("STUB_LOG", log.to_str().expect("utf8")),
+        ("WIFI_LIST", wifi_list.to_str().expect("utf8")),
+        ("BT_INFO", info.to_str().expect("utf8")),
+    ]);
+    let path_env = exec_path_env(&dir);
+    let toggle = exec_center::CenterOp::Toggle;
+    exec_center::execute(toggle, "vol", "Volume", Some(&path_env)).expect("toggle mute");
+    exec_center::execute(toggle, "bt:AA:BB:CC:DD:EE:FF", "HP", Some(&path_env)).expect("toggle bt");
+    // Inert toggles: still `Ok`, no tool calls.
+    for id in [
+        "bright",
+        "theme",
+        "wifi",
+        "pwreboot",
+        "noop",
+        &format!("launch:{}", launch::entry_id("firefox.desktop")),
+    ] {
+        exec_center::execute(toggle, id, id, Some(&path_env)).expect("inert toggle is Ok");
+    }
+    assert_eq!(
+        read_log(&dir).lines().collect::<Vec<_>>(),
+        vec![
+            "wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle",
+            "bt info AA:BB:CC:DD:EE:FF",
+            "bt disconnect AA:BB:CC:DD:EE:FF",
+        ],
+        "only vol/bt toggle arms act (wrapper `toggle)` verbatim)",
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// Malformed ids (`bad id`) and well-formed-but-unresolvable rows are
+/// errors with no `flex:` prefix of their own — the runner adds the single
+/// prefix at the binary boundary.
+#[test]
+fn executor_rejects_bad_and_unknown_ids_without_its_own_prefix() {
+    let _env = EXEC_ENV_LOCK.lock().expect("env lock");
+    let dir = stub_dir("exec-bad");
+    for name in [
+        "setsid",
+        "wpctl",
+        "systemctl",
+        "hyprlock",
+        "pkill",
+        "notify-send",
+    ] {
+        log_stub(&dir, name, LOG_STUB);
+    }
+    let home = install_center_home("bad");
+    let _guard = EnvGuard::set(&[
+        ("HOME", home.to_str().expect("utf8")),
+        ("THEME_SWITCHER", ""),
+        ("FLEX_CENTER_PASSWORD", ""),
+    ]);
+    let path_env = exec_path_env(&dir);
+    let ghost_hash = launch::entry_id("ghost.desktop");
+    let ghost_launch = format!("launch:{ghost_hash}");
+    let cases = [
+        ("", "center: bad id ''"),
+        ("a/b", "center: bad id 'a/b'"),
+        ("a\nb", "center: bad id 'a\nb'"),
+        (ghost_launch.as_str(), "center: unknown launch id"),
+        ("frobnicate", "center: unknown action: frobnicate"),
+        ("bt:", "center: empty MAC"),
+    ];
+    for (id, expected) in cases {
+        let err = exec_center::execute(exec_center::CenterOp::Select, id, id, Some(&path_env))
+            .expect_err("bad/unknown id must fail");
+        let message = format!("{err:#}");
+        assert!(
+            message.starts_with(expected),
+            "unexpected message for {id:?}: {message:?}"
+        );
+        assert!(
+            !message.contains("flex:"),
+            "no runner prefix below the runner: {message:?}"
+        );
+    }
+    // Theme with an empty name (label exactly `Theme: `) errors too.
+    let err = exec_center::execute(
+        exec_center::CenterOp::Select,
+        "theme",
+        "Theme: ",
+        Some(&path_env),
+    )
+    .expect_err("empty theme name must fail");
+    assert_eq!(format!("{err:#}"), "center: empty theme name");
+    assert!(
+        !dir.join("calls.log").exists(),
+        "no id failure launches anything"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// Loud arms stay loud: a failing `setsid`/power tool/switcher is an error
+/// (never a quiet cancel — center has no `slurp`-like cancellable step).
+#[test]
+fn executor_loud_tool_failure_is_an_error_not_a_quiet_cancel() {
+    let _env = EXEC_ENV_LOCK.lock().expect("env lock");
+    let dir = stub_dir("exec-loud-fail");
+    write_exe(&dir.join("setsid"), "#!/usr/bin/env bash\nexit 3\n");
+    write_exe(&dir.join("systemctl"), "#!/usr/bin/env bash\nexit 3\n");
+    let switcher = dir.join("switcher.sh");
+    write_exe(&switcher, "#!/usr/bin/env bash\nexit 3\n");
+    let home = install_center_home("loud-fail");
+    let _guard = EnvGuard::set(&[
+        ("HOME", home.to_str().expect("utf8")),
+        ("THEME_SWITCHER", switcher.to_str().expect("utf8")),
+        ("FLEX_CENTER_PASSWORD", ""),
+    ]);
+    let path_env = exec_path_env(&dir);
+    let id = format!("launch:{}", launch::entry_id("firefox.desktop"));
+    let err = exec_center::execute(
+        exec_center::CenterOp::Select,
+        &id,
+        "Firefox",
+        Some(&path_env),
+    )
+    .expect_err("a failing setsid must fail");
+    assert_eq!(
+        format!("{err:#}"),
+        "center: failed to launch firefox.desktop"
+    );
+    let err = exec_center::execute(
+        exec_center::CenterOp::Select,
+        "pwreboot",
+        "Reboot",
+        Some(&path_env),
+    )
+    .expect_err("a failing systemctl must fail");
+    assert_eq!(format!("{err:#}"), "center: systemctl reboot failed");
+    let err = exec_center::execute(
+        exec_center::CenterOp::Select,
+        "theme",
+        "Theme: mocha",
+        Some(&path_env),
+    )
+    .expect_err("a failing switcher must fail");
+    assert_eq!(format!("{err:#}"), "center: activate mocha failed");
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// Binary level without a pty: the menu cannot start, so the binary exits 1
+/// with exactly one `flex: error:` prefix (the runner owns it; executor
+/// errors carry none).
+#[test]
+fn binary_errors_carry_a_single_prefix() {
+    let output = std::process::Command::new("setsid")
+        .arg(env!("CARGO_BIN_EXE_flex-center"))
+        .env("POPUP_KITTY", "1")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("run flex-center without a pty");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty(), "no stdout on error");
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(
+        stderr.starts_with("flex: error: "),
+        "runner prefix first: {stderr:?}"
+    );
+    assert_eq!(
+        stderr.matches("flex: error:").count(),
+        1,
+        "exactly one prefix: {stderr:?}"
+    );
+}
+
+/// Outside a popup the binary re-execs into the `menu-wide` popup (the
+/// shared runner guard); the kitty spawn is asserted against a stub `PATH`.
+/// The stub `PATH` rides on the child env only — no process-env mutation,
+/// hence no lock.
+#[test]
+fn binary_outside_a_popup_reexecs_into_the_menu_wide_popup() {
+    let dir = stub_dir("exec-guard");
+    std::fs::create_dir_all(&dir).expect("stub dir");
+    let kitty_log = dir.join("kitty.log");
+    write_exe(&dir.join("pgrep"), "#!/usr/bin/env bash\nexit 1\n");
+    write_exe(
+        &dir.join("kitty"),
+        &format!(
+            "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > '{}.tmp'\nmv '{}.tmp' '{}'\n",
+            kitty_log.display(),
+            kitty_log.display(),
+            kitty_log.display(),
+        ),
+    );
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).expect("scratch HOME");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_flex-center"))
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                dir.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .env("HOME", &home)
+        .env_remove("POPUP_KITTY")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("run flex-center outside a popup");
+    assert!(
+        output.status.success(),
+        "toggle exits 0: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let logged = loop {
+        if let Ok(body) = std::fs::read_to_string(&kitty_log) {
+            break body.lines().map(str::to_string).collect::<Vec<_>>();
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "kitty spawn never logged"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    assert!(
+        logged.contains(&String::from("--class"))
+            && logged.contains(&String::from("flex-menu-wide"))
+            && logged.contains(&String::from("POPUP_KITTY=1")),
+        "re-exec uses the menu-wide popup template: {logged:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// --- Parity with the untouched wrapper --------------------------------------
+//
+// For every action the wrapper supports, the wrapper (under stub `PATH`)
+// and the executor must produce byte-identical tool-call sequences. Two
+// deliberate departures, both asserted below:
+//
+// - The wrapper's `flex launch --resolve` subprocess is resolved in-process
+//   (same `launch::resolve_id` scan the hidden `--resolve` lookup uses), so
+//   the wrapper makes one extra `flex` call the executor never spawns.
+// - The wrapper `eval`s the stripped `Exec` line (shell quotes group args);
+//   the executor splits on whitespace. All parity inputs are plain
+//   `prog --flag` lines, where the two agree byte-for-byte.
+
+/// `flex` stub answering both wrapper calls: the `ACTION:` line
+/// (`$STUB_ACTION`) and the `--resolve` lookup over the test apps. Every
+/// invocation is logged so the elided resolve subprocess stays visible.
+fn write_parity_flex_stub(dir: &Path, apps: &[(&str, &str)]) {
+    use std::fmt::Write as _;
+    let mut arms = String::new();
+    for (hash, desktop_id) in apps {
+        let _ = writeln!(arms, "    \"{hash}\") printf '%s\\n' \"{desktop_id}\" ;;");
+    }
+    write_exe(
+        &dir.join("flex"),
+        &format!(
+            "#!/usr/bin/env bash\necho \"flex $@\" >> \"{}/flex.log\"\nif [[ \"${{2:-}}\" == \"--resolve\" ]]; then\n  case \"${{3:-}}\" in\n{arms}    *) exit 1 ;;\n  esac\n  exit 0\nfi\nprintf '%s\\n' \"$STUB_ACTION\"\n",
+            dir.display()
+        ),
+    );
+}
+
+/// Fixed parity inputs: stub dirs, the wrapper, and the scratch `HOME` both
+/// sides resolve against. One parity case runs the wrapper under stub
+/// `PATH`, then the executor with the scratch `HOME`.
+struct CenterParityHarness {
+    dir: PathBuf,
+    wrapper: PathBuf,
+    path_env: String,
+    home: PathBuf,
+}
+
+/// One parity case: the wrapper `ACTION:` line, the executor op/id/label,
+/// and whether both sides must succeed.
+struct CenterParityCase {
+    name: &'static str,
+    action_line: String,
+    op: exec_center::CenterOp,
+    id: String,
+    label: String,
+}
+
+impl CenterParityHarness {
+    /// Returns wrapper success, the wrapper tool log, the `flex` stub log,
+    /// the executor tool log, and executor success.
+    fn run(&self, case: &CenterParityCase) -> (bool, String, String, String, bool) {
+        for log in ["tools-wrap.log", "tools-exec.log", "flex.log"] {
+            let _ = std::fs::remove_file(self.dir.join(log));
+        }
+        let wrap_tools = self.dir.join("tools-wrap.log");
+        let exec_tools = self.dir.join("tools-exec.log");
+        // Every stub (including `setsid` and the theme switcher) logs
+        // through `$STUB_LOG`; the harness points it at the per-side log.
+        write_exe(
+            &self.dir.join("setsid"),
+            "#!/usr/bin/env bash\nprintf 'setsid %s\\n' \"$*\" >> \"$STUB_LOG\"\n",
+        );
+        let mut wrap_cmd = std::process::Command::new("bash");
+        wrap_cmd.arg(&self.wrapper);
+        wrap_cmd.env("PATH", &self.path_env);
+        wrap_cmd.env("HOME", &self.home);
+        wrap_cmd.env("STUB_ACTION", &case.action_line);
+        wrap_cmd.env("POPUP_KITTY", "1");
+        // Tool seams + stub data ride on the child env (wrapper side).
+        for key in [
+            "NMCLI",
+            "BLUETOOTHCTL",
+            "WPCTL",
+            "THEME_SWITCHER",
+            "FLEX_CENTER_PASSWORD",
+            "WIFI_LIST",
+            "BT_INFO",
+        ] {
+            if let Ok(value) = std::env::var(key) {
+                wrap_cmd.env(key, value);
+            }
+        }
+        wrap_cmd.env("STUB_LOG", &wrap_tools);
+        let wrapper_out = wrap_cmd.output().expect("run wrapper");
+        let wrap_log = std::fs::read_to_string(&wrap_tools).unwrap_or_default();
+        let flex_log = std::fs::read_to_string(self.dir.join("flex.log")).unwrap_or_default();
+        let exec_result = {
+            // Same seam values, but the in-process executor reads them from
+            // process env; only the tool log path differs.
+            let saved = std::env::var("STUB_LOG").ok();
+            std::env::set_var("STUB_LOG", &exec_tools);
+            let result = exec_center::execute(case.op, &case.id, &case.label, Some(&self.path_env));
+            match saved {
+                Some(value) => std::env::set_var("STUB_LOG", value),
+                None => std::env::remove_var("STUB_LOG"),
+            }
+            result
+        };
+        let exec_log = std::fs::read_to_string(&exec_tools).unwrap_or_default();
+        (
+            wrapper_out.status.success(),
+            wrap_log,
+            flex_log,
+            exec_log,
+            exec_result.is_ok(),
+        )
+    }
+}
+
+/// Assert one parity case: same success, byte-identical tool calls, and the
+/// expected `flex` subprocess shape (the resolve the executor elides).
+fn check_center_parity_case(
+    case: &CenterParityCase,
+    wrapper_ok: bool,
+    exec_ok: bool,
+    wrap_log: &str,
+    exec_log: &str,
+    flex_log: &str,
+) {
+    assert_eq!(
+        wrapper_ok, exec_ok,
+        "{}: wrapper and executor must agree on success",
+        case.name
+    );
+    assert_eq!(
+        wrap_log, exec_log,
+        "{}: tool-call sequences must be byte-identical",
+        case.name
+    );
+    let flex_calls: Vec<&str> = flex_log.lines().collect();
+    if case.id.starts_with("launch:") {
+        assert_eq!(
+            flex_calls.len(),
+            2,
+            "{}: wrapper resolves through `flex launch --resolve`: {flex_calls:?}",
+            case.name
+        );
+        assert!(
+            flex_calls[1].contains("launch --resolve"),
+            "{}: second flex call is the resolve: {flex_calls:?}",
+            case.name
+        );
+    } else {
+        assert_eq!(
+            flex_calls.len(),
+            1,
+            "{}: no resolve subprocess off the launch arm: {flex_calls:?}",
+            case.name
+        );
+    }
+}
+
+const PARITY_NMCLI: &str = r#"#!/usr/bin/env bash
+printf 'nmcli %s\n' "$*" >> "$STUB_LOG"
+case "$1" in
+    -t) case "$3" in
+        DEVICE,TYPE) printf 'wlan0:wifi\neth0:ethernet\n' ;;
+        IN-USE,SSID,SIGNAL,SECURITY) cat "$WIFI_LIST" ;;
+    esac ;;
+esac
+exit 0
+"#;
+
+const PARITY_BT: &str = r#"#!/usr/bin/env bash
+printf 'bt %s\n' "$*" >> "$STUB_LOG"
+case "$1" in
+    info) cat "$BT_INFO" ;;
+esac
+exit 0
+"#;
+
+const PARITY_LOG: &str = r#"#!/usr/bin/env bash
+printf '%s %s\n' "$(basename "$0")" "$*" >> "$STUB_LOG"
+exit 0
+"#;
+
+/// One parity case per wrapper-supported action (13 cases: both launch
+/// branches, both mute paths, bt, the three wifi decisions, two power arms,
+/// theme, and the two quiet rows).
+fn parity_cases(firefox_hash: &str, term_hash: &str) -> Vec<CenterParityCase> {
+    let select = exec_center::CenterOp::Select;
+    let toggle = exec_center::CenterOp::Toggle;
+    vec![
+        CenterParityCase {
+            name: "launch-plain",
+            action_line: format!("ACTION: center launch:{firefox_hash} Firefox"),
+            op: select,
+            id: format!("launch:{firefox_hash}"),
+            label: String::from("Firefox"),
+        },
+        CenterParityCase {
+            name: "launch-terminal",
+            action_line: format!("ACTION: center launch:{term_hash} Htop"),
+            op: select,
+            id: format!("launch:{term_hash}"),
+            label: String::from("Htop"),
+        },
+        CenterParityCase {
+            name: "mute-select",
+            action_line: String::from("ACTION: center vol Volume  55%  [bar]"),
+            op: select,
+            id: String::from("vol"),
+            label: String::from("Volume  55%  [bar]"),
+        },
+        CenterParityCase {
+            name: "mute-toggle",
+            action_line: String::from("ACTION:TOGGLE center vol Volume"),
+            op: toggle,
+            id: String::from("vol"),
+            label: String::from("Volume"),
+        },
+        CenterParityCase {
+            name: "bt-disconnect",
+            action_line: String::from("ACTION: center bt:AA:BB:CC:DD:EE:FF Headphones"),
+            op: select,
+            id: String::from("bt:AA:BB:CC:DD:EE:FF"),
+            label: String::from("Headphones"),
+        },
+        CenterParityCase {
+            name: "wifi-disconnect",
+            action_line: String::from("ACTION: center wifi HomeNet"),
+            op: select,
+            id: String::from("wifi"),
+            label: String::from("HomeNet"),
+        },
+        CenterParityCase {
+            name: "wifi-open",
+            action_line: String::from("ACTION: center wifi Coffee Shop"),
+            op: select,
+            id: String::from("wifi"),
+            label: String::from("Coffee Shop"),
+        },
+        CenterParityCase {
+            name: "wifi-secure",
+            action_line: String::from("ACTION: center wifi MyNet"),
+            op: select,
+            id: String::from("wifi"),
+            label: String::from("MyNet"),
+        },
+        CenterParityCase {
+            name: "power-reboot",
+            action_line: String::from("ACTION: center pwreboot Reboot"),
+            op: select,
+            id: String::from("pwreboot"),
+            label: String::from("Reboot"),
+        },
+        CenterParityCase {
+            name: "power-lock",
+            action_line: String::from("ACTION: center pwlock Lock Screen"),
+            op: select,
+            id: String::from("pwlock"),
+            label: String::from("Lock Screen"),
+        },
+        CenterParityCase {
+            name: "theme",
+            action_line: String::from("ACTION: center theme Theme: tokyo-night"),
+            op: select,
+            id: String::from("theme"),
+            label: String::from("Theme: tokyo-night"),
+        },
+        CenterParityCase {
+            name: "bright",
+            action_line: String::from("ACTION: center bright Brightness"),
+            op: select,
+            id: String::from("bright"),
+            label: String::from("Brightness"),
+        },
+        CenterParityCase {
+            name: "noop",
+            action_line: String::from("ACTION: center noop (No Wi-Fi networks)"),
+            op: select,
+            id: String::from("noop"),
+            label: String::from("(No Wi-Fi networks)"),
+        },
+    ]
+}
+
+#[test]
+fn parity_center_matches_the_untouched_wrapper_per_action() {
+    let _env = EXEC_ENV_LOCK.lock().expect("env lock");
+    let dir = stub_dir("parity");
+    let home = install_center_home("parity");
+    // Per-tool logging stubs: every stub logs `name args…` first (so even
+    // answered queries are logged), then answers the query arms the flows
+    // need. All stubs log through `$STUB_LOG`, which the harness points at
+    // the per-side tool log.
+    write_exe(&dir.join("nmcli"), PARITY_NMCLI);
+    write_exe(&dir.join("bluetoothctl"), PARITY_BT);
+    for name in [
+        "setsid",
+        "wpctl",
+        "systemctl",
+        "hyprlock",
+        "pkill",
+        "notify-send",
+    ] {
+        write_exe(&dir.join(name), PARITY_LOG);
+    }
+    // Parity HOME apps (plain + terminal); the resolve table maps the real
+    // row hashes so the wrapper resolves exactly what the executor does.
+    let firefox_hash = launch::entry_id("firefox.desktop");
+    let term_hash = launch::entry_id("termapp.desktop");
+    write_parity_flex_stub(
+        &dir,
+        &[
+            (firefox_hash.as_str(), "firefox.desktop"),
+            (term_hash.as_str(), "termapp.desktop"),
+        ],
+    );
+    let wifi_list = dir.join("wifi-list.txt");
+    std::fs::write(
+        &wifi_list,
+        "*:HomeNet:87:WPA2\n:Coffee Shop:41:--\n:MyNet:70:WPA2\n",
+    )
+    .expect("wifi list");
+    let info = dir.join("info.txt");
+    std::fs::write(&info, "Device X\n\tConnected: yes\n").expect("info");
+    let path_env = exec_path_env(&dir);
+    let _guard = EnvGuard::set(&[
+        ("HOME", home.to_str().expect("utf8")),
+        ("NMCLI", dir.join("nmcli").to_str().expect("utf8")),
+        (
+            "BLUETOOTHCTL",
+            dir.join("bluetoothctl").to_str().expect("utf8"),
+        ),
+        ("WPCTL", dir.join("wpctl").to_str().expect("utf8")),
+        ("THEME_SWITCHER", ""),
+        ("FLEX_CENTER_PASSWORD", "s3cret"),
+        ("WIFI_LIST", wifi_list.to_str().expect("utf8")),
+        ("BT_INFO", info.to_str().expect("utf8")),
+    ]);
+    let harness = CenterParityHarness {
+        dir: dir.clone(),
+        wrapper: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("wrappers")
+            .join("flex-center.sh"),
+        path_env,
+        home: home.clone(),
+    };
+    let cases = parity_cases(&firefox_hash, &term_hash);
+    for case in &cases {
+        let (wrapper_ok, wrap_log, flex_log, exec_log, exec_ok) = harness.run(case);
+        check_center_parity_case(case, wrapper_ok, exec_ok, &wrap_log, &exec_log, &flex_log);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&home);
+}

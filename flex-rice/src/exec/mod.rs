@@ -7,6 +7,7 @@
 //! dispatch coverage to become Rust tests. The wrappers stay live until
 //! cutover; each module documents its deliberate departures from its wrapper.
 
+pub mod center;
 pub mod clip;
 pub mod launch;
 pub mod shot;
