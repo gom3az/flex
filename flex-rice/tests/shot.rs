@@ -595,20 +595,15 @@ fn binary_outside_a_popup_reexecs_into_the_menu_popup() {
         dir.display(),
         std::env::var("PATH").unwrap_or_default()
     );
-    let saved_path = std::env::var("PATH").ok();
-    std::env::set_var("PATH", &path_env);
     let home = dir.join("home");
     std::fs::create_dir_all(&home).expect("scratch HOME");
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_flex-shot"))
+        .env("PATH", &path_env)
         .env("HOME", &home)
         .env_remove("POPUP_KITTY")
         .stdin(std::process::Stdio::null())
         .output()
         .expect("run flex-shot outside a popup");
-    match saved_path {
-        Some(value) => std::env::set_var("PATH", value),
-        None => std::env::remove_var("PATH"),
-    }
     assert!(
         output.status.success(),
         "toggle exits 0: {:?}",

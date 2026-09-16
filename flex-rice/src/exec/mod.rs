@@ -13,3 +13,4 @@ pub mod launch;
 pub mod shot;
 pub mod theme;
 pub mod wallpaper;
+pub mod wifi;

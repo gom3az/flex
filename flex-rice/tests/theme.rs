@@ -304,6 +304,7 @@ fn flex_test_replays_are_deterministic_across_bases() {
 
 #[test]
 fn wrapper_dispatches_activate_to_theme_switcher() {
+    let _env = ENV_LOCK.lock().expect("env lock");
     let dir = std::env::temp_dir().join(format!("flex-theme-test-wrap-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("stub dir");
@@ -369,6 +370,7 @@ fn wrapper_dispatches_activate_to_theme_switcher() {
 
 #[test]
 fn wrapper_rejects_malformed_action_lines() {
+    let _env = ENV_LOCK.lock().expect("env lock");
     let dir = std::env::temp_dir().join(format!("flex-theme-test-bad-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("stub dir");
@@ -423,6 +425,7 @@ fn empty_scan_shows_the_noop_placeholder() {
 /// (B-026): the wrapper exits 0 before resolving.
 #[test]
 fn wrapper_treats_the_noop_placeholder_as_a_noop() {
+    let _env = ENV_LOCK.lock().expect("env lock");
     let dir = scratch("wrapper-noop");
     std::fs::create_dir_all(&dir).expect("stub dir");
     let flex = dir.join("flex");
@@ -734,20 +737,15 @@ fn binary_outside_a_popup_reexecs_into_the_menu_popup() {
         ),
     );
     let path_env = stub_path_env(&dir);
-    let saved_path = std::env::var("PATH").ok();
-    std::env::set_var("PATH", &path_env);
     let home = dir.join("home");
     std::fs::create_dir_all(&home).expect("scratch HOME");
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_flex-theme"))
+        .env("PATH", &path_env)
         .env("HOME", &home)
         .env_remove("POPUP_KITTY")
         .stdin(std::process::Stdio::null())
         .output()
         .expect("run flex-theme outside a popup");
-    match saved_path {
-        Some(value) => std::env::set_var("PATH", value),
-        None => std::env::remove_var("PATH"),
-    }
     assert!(
         output.status.success(),
         "toggle exits 0: {:?}",

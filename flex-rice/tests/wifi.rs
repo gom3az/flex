@@ -6,8 +6,9 @@
 //! `nmcli` stdout); expected labels/metas are hand-computed from the
 //! shared `center` row builders. No test touches the network.
 
+use std::io::Cursor;
 use std::os::unix::fs::PermissionsExt as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -16,10 +17,16 @@ use ratatui::Terminal;
 
 use flex_core::keys::{handle_key, KeyOutcome, EXIT_CANCELLED};
 use flex_core::{run, Menu};
+use flex_rice::exec::wifi as exec_wifi;
 use flex_rice::providers::{center, wifi};
 
-/// Serializes the tests that mutate process env (`WIFI_*` seams). Wrapper
-/// tests need no lock (per-child `Command::env` only).
+/// Serializes every test that touches process env or spawns the wrapper:
+/// the `WIFI_*` seam readers, the wrapper-dispatch tests, and the executor
+/// tests below. The executor tests set process-wide tool seams (`NMCLI`,
+/// `NOTIFY_SEND`, `FLEX_WIFI_PASSWORD`, `STUB_LOG`, …) that wrapper
+/// children would otherwise inherit through the ambient environment, so
+/// both sides must hold this lock — per-child `Command::env` alone no
+/// longer suffices once process env is mutated.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// Serializes the tests that use the process-global scan mailbox
@@ -930,6 +937,7 @@ fn secure_list() -> String {
 
 #[test]
 fn wrapper_turns_the_radio_on_and_off() {
+    let _lock = ENV_LOCK.lock().expect("env lock");
     for (name, action, expected) in [
         ("on", "ACTION: wifi on Turn Wi-Fi On", "nmcli radio wifi on"),
         (
@@ -950,6 +958,7 @@ fn wrapper_turns_the_radio_on_and_off() {
 
 #[test]
 fn wrapper_disconnects_the_interface() {
+    let _lock = ENV_LOCK.lock().expect("env lock");
     let run = run_wrapper(
         "disconnect",
         Some("ACTION: wifi disconnect Disconnect from HomeNet"),
@@ -978,6 +987,7 @@ fn wrapper_disconnects_the_interface() {
 
 #[test]
 fn wrapper_connects_an_open_network_without_a_prompt() {
+    let _lock = ENV_LOCK.lock().expect("env lock");
     let run = run_wrapper(
         "open",
         Some("ACTION: wifi wifi Coffee Shop"),
@@ -1003,6 +1013,7 @@ fn wrapper_connects_an_open_network_without_a_prompt() {
 
 #[test]
 fn wrapper_prompts_for_a_secured_network_password() {
+    let _lock = ENV_LOCK.lock().expect("env lock");
     let run = run_wrapper(
         "secure",
         Some("ACTION: wifi wifi Corp:Net"),
@@ -1031,6 +1042,7 @@ fn wrapper_prompts_for_a_secured_network_password() {
 /// connect.
 #[test]
 fn wrapper_prints_the_password_prompt_and_never_fails_silently() {
+    let _lock = ENV_LOCK.lock().expect("env lock");
     let run = run_wrapper(
         "prompt",
         Some("ACTION: wifi wifi Corp:Net"),
@@ -1060,6 +1072,7 @@ fn wrapper_prints_the_password_prompt_and_never_fails_silently() {
 /// An open network connects without prompting, and still reports progress.
 #[test]
 fn wrapper_reports_progress_for_open_networks() {
+    let _lock = ENV_LOCK.lock().expect("env lock");
     let run = run_wrapper(
         "open-progress",
         Some("ACTION: wifi wifi Coffee Shop"),
@@ -1079,6 +1092,7 @@ fn wrapper_reports_progress_for_open_networks() {
 
 #[test]
 fn wrapper_selecting_the_connected_network_disconnects_it() {
+    let _lock = ENV_LOCK.lock().expect("env lock");
     let run = run_wrapper(
         "toggle",
         Some("ACTION: wifi wifi HomeNet"),
@@ -1100,6 +1114,7 @@ fn wrapper_selecting_the_connected_network_disconnects_it() {
 
 #[test]
 fn wrapper_noop_row_runs_nothing() {
+    let _lock = ENV_LOCK.lock().expect("env lock");
     let run = run_wrapper(
         "noop",
         Some("ACTION: wifi noop (No Wi-Fi networks)"),
@@ -1112,6 +1127,7 @@ fn wrapper_noop_row_runs_nothing() {
 
 #[test]
 fn wrapper_unescapes_a_backslash_label() {
+    let _lock = ENV_LOCK.lock().expect("env lock");
     // `CORP\NET` on the wire is the SSID `CORP\NET` (ACTION: escapes `\\`).
     let run = run_wrapper(
         "escape",
@@ -1133,6 +1149,7 @@ fn wrapper_unescapes_a_backslash_label() {
 
 #[test]
 fn wrapper_propagates_cancel_without_acting() {
+    let _lock = ENV_LOCK.lock().expect("env lock");
     let run = run_wrapper("cancel", None, None, &secure_list());
     assert_eq!(
         run.output.status.code(),
@@ -1144,6 +1161,7 @@ fn wrapper_propagates_cancel_without_acting() {
 
 #[test]
 fn wrapper_rejects_malformed_and_unknown_actions() {
+    let _lock = ENV_LOCK.lock().expect("env lock");
     let malformed = run_wrapper("bad", Some("GARBAGE LINE"), None, &secure_list());
     assert!(!malformed.output.status.success(), "malformed must fail");
     assert_eq!(malformed.log(), "", "nothing runs on a bad line");
@@ -1162,6 +1180,7 @@ fn wrapper_rejects_malformed_and_unknown_actions() {
 /// its stored profile — never re-asking for a password it already holds.
 #[test]
 fn wrapper_uses_the_saved_profile_instead_of_asking_for_a_password() {
+    let _lock = ENV_LOCK.lock().expect("env lock");
     let run = run_wrapper_with_profiles(
         "saved",
         Some("ACTION: wifi wifi Corp:Net"),
@@ -1193,6 +1212,7 @@ fn wrapper_uses_the_saved_profile_instead_of_asking_for_a_password() {
 /// A non-Wi-Fi profile with the same name must not count as saved.
 #[test]
 fn wrapper_ignores_non_wifi_profiles_when_deciding_to_prompt() {
+    let _lock = ENV_LOCK.lock().expect("env lock");
     let run = run_wrapper_with_profiles(
         "wired-namesake",
         Some("ACTION: wifi wifi Corp:Net"),
@@ -1215,6 +1235,7 @@ fn wrapper_ignores_non_wifi_profiles_when_deciding_to_prompt() {
 /// tries the profile, then asks instead of giving up.
 #[test]
 fn wrapper_asks_when_the_saved_credentials_are_rejected() {
+    let _lock = ENV_LOCK.lock().expect("env lock");
     let run = run_wrapper_with_profiles(
         "stale",
         Some("ACTION: wifi wifi StaleNet"),
@@ -1241,4 +1262,837 @@ fn wrapper_asks_when_the_saved_credentials_are_rejected() {
         log.contains("notify-send -a Wi-Fi Connected StaleNet"),
         "{log:?}"
     );
+}
+
+// --- Executor tests ----------------------------------------------------------
+//
+// The `exec::wifi` port of the wrapper above: same stub idioms (per-tool
+// logging stubs, byte-compared call logs, scratch dirs). Process-env
+// mutations ride under the file's `ENV_LOCK` with the shared [`EnvGuard`]
+// save/restore. No test touches the network, a TUI, or a pty: the password
+// prompt runs through `execute_with_stdio` with `None` tty (the stdin
+// fallback) plus a piped-stdin `Cursor`, and stderr is a captured buffer.
+
+/// `PATH` shadow for executor calls: stub dir first, ambient `PATH` after
+/// (stubs are `bash` scripts, and the tools they exec stay ambient).
+fn exec_path_env(dir: &Path) -> String {
+    format!(
+        "{}:{}",
+        dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    )
+}
+
+/// `nmcli` stub: interface + `$WIFI_LIST`/`$PROFILES` answers, every call
+/// logged to `$STUB_LOG`. Connects succeed, except a non-`s3cret` password
+/// and a passwordless `StaleNet` (the stale-key case: only the explicit
+/// password path succeeds); `${OPEN_EXIT:-0}` fails open connects on
+/// demand (the `Failed`-notify case).
+const EXEC_NMCLI_STUB: &str = r#"#!/usr/bin/env bash
+printf 'nmcli %s\n' "$*" >> "$STUB_LOG"
+case "$1" in
+    -t) case "$3" in
+        DEVICE,TYPE) printf 'wlan0:wifi\neth0:ethernet\n' ;;
+        NAME,TYPE) cat "$PROFILES" ;;
+        IN-USE,SSID,SIGNAL,SECURITY) cat "$WIFI_LIST" ;;
+    esac ;;
+    radio) exit 0 ;;
+    device) case "$2" in
+        disconnect) exit 0 ;;
+        wifi) case "$*" in
+            *'password s3cret'*) exit 0 ;;
+            *'password '*) exit 1 ;;
+            *'StaleNet'*) exit 1 ;;
+            *) exit "${OPEN_EXIT:-0}" ;;
+        esac ;;
+    esac ;;
+esac
+exit 0
+"#;
+
+/// `notify-send` stub: logs every call, always succeeds.
+const EXEC_NOTIFY_STUB: &str =
+    "#!/usr/bin/env bash\nprintf 'notify-send %s\\n' \"$*\" >> \"$STUB_LOG\"\nexit 0\n";
+
+/// One executor run with injected stdio: no tty (the stdin-fallback path),
+/// piped `stdin_bytes`, captured stderr. Returns the result and the stderr
+/// text. `FLEX_WIFI_PASSWORD` rides on process env (set via [`EnvGuard`]).
+fn run_exec(
+    dir: &Path,
+    id: &str,
+    label: &str,
+    stdin_bytes: &[u8],
+) -> (anyhow::Result<exec_wifi::ExecuteReport>, String) {
+    let path_env = exec_path_env(dir);
+    let mut stdin = Cursor::new(stdin_bytes.to_vec());
+    let mut err = Vec::new();
+    let result =
+        exec_wifi::execute_with_stdio(id, label, Some(&path_env), None, &mut stdin, &mut err);
+    (
+        result,
+        String::from_utf8(err).expect("executor stderr is utf-8"),
+    )
+}
+
+fn exec_log(dir: &Path) -> String {
+    std::fs::read_to_string(dir.join("calls.log")).unwrap_or_default()
+}
+
+/// Stub dir with the executor's tools, list, and profiles installed; env
+/// seams pointed at them. Returns the dir (the caller holds `ENV_LOCK` and
+/// drops the dir when done).
+fn install_exec_stubs(name: &str, list: &str, profiles: &str) -> PathBuf {
+    let dir = stub_dir(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("stub dir");
+    write_stub(&dir.join("nmcli"), EXEC_NMCLI_STUB);
+    write_stub(&dir.join("notify-send"), EXEC_NOTIFY_STUB);
+    std::fs::write(dir.join("wifi-list.txt"), list).expect("wifi list");
+    std::fs::write(dir.join("profiles.txt"), profiles).expect("profiles");
+    dir
+}
+
+fn seam_guard(dir: &Path, password: &str) -> EnvGuard {
+    EnvGuard::set(&[
+        ("NMCLI", dir.join("nmcli").to_str().expect("utf-8 path")),
+        (
+            "NOTIFY_SEND",
+            dir.join("notify-send").to_str().expect("utf-8 path"),
+        ),
+        ("FLEX_WIFI_PASSWORD", password),
+        (
+            "STUB_LOG",
+            dir.join("calls.log").to_str().expect("utf-8 path"),
+        ),
+        (
+            "WIFI_LIST",
+            dir.join("wifi-list.txt").to_str().expect("utf-8 path"),
+        ),
+        (
+            "PROFILES",
+            dir.join("profiles.txt").to_str().expect("utf-8 path"),
+        ),
+    ])
+}
+
+const EXEC_LIST: &str = "*:HomeNet:87:WPA2\n:Coffee Shop:41:--\n:MyNet:70:WPA2\n";
+
+/// Full action matrix through one shared call log: radio on/off, the
+/// explicit disconnect arm, an open connect, selecting the connected
+/// network (disconnects), and the quiet `noop`. Byte-compared against the
+/// wrapper's shapes.
+#[test]
+fn executor_matrix_runs_every_action_through_stub_tools() {
+    let _lock = ENV_LOCK.lock().expect("env lock");
+    let dir = install_exec_stubs("exec-matrix", EXEC_LIST, "");
+    let _guard = seam_guard(&dir, "");
+    let run = |id: &str, label: &str| run_exec(&dir, id, label, b"");
+    let (report, err) = run("on", "Turn Wi-Fi On");
+    assert_eq!(report.expect("on succeeds").detail, None);
+    assert_eq!(err, "", "radio arms are silent");
+    let (report, err) = run("off", "Turn Wi-Fi Off");
+    assert_eq!(report.expect("off succeeds").detail, None);
+    assert_eq!(err, "");
+    let (report, err) = run("disconnect", "Disconnect from HomeNet");
+    assert_eq!(
+        report.expect("disconnect succeeds").detail.as_deref(),
+        Some("HomeNet"),
+        "the notify body strips the Disconnect prefix"
+    );
+    assert_eq!(err, "", "the disconnect arm prints no progress");
+    let (report, err) = run("wifi", "Coffee Shop");
+    assert_eq!(
+        report.expect("open connect succeeds").detail.as_deref(),
+        Some("Coffee Shop")
+    );
+    assert_eq!(err, "Connecting to Coffee Shop…\n");
+    let (report, err) = run("wifi", "HomeNet");
+    assert_eq!(
+        report.expect("connected toggle succeeds").detail.as_deref(),
+        Some("HomeNet")
+    );
+    assert_eq!(err, "", "disconnecting prints no progress");
+    let (report, err) = run("noop", "(No Wi-Fi networks)");
+    assert_eq!(report.expect("noop succeeds").detail, None);
+    assert_eq!(err, "");
+    assert_eq!(
+        exec_log(&dir).lines().collect::<Vec<_>>(),
+        vec![
+            "nmcli radio wifi on",
+            "nmcli radio wifi off",
+            "nmcli -t -f DEVICE,TYPE device",
+            "nmcli device disconnect wlan0",
+            "notify-send -a Wi-Fi Disconnected HomeNet",
+            "nmcli -t -f DEVICE,TYPE device",
+            "nmcli -t -f IN-USE,SSID,SIGNAL,SECURITY device wifi list ifname wlan0 --rescan no",
+            "nmcli device wifi connect Coffee Shop ifname wlan0",
+            "notify-send -a Wi-Fi Connected Coffee Shop",
+            "nmcli -t -f DEVICE,TYPE device",
+            "nmcli -t -f IN-USE,SSID,SIGNAL,SECURITY device wifi list ifname wlan0 --rescan no",
+            "nmcli device disconnect wlan0",
+            "notify-send -a Wi-Fi Disconnected HomeNet",
+        ],
+        "one tool sequence per action (describe: one line per step)",
+    );
+}
+
+/// Secure wifi uses the stored password (no `/dev/tty` read) and notifies.
+#[test]
+fn executor_secure_uses_the_stored_password() {
+    let _lock = ENV_LOCK.lock().expect("env lock");
+    let dir = install_exec_stubs("exec-secure", EXEC_LIST, "");
+    let _guard = seam_guard(&dir, "s3cret");
+    let (result, err) = run_exec(&dir, "wifi", "MyNet", b"");
+    assert_eq!(
+        result.expect("secure connect succeeds").detail.as_deref(),
+        Some("MyNet")
+    );
+    assert_eq!(err, "Connecting to MyNet…\n", "progress only, no prompt");
+    assert_eq!(
+        exec_log(&dir).lines().collect::<Vec<_>>(),
+        vec![
+            "nmcli -t -f DEVICE,TYPE device",
+            "nmcli -t -f IN-USE,SSID,SIGNAL,SECURITY device wifi list ifname wlan0 --rescan no",
+            "nmcli -t -f NAME,TYPE connection show",
+            "nmcli device wifi connect MyNet password s3cret ifname wlan0",
+            "notify-send -a Wi-Fi Connected MyNet",
+        ],
+    );
+}
+
+/// A network `NetworkManager` has saved connects from its stored profile —
+/// never re-asking for a password it already holds (and never reading
+/// stdin for one).
+#[test]
+fn executor_uses_the_saved_profile_instead_of_asking_for_a_password() {
+    let _lock = ENV_LOCK.lock().expect("env lock");
+    let dir = install_exec_stubs(
+        "exec-saved",
+        EXEC_LIST,
+        "HomeNet:802-11-wireless\nCorp\\:Net:802-11-wireless\nlo:loopback\n",
+    );
+    let _guard = seam_guard(&dir, "");
+    let mut stdin = Cursor::new(b"must-not-be-read\n".to_vec());
+    let mut err = Vec::new();
+    let result = exec_wifi::execute_with_stdio(
+        "wifi",
+        "Corp:Net",
+        Some(&exec_path_env(&dir)),
+        None,
+        &mut stdin,
+        &mut err,
+    );
+    assert_eq!(
+        result.expect("saved connect succeeds").detail.as_deref(),
+        Some("Corp:Net")
+    );
+    assert_eq!(stdin.position(), 0, "no prompt means no stdin read");
+    let err = String::from_utf8(err).expect("utf-8 stderr");
+    assert_eq!(err, "Connecting to Corp:Net…\n", "{err:?}");
+    let log = exec_log(&dir);
+    assert!(
+        log.contains("nmcli device wifi connect Corp:Net ifname wlan0"),
+        "connected from the profile: {log:?}"
+    );
+    assert!(
+        !log.contains("password"),
+        "no password is passed for a saved network: {log:?}"
+    );
+    assert!(
+        log.contains("notify-send -a Wi-Fi Connected Corp:Net"),
+        "{log:?}"
+    );
+}
+
+/// Saved credentials can be stale: the profile attempt fails, the fallback
+/// explains itself, and the retry uses the prompted password.
+#[test]
+fn executor_asks_when_the_saved_credentials_are_rejected() {
+    let _lock = ENV_LOCK.lock().expect("env lock");
+    let dir = install_exec_stubs(
+        "exec-stale",
+        ":StaleNet:70:WPA2\n",
+        "StaleNet:802-11-wireless\n",
+    );
+    let _guard = seam_guard(&dir, "s3cret");
+    let (result, err) = run_exec(&dir, "wifi", "StaleNet", b"");
+    assert_eq!(
+        result.expect("stale retry succeeds").detail.as_deref(),
+        Some("StaleNet")
+    );
+    assert_eq!(
+        err,
+        "Connecting to StaleNet…\n\
+         Saved credentials for StaleNet were rejected — enter the password.\n\
+         Connecting to StaleNet…\n",
+        "the fallback explains itself: {err:?}"
+    );
+    let log = exec_log(&dir);
+    assert_eq!(
+        log.matches("nmcli device wifi connect StaleNet").count(),
+        2,
+        "profile attempt, then the password attempt: {log:?}"
+    );
+    assert!(
+        log.contains("nmcli device wifi connect StaleNet password s3cret ifname wlan0"),
+        "{log:?}"
+    );
+    assert!(
+        log.contains("notify-send -a Wi-Fi Connected StaleNet"),
+        "{log:?}"
+    );
+}
+
+/// The prompt path with piped stdin and no tty: an answered read connects
+/// with the password; an empty answer prints the explicit line and connects
+/// nothing (mandates 1–3, byte-exact on stderr).
+#[test]
+fn executor_prompt_answers_from_stdin_and_states_empty_answers() {
+    let _lock = ENV_LOCK.lock().expect("env lock");
+    let dir = install_exec_stubs("exec-prompt", EXEC_LIST, "");
+    let _guard = seam_guard(&dir, "");
+    // Answered: the stdin fallback supplies the password.
+    let (result, err) = run_exec(&dir, "wifi", "MyNet", b"s3cret\n");
+    assert_eq!(
+        result.expect("prompted connect succeeds").detail.as_deref(),
+        Some("MyNet")
+    );
+    assert_eq!(
+        err, "Password for MyNet: \nConnecting to MyNet…\n",
+        "prompt to stderr, then progress: {err:?}"
+    );
+    let log = exec_log(&dir);
+    assert!(
+        log.contains("nmcli -t -f NAME,TYPE connection show"),
+        "unsaved secure networks still probe the profiles first: {log:?}"
+    );
+    assert!(
+        log.contains("nmcli device wifi connect MyNet password s3cret ifname wlan0"),
+        "{log:?}"
+    );
+    // Empty: stated, not swallowed; nothing is attempted.
+    std::fs::remove_file(dir.join("calls.log")).expect("reset log");
+    let (result, err) = run_exec(&dir, "wifi", "MyNet", b"");
+    assert_eq!(
+        result.expect("declining to connect is not an error").detail,
+        None
+    );
+    assert_eq!(
+        err, "Password for MyNet: \nNo password entered — not connecting to MyNet.\n",
+        "{err:?}"
+    );
+    assert!(
+        !exec_log(&dir).contains("device wifi connect"),
+        "no connect without a password: {:?}",
+        exec_log(&dir)
+    );
+}
+
+/// A failing connect notifies `Failed` instead of `Connected` — on both
+/// the open and the secure arms (the wifi wrapper's `if/else`; still `Ok`,
+/// like every quiet arm).
+#[test]
+fn executor_failed_connect_notifies_failed() {
+    let _lock = ENV_LOCK.lock().expect("env lock");
+    let dir = install_exec_stubs("exec-fail", ":Open:41:--\n:MyNet:70:WPA2\n", "");
+    let _guard = EnvGuard::set(&[
+        ("NMCLI", dir.join("nmcli").to_str().expect("utf-8 path")),
+        (
+            "NOTIFY_SEND",
+            dir.join("notify-send").to_str().expect("utf-8 path"),
+        ),
+        ("FLEX_WIFI_PASSWORD", "wrong"),
+        (
+            "STUB_LOG",
+            dir.join("calls.log").to_str().expect("utf-8 path"),
+        ),
+        (
+            "WIFI_LIST",
+            dir.join("wifi-list.txt").to_str().expect("utf-8 path"),
+        ),
+        (
+            "PROFILES",
+            dir.join("profiles.txt").to_str().expect("utf-8 path"),
+        ),
+        ("OPEN_EXIT", "1"),
+    ]);
+    let path_env = exec_path_env(&dir);
+    // Open failure: connect logged, `Failed` notified, still `Ok`.
+    let mut err = Vec::new();
+    exec_wifi::execute_with_stdio(
+        "wifi",
+        "Open",
+        Some(&path_env),
+        None,
+        &mut Cursor::new(Vec::new()),
+        &mut err,
+    )
+    .expect("failed open connect is quiet");
+    let log = exec_log(&dir);
+    assert!(
+        log.contains("nmcli device wifi connect Open ifname wlan0"),
+        "connect attempted: {log:?}"
+    );
+    assert!(
+        log.contains("notify-send -a Wi-Fi Failed Open"),
+        "failure notifies: {log:?}"
+    );
+    assert!(!log.contains("Connected Open"), "{log:?}");
+    // Secure failure (a wrong stored password): same gating.
+    std::fs::remove_file(dir.join("calls.log")).expect("reset log");
+    let mut err = Vec::new();
+    exec_wifi::execute_with_stdio(
+        "wifi",
+        "MyNet",
+        Some(&path_env),
+        None,
+        &mut Cursor::new(Vec::new()),
+        &mut err,
+    )
+    .expect("failed secure connect is quiet");
+    let log = exec_log(&dir);
+    assert!(
+        log.contains("notify-send -a Wi-Fi Failed MyNet"),
+        "failure notifies: {log:?}"
+    );
+    assert!(!log.contains("Connected MyNet"), "{log:?}");
+}
+
+/// Malformed ids (`bad id`) and well-formed-but-unsupported rows are
+/// errors with no `flex:` prefix of their own — the runner adds the single
+/// prefix at the binary boundary.
+#[test]
+fn executor_rejects_bad_and_unknown_ids_without_its_own_prefix() {
+    let _lock = ENV_LOCK.lock().expect("env lock");
+    let dir = install_exec_stubs("exec-bad", EXEC_LIST, "");
+    let _guard = seam_guard(&dir, "");
+    let path_env = exec_path_env(&dir);
+    for (id, expected) in [
+        ("", "wifi: bad id ''"),
+        ("a/b", "wifi: bad id 'a/b'"),
+        ("a\nb", "wifi: bad id 'a\nb'"),
+        ("format", "wifi: unknown action: format"),
+    ] {
+        let mut err = Vec::new();
+        let failure = exec_wifi::execute_with_stdio(
+            id,
+            id,
+            Some(&path_env),
+            None,
+            &mut Cursor::new(Vec::new()),
+            &mut err,
+        )
+        .expect_err("bad/unknown id must fail");
+        let message = format!("{failure:#}");
+        assert!(
+            message.starts_with(expected),
+            "unexpected message for {id:?}: {message:?}"
+        );
+        assert!(
+            !message.contains("flex:"),
+            "no runner prefix below the runner: {message:?}"
+        );
+    }
+    assert!(
+        !dir.join("calls.log").exists(),
+        "no id failure runs anything"
+    );
+}
+
+/// Binary level without a pty: the menu cannot start, so the binary exits 1
+/// with exactly one `flex: error:` prefix (the runner owns it; executor
+/// errors carry none).
+#[test]
+fn binary_errors_carry_a_single_prefix() {
+    let output = std::process::Command::new("setsid")
+        .arg(env!("CARGO_BIN_EXE_flex-wifi"))
+        .env("POPUP_KITTY", "1")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("run flex-wifi without a pty");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty(), "no stdout on error");
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(
+        stderr.starts_with("flex: error: "),
+        "runner prefix first: {stderr:?}"
+    );
+    assert_eq!(
+        stderr.matches("flex: error:").count(),
+        1,
+        "exactly one prefix: {stderr:?}"
+    );
+}
+
+/// Outside a popup the binary re-execs into the `menu` popup (the shared
+/// runner guard); the kitty spawn is asserted against a stub `PATH`. The
+/// stub `PATH` rides on the child env only — no process-env mutation,
+/// hence no lock.
+#[test]
+fn binary_outside_a_popup_reexecs_into_the_menu_popup() {
+    let dir = stub_dir("exec-guard");
+    std::fs::create_dir_all(&dir).expect("stub dir");
+    let kitty_log = dir.join("kitty.log");
+    write_stub(&dir.join("pgrep"), "#!/usr/bin/env bash\nexit 1\n");
+    write_stub(
+        &dir.join("kitty"),
+        &format!(
+            "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > '{}.tmp'\nmv '{}.tmp' '{}'\n",
+            kitty_log.display(),
+            kitty_log.display(),
+            kitty_log.display(),
+        ),
+    );
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).expect("scratch HOME");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_flex-wifi"))
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                dir.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .env("HOME", &home)
+        .env_remove("POPUP_KITTY")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("run flex-wifi outside a popup");
+    assert!(
+        output.status.success(),
+        "toggle exits 0: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let logged = loop {
+        if let Ok(body) = std::fs::read_to_string(&kitty_log) {
+            break body.lines().map(str::to_string).collect::<Vec<_>>();
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "kitty spawn never logged"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    assert!(
+        logged.contains(&String::from("--class"))
+            && logged.contains(&String::from("flex-menu"))
+            && logged.contains(&String::from("POPUP_KITTY=1")),
+        "re-exec uses the menu popup template: {logged:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// --- Parity with the untouched wrapper ---------------------------------------
+//
+// For every action the wrapper supports, the wrapper (under stub `PATH`)
+// and the executor must produce byte-identical tool-call sequences AND
+// byte-identical stderr text for the prompt cases. One deliberate
+// departure, asserted below: none on the tool sequences — the wifi flow
+// needs no `flex --resolve` subprocess (unlike center's launch arm), so
+// the wrapper's single `flex` call is the menu read both sides share and
+// every stub-tool call matches byte for byte.
+
+/// One parity case: the wrapper `ACTION:` line (via `$STUB_ACTION`), the
+/// executor id/label, the piped stdin for the prompt path, and the
+/// `FLEX_WIFI_PASSWORD` value (`None` = unset).
+struct WifiParityCase {
+    name: &'static str,
+    action_line: &'static str,
+    id: &'static str,
+    label: String,
+    password: Option<&'static str>,
+    stdin: &'static [u8],
+}
+
+/// Fixed parity inputs: stub dirs, the wrapper, and the scratch `HOME` both
+/// sides resolve against. One parity case runs the wrapper under stub
+/// `PATH`, then the executor with injected stdio.
+struct WifiParityHarness {
+    dir: PathBuf,
+    wrapper: PathBuf,
+    path_env: String,
+    home: PathBuf,
+}
+
+impl WifiParityHarness {
+    /// Returns wrapper success, the wrapper tool log, the wrapper stderr,
+    /// the executor tool log, the executor stderr, and executor success.
+    fn run(&self, case: &WifiParityCase) -> (bool, String, String, String, String, bool) {
+        for log in ["tools-wrap.log", "tools-exec.log"] {
+            let _ = std::fs::remove_file(self.dir.join(log));
+        }
+        let wrap_tools = self.dir.join("tools-wrap.log");
+        let exec_tools = self.dir.join("tools-exec.log");
+        let mut wrap_cmd = std::process::Command::new("bash");
+        wrap_cmd.arg(&self.wrapper);
+        wrap_cmd.env("PATH", &self.path_env);
+        wrap_cmd.env("HOME", &self.home);
+        wrap_cmd.env("STUB_ACTION", case.action_line);
+        wrap_cmd.env("POPUP_KITTY", "1");
+        wrap_cmd.stdin(std::process::Stdio::null());
+        // Tool seams + stub data ride on the child env (wrapper side).
+        for key in ["NMCLI", "NOTIFY_SEND", "WIFI_LIST", "PROFILES", "OPEN_EXIT"] {
+            if let Ok(value) = std::env::var(key) {
+                wrap_cmd.env(key, value);
+            }
+        }
+        match case.password {
+            Some(password) => wrap_cmd.env("FLEX_WIFI_PASSWORD", password),
+            None => wrap_cmd.env_remove("FLEX_WIFI_PASSWORD"),
+        };
+        wrap_cmd.env("STUB_LOG", &wrap_tools);
+        let wrapper_out = wrap_cmd.output().expect("run wrapper");
+        let wrap_log = std::fs::read_to_string(&wrap_tools).unwrap_or_default();
+        let wrap_err = String::from_utf8_lossy(&wrapper_out.stderr).into_owned();
+        let (exec_log, exec_err, exec_ok) = {
+            // Same seam values, but the in-process executor reads them from
+            // process env; only the tool log path differs.
+            let saved = std::env::var("STUB_LOG").ok();
+            std::env::set_var("STUB_LOG", &exec_tools);
+            let mut stdin = Cursor::new(case.stdin.to_vec());
+            let mut err = Vec::new();
+            let result = exec_wifi::execute_with_stdio(
+                case.id,
+                &case.label,
+                Some(&self.path_env),
+                None,
+                &mut stdin,
+                &mut err,
+            );
+            match saved {
+                Some(value) => std::env::set_var("STUB_LOG", value),
+                None => std::env::remove_var("STUB_LOG"),
+            }
+            (
+                std::fs::read_to_string(&exec_tools).unwrap_or_default(),
+                String::from_utf8(err).expect("utf-8 stderr"),
+                result.is_ok(),
+            )
+        };
+        (
+            wrapper_out.status.success(),
+            wrap_log,
+            wrap_err,
+            exec_log,
+            exec_err,
+            exec_ok,
+        )
+    }
+}
+
+/// Strip bash's `/dev/tty` redirection-failure diagnostic from wrapper
+/// stderr (`<wrapper>: line 154: /dev/tty: No such device or address`): on a
+/// tty-less machine the wrapper's `read -rs pw </dev/tty` complains before
+/// the `|| read -rs` fallback runs. The executor never shells out, so it
+/// has no counterpart — it falls back silently. The prompt, newline, and
+/// empty-answer bytes must still match exactly (asserted separately).
+/// `script` is the `$0` path the wrapper was invoked with (bash prefixes
+/// the diagnostic with it, glued to the prompt's line).
+fn strip_tty_diagnostic(stderr: &str, script: &str) -> (String, Vec<String>) {
+    let mut stripped = Vec::new();
+    let mut kept = String::new();
+    for chunk in stderr.split_inclusive('\n') {
+        // The diagnostic shares the prompt's line (the prompt has no
+        // trailing newline): keep the prompt bytes, drop the rest.
+        if let Some(pos) = chunk.find(script) {
+            stripped.push(chunk[pos..].to_string());
+            kept.push_str(&chunk[..pos]);
+        } else {
+            kept.push_str(chunk);
+        }
+    }
+    (kept, stripped)
+}
+/// the disconnect arm, open, connected-toggle, secure via the seam, saved,
+/// stale-key retry, backslash SSID, the empty-answer prompt, and noop).
+/// One parity case per wrapper-supported action (11 cases: radio on/off,
+/// the disconnect arm, open, connected-toggle, secure via the seam, saved,
+/// stale-key retry, backslash SSID, the empty-answer prompt, and noop).
+fn parity_cases() -> Vec<WifiParityCase> {
+    vec![
+        WifiParityCase {
+            name: "on",
+            action_line: "ACTION: wifi on Turn Wi-Fi On",
+            id: "on",
+            label: String::from("Turn Wi-Fi On"),
+            password: None,
+            stdin: b"",
+        },
+        WifiParityCase {
+            name: "off",
+            action_line: "ACTION: wifi off Turn Wi-Fi Off",
+            id: "off",
+            label: String::from("Turn Wi-Fi Off"),
+            password: None,
+            stdin: b"",
+        },
+        WifiParityCase {
+            name: "disconnect",
+            action_line: "ACTION: wifi disconnect Disconnect from HomeNet",
+            id: "disconnect",
+            label: String::from("Disconnect from HomeNet"),
+            password: None,
+            stdin: b"",
+        },
+        WifiParityCase {
+            name: "open",
+            action_line: "ACTION: wifi wifi Coffee Shop",
+            id: "wifi",
+            label: String::from("Coffee Shop"),
+            password: None,
+            stdin: b"",
+        },
+        WifiParityCase {
+            name: "connected-toggle",
+            action_line: "ACTION: wifi wifi HomeNet",
+            id: "wifi",
+            label: String::from("HomeNet"),
+            password: None,
+            stdin: b"",
+        },
+        WifiParityCase {
+            name: "secure",
+            action_line: "ACTION: wifi wifi MyNet",
+            id: "wifi",
+            label: String::from("MyNet"),
+            password: Some("s3cret"),
+            stdin: b"",
+        },
+        WifiParityCase {
+            name: "saved",
+            action_line: "ACTION: wifi wifi Corp:Net",
+            id: "wifi",
+            label: String::from("Corp:Net"),
+            password: None,
+            stdin: b"",
+        },
+        WifiParityCase {
+            name: "stale",
+            action_line: "ACTION: wifi wifi StaleNet",
+            id: "wifi",
+            label: String::from("StaleNet"),
+            password: Some("s3cret"),
+            stdin: b"",
+        },
+        WifiParityCase {
+            name: "backslash",
+            action_line: r"ACTION: wifi wifi CORP\\NET",
+            id: "wifi",
+            label: String::from("CORP\\NET"),
+            password: Some("s3cret"),
+            stdin: b"",
+        },
+        WifiParityCase {
+            name: "prompt-empty",
+            action_line: "ACTION: wifi wifi MyNet",
+            id: "wifi",
+            label: String::from("MyNet"),
+            password: None,
+            stdin: b"",
+        },
+        WifiParityCase {
+            name: "noop",
+            action_line: "ACTION: wifi noop (No Wi-Fi networks)",
+            id: "noop",
+            label: String::from("(No Wi-Fi networks)"),
+            password: None,
+            stdin: b"",
+        },
+    ]
+}
+
+#[test]
+fn parity_wifi_matches_the_untouched_wrapper_per_action() {
+    let _lock = ENV_LOCK.lock().expect("env lock");
+    let dir = stub_dir("parity");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("stub dir");
+    write_stub(&dir.join("nmcli"), EXEC_NMCLI_STUB);
+    write_stub(&dir.join("notify-send"), EXEC_NOTIFY_STUB);
+    // The `flex` stub answers the wrapper's single menu read (`$STUB_ACTION`).
+    write_stub(
+        &dir.join("flex"),
+        "#!/usr/bin/env bash\nprintf '%s\\n' \"$STUB_ACTION\"\n",
+    );
+    std::fs::write(
+        dir.join("wifi-list.txt"),
+        "*:HomeNet:87:WPA2\n:Coffee Shop:41:--\n:MyNet:70:WPA2\n\
+         :Corp\\:Net:70:WPA2\n:StaleNet:70:WPA2\n:CORP\\\\NET:70:WPA2\n",
+    )
+    .expect("wifi list");
+    std::fs::write(
+        dir.join("profiles.txt"),
+        "Corp\\:Net:802-11-wireless\nStaleNet:802-11-wireless\nlo:loopback\n",
+    )
+    .expect("profiles");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).expect("scratch HOME");
+    let path_env = exec_path_env(&dir);
+    let _guard = EnvGuard::set(&[
+        ("NMCLI", dir.join("nmcli").to_str().expect("utf-8 path")),
+        (
+            "NOTIFY_SEND",
+            dir.join("notify-send").to_str().expect("utf-8 path"),
+        ),
+        (
+            "STUB_LOG",
+            dir.join("calls.log").to_str().expect("utf-8 path"),
+        ),
+        (
+            "WIFI_LIST",
+            dir.join("wifi-list.txt").to_str().expect("utf-8 path"),
+        ),
+        (
+            "PROFILES",
+            dir.join("profiles.txt").to_str().expect("utf-8 path"),
+        ),
+    ]);
+    // `FLEX_WIFI_PASSWORD` rides per-case (set or removed around each run).
+    let saved_password = std::env::var("FLEX_WIFI_PASSWORD").ok();
+    let harness = WifiParityHarness {
+        dir: dir.clone(),
+        wrapper: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("wrappers")
+            .join("flex-wifi.sh"),
+        path_env,
+        home: home.clone(),
+    };
+    for case in &parity_cases() {
+        match case.password {
+            Some(password) => std::env::set_var("FLEX_WIFI_PASSWORD", password),
+            None => std::env::remove_var("FLEX_WIFI_PASSWORD"),
+        }
+        let (wrapper_ok, wrap_log, wrap_err, exec_log, exec_err, exec_ok) = harness.run(case);
+        assert_eq!(
+            wrapper_ok, exec_ok,
+            "{}: wrapper and executor must agree on success",
+            case.name
+        );
+        assert_eq!(
+            wrap_log, exec_log,
+            "{}: tool-call sequences must be byte-identical",
+            case.name
+        );
+        let script = harness.wrapper.to_str().expect("utf-8 path").to_string();
+        let (wrap_err_cmp, stripped) = strip_tty_diagnostic(&wrap_err, &script);
+        assert!(
+            stripped
+                .iter()
+                .all(|line| line.contains("/dev/tty") && line.contains("No such device")),
+            "{}: only bash's redirection diagnostic may differ: {stripped:?}",
+            case.name
+        );
+        assert_eq!(
+            wrap_err_cmp, exec_err,
+            "{}: stderr text must be byte-identical past the diagnostic",
+            case.name
+        );
+    }
+    match saved_password {
+        Some(value) => std::env::set_var("FLEX_WIFI_PASSWORD", value),
+        None => std::env::remove_var("FLEX_WIFI_PASSWORD"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -177,6 +177,7 @@ fn scratch(name: &str) -> PathBuf {
 /// reference host, on every `flex launch` and every `flex center` open.
 #[test]
 fn only_malformed_entries_reach_stderr() {
+    let _env = EXEC_ENV_LOCK.lock().expect("env lock");
     let home = scratch("diagnostics");
     let _ = std::fs::remove_dir_all(&home);
     let apps = home.join(".local/share/applications");
@@ -407,6 +408,7 @@ fn flex_test_replays_are_deterministic_across_bases() {
 #[test]
 #[ignore = "needs live ~/.cache/app-launcher.list + system .desktop dirs"]
 fn parity_against_app_cache() {
+    let _env = EXEC_ENV_LOCK.lock().expect("env lock");
     let home = std::env::var("HOME").expect("HOME set");
     let cache = PathBuf::from(home).join(".cache/app-launcher.list");
     let text = std::fs::read_to_string(&cache).expect("app-launcher.list readable");
@@ -460,6 +462,7 @@ fn write_exe(path: &std::path::Path, body: &str) {
 /// for (B-021).
 #[test]
 fn wrapper_resolves_the_row_hash_before_launching() {
+    let _env = EXEC_ENV_LOCK.lock().expect("env lock");
     let stub = scratch("wrapper");
     let _ = std::fs::remove_dir_all(&stub);
     std::fs::create_dir_all(&stub).expect("stub dir");
@@ -582,6 +585,7 @@ fn empty_scan_shows_the_noop_placeholder() {
 /// exits 0 without resolving or running anything (B-026).
 #[test]
 fn wrapper_treats_the_noop_placeholder_as_a_noop() {
+    let _env = EXEC_ENV_LOCK.lock().expect("env lock");
     let stub = scratch("wrapper-noop");
     let _ = std::fs::remove_dir_all(&stub);
     std::fs::create_dir_all(&stub).expect("stub dir");
@@ -642,6 +646,7 @@ fn wrapper_treats_the_noop_placeholder_as_a_noop() {
 /// whole line.
 #[test]
 fn engine_errors_are_reported_with_a_single_prefix() {
+    let _env = EXEC_ENV_LOCK.lock().expect("env lock");
     let output = std::process::Command::new("setsid")
         .arg(env!("CARGO_BIN_EXE_flex"))
         .arg("launch")

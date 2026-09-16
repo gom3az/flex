@@ -562,6 +562,10 @@ fn wrapper_harness(
 }
 
 fn run_wrapper(dir: &std::path::Path, setter: &std::path::Path) -> std::process::Output {
+    // Serializes the pre-existing wrapper tests against the executor tests'
+    // process-env mutations (new tests never call this helper, so no
+    // re-entrant deadlock: callers must not already hold `ENV_LOCK`).
+    let _env = ENV_LOCK.lock().expect("env lock");
     let wrapper = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("wrappers")
         .join("flex-wallpaper.sh");
@@ -645,6 +649,7 @@ fn wrapper_rejects_malformed_action_lines_and_unresolvable_ids() {
 /// so an unknown wallpaper id is reported without repeating it.
 #[test]
 fn unknown_resolve_id_is_reported_with_a_single_prefix() {
+    let _env = ENV_LOCK.lock().expect("env lock");
     let home = scratch("resolve-error");
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_flex"))
         .args(["wallpaper", "--resolve", "deadbeef"])
@@ -886,6 +891,7 @@ fn executor_tool_failure_is_a_loud_error_not_a_quiet_cancel() {
 /// harness tty can satisfy the TUI init.
 #[test]
 fn binary_errors_carry_a_single_prefix() {
+    let _env = ENV_LOCK.lock().expect("env lock");
     let output = std::process::Command::new("setsid")
         .arg(env!("CARGO_BIN_EXE_flex-wallpaper"))
         .env("POPUP_KITTY", "1")
@@ -930,19 +936,13 @@ fn binary_outside_a_popup_reexecs_into_the_wide_popup() {
     std::fs::set_permissions(dir.join("kitty"), std::fs::Permissions::from_mode(0o755))
         .expect("chmod");
     let path_env = stub_path_env(&dir);
-    let saved_path = std::env::var("PATH").ok();
-    std::env::set_var("PATH", &path_env);
-    let home = dir.join("home");
-    std::fs::create_dir_all(&home).expect("scratch HOME");
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_flex-wallpaper"))
+        .env("PATH", &path_env)
         .env("HOME", &home)
         .env_remove("POPUP_KITTY")
         .stdin(std::process::Stdio::null())
         .output()
         .expect("run flex-wallpaper outside a popup");
-    match saved_path {
-        Some(value) => std::env::set_var("PATH", value),
-        None => std::env::remove_var("PATH"),
     }
     assert!(
         output.status.success(),
