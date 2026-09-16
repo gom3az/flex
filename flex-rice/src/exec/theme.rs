@@ -5,9 +5,10 @@
 //! short-circuits
 //! the `noop` empty-scan placeholder (exit `0`, B-026), resolves the row
 //! hash back to the theme name (the same
-//! [`resolve_name`](crate::providers::theme_::resolve_name) scan), and
-//! `exec`s `$THEME_SWITCHER activate <name>` (default
-//! `$HOME/.config/scripts/theme-switcher.sh`).
+//! [`resolve_name`](crate::providers::theme_::resolve_name) scan), and runs
+//! the ported native activator ([`activate_theme_native`]), unless
+//! `THEME_SWITCHER` names an explicit override program
+//! ([`theme_switcher_override`]) that runs `<switcher> activate <name>`.
 //!
 //! Snapshot convention (the [`exec::shot`](super::shot) template): [`plan`]
 //! builds the [`Step`]s from resolved inputs, [`describe`] renders one step
@@ -15,10 +16,14 @@
 //! lines, and integration tests diff the stub-`PATH` call logs against the
 //! same shapes.
 //!
-//! Two deliberate departures from the wrapper (both tested):
+//! Three deliberate departures from the wrapper (all tested):
 //!
-//! - No subprocess: the hash is resolved in-process with the same
-//!   [`resolve_name`](crate::providers::theme_::resolve_name) the library
+//! - No subprocess for the default: the wrapper `exec`s
+//!   `theme-switcher.sh activate`; the port runs its body in-process
+//!   ([`activate_theme_native`]) and keeps `THEME_SWITCHER` as an explicit
+//!   override seam only.
+//! - No subprocess for resolution: the hash is resolved in-process with the
+//!   same [`resolve_name`](crate::providers::theme_::resolve_name) the library
 //!   exposes, so the resolution semantics are identical with one fewer
 //!   spawn.
 //! - Exit-code normalisation: the wrapper `exec`s the switcher so its exit
@@ -27,6 +32,8 @@
 //!   `flex: error:` prefix. There is no quiet-cancel step (unlike `shot`'s
 //!   `slurp`): a failing switcher is always a loud error.
 
+use std::fmt::Write as _;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -104,21 +111,15 @@ pub fn describe_plan(steps: &[Step]) -> Vec<String> {
     steps.iter().map(describe).collect()
 }
 
-/// Theme-switcher program: `THEME_SWITCHER`, else
-/// `$HOME/.config/scripts/theme-switcher.sh` (empty values fall back, like
-/// the wrapper's `${VAR:-default}`).
-///
-/// # Errors
-///
-/// When `HOME` is unset and no override is set.
-pub fn theme_switcher() -> Result<PathBuf> {
-    if let Ok(switcher) = std::env::var("THEME_SWITCHER") {
-        if !switcher.is_empty() {
-            return Ok(PathBuf::from(switcher));
-        }
+/// The explicit `THEME_SWITCHER` override seam: `Some` when the variable is
+/// set and non-empty, `None` otherwise (the ported native activator then
+/// runs).
+#[must_use]
+pub fn theme_switcher_override() -> Option<PathBuf> {
+    match std::env::var("THEME_SWITCHER") {
+        Ok(switcher) if !switcher.is_empty() => Some(PathBuf::from(switcher)),
+        _ => None,
     }
-    let home = std::env::var("HOME").context("theme: HOME is not set")?;
-    Ok(Path::new(&home).join(".config/scripts/theme-switcher.sh"))
 }
 
 /// The ambient `PATH`, empty when unset (tool resolution then fails cleanly
@@ -162,27 +163,295 @@ fn tool(path_env: &str, name: &str, args: &[String]) -> Result<bool> {
     Ok(status.success())
 }
 
+/// Run one optional tool with `args` (and `stdin` piped when set).
+///
+/// Returns `None` when `name` is not resolvable from `path_env` (or cannot
+/// be spawned); otherwise `Some(status.success())`. Stdout/stderr are always
+/// nulled, so a missing helper is quiet — the native activator ignores both
+/// `None` and `false`, exactly like the wrapper's `… 2>/dev/null || true`.
+fn run_optional(path_env: &str, name: &str, args: &[String], stdin: Option<&[u8]>) -> Option<bool> {
+    let bin = resolve_tool(name, path_env)?;
+    let mut cmd = Command::new(&bin);
+    cmd.args(args).stdout(Stdio::null()).stderr(Stdio::null());
+    if stdin.is_some() {
+        cmd.stdin(Stdio::piped());
+    } else {
+        cmd.stdin(Stdio::null());
+    }
+    let mut child = cmd.spawn().ok()?;
+    if let Some(input) = stdin {
+        if let Some(mut handle) = child.stdin.take() {
+            let _ = handle.write_all(input);
+        }
+    }
+    Some(child.wait().is_ok_and(|status| status.success()))
+}
+
+/// Copy every regular file at the top level of `src` into `current`
+/// (overwrite, no recursion — the wrapper's `for f in "$src"/*`).
+///
+/// # Errors
+///
+/// When `src` cannot be read or a file cannot be copied.
+fn copy_theme_files(src: &Path, current: &Path) -> Result<()> {
+    let entries =
+        std::fs::read_dir(src).with_context(|| format!("theme: cannot read {}", src.display()))?;
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        std::fs::copy(&path, current.join(entry.file_name()))
+            .with_context(|| format!("theme: cannot copy {}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// Best-effort relative symlink `target -> source` (the wrapper's
+/// `ln -sf "theme.css" …`): an existing target is removed first, and every
+/// failure is ignored.
+fn relink_relative(source: &str, target: &Path) {
+    let _ = std::fs::remove_file(target);
+    let _ = std::os::unix::fs::symlink(source, target);
+}
+
+/// Best-effort `metadata.json` `theme_name` update (the wrapper's
+/// `python3 … || true`): every read, parse, and write failure is ignored.
+fn update_metadata(meta: &Path, name: &str) {
+    let Ok(text) = std::fs::read_to_string(meta) else {
+        return;
+    };
+    let Some(updated) = update_theme_name(&text, name) else {
+        return;
+    };
+    let _ = std::fs::write(meta, updated);
+}
+
+/// Correctly JSON-escape `value` (quotes, backslashes, and control chars).
+fn json_escape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            control if control.is_control() => {
+                let _ = write!(out, "\\u{:04x}", control as u32);
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Replace the top-level `"theme_name"` value in `text` with `name`, insert
+/// the key before the final `}`, or return `None` when there is no `{`/`}`.
+///
+/// Std-only textual update (no `serde`): the key's `:` and JSON string value
+/// are located directly and only the quoted value is rewritten. A key hit
+/// without a recognizable string value leaves `text` unchanged (`None`).
+fn update_theme_name(text: &str, name: &str) -> Option<String> {
+    let open = text.find('{')?;
+    let close = text.rfind('}')?;
+    if close < open {
+        return None;
+    }
+    let escaped = json_escape(name);
+    let quoted = "\"theme_name\"";
+    if let Some(offset) = text[open + 1..close].find(quoted) {
+        let key_at = open + 1 + offset;
+        let bytes = text.as_bytes();
+        let mut cursor = key_at + quoted.len();
+        while cursor < close && matches!(bytes[cursor], b' ' | b'\t' | b'\r' | b'\n') {
+            cursor += 1;
+        }
+        if cursor >= close || bytes[cursor] != b':' {
+            return None;
+        }
+        cursor += 1;
+        while cursor < close && matches!(bytes[cursor], b' ' | b'\t' | b'\r' | b'\n') {
+            cursor += 1;
+        }
+        if cursor >= close || bytes[cursor] != b'"' {
+            return None;
+        }
+        let value_start = cursor;
+        cursor += 1;
+        while cursor < close {
+            match bytes[cursor] {
+                b'\\' => cursor += 2,
+                b'"' => break,
+                _ => cursor += 1,
+            }
+        }
+        if cursor >= close || bytes[cursor] != b'"' {
+            return None;
+        }
+        let value_end = cursor + 1;
+        let mut out = String::with_capacity(text.len() + escaped.len());
+        out.push_str(&text[..value_start]);
+        out.push('"');
+        out.push_str(&escaped);
+        out.push('"');
+        out.push_str(&text[value_end..]);
+        return Some(out);
+    }
+    let mut out = String::with_capacity(text.len() + escaped.len() + 24);
+    out.push_str(&text[..close]);
+    if !text[open + 1..close].trim().is_empty() {
+        out.push(',');
+    }
+    out.push_str("\n    \"theme_name\": \"");
+    out.push_str(&escaped);
+    out.push('"');
+    out.push_str(&text[close..]);
+    Some(out)
+}
+
+/// Activate `name` with the ported `activate_theme.sh` flow, reading `HOME`.
+///
+/// # Errors
+///
+/// When `HOME` is unset (`theme: HOME is not set`), `name` is malformed, the
+/// theme is missing or has no theme files, or a copy/link fails. Messages
+/// carry no `flex:` prefix; the runner reports them.
+pub fn activate_theme_native(name: &str, path_env: &str) -> Result<()> {
+    let home = std::env::var("HOME").context("theme: HOME is not set")?;
+    activate_theme_native_in(name, Path::new(&home), path_env)
+}
+
+/// Native activator body with the resolved inputs given (the test seam).
+///
+/// Copies the theme files, refreshes the compat and config symlinks, updates
+/// the metadata name, and best-effort reloads waybar/hyprland/kitty and
+/// notifies. The wrapper's exact order and its `|| true` arms are preserved.
+///
+/// # Errors
+///
+/// When `name` is empty or contains `/`/newline (`theme: bad name`), the
+/// theme is missing (`theme: theme '<name>' not found in <available>`), has
+/// no `theme.css`/`colors.css` (`has no theme files`), or a copy/link fails.
+pub fn activate_theme_native_in(name: &str, home: &Path, path_env: &str) -> Result<()> {
+    if name.is_empty() || name.contains('/') || name.contains('\n') {
+        anyhow::bail!("theme: bad name: {name}");
+    }
+    let available = home.join(".config/themes/available");
+    let current = home.join(".config/themes/current");
+    let src = available.join(name);
+    if !src.is_dir() {
+        anyhow::bail!("theme: theme '{name}' not found in {}", available.display());
+    }
+    if !src.join("theme.css").is_file() && !src.join("colors.css").is_file() {
+        anyhow::bail!("theme: theme '{name}' has no theme files");
+    }
+
+    std::fs::create_dir_all(&current)
+        .with_context(|| format!("theme: cannot create {}", current.display()))?;
+    copy_theme_files(&src, &current)?;
+
+    relink_relative("theme.css", &current.join("colors.css"));
+    relink_relative("theme.lua", &current.join("colors.lua"));
+
+    update_metadata(&current.join("metadata.json"), name);
+
+    for (target_rel, source_name) in CONFIG_LINKS {
+        let source = current.join(source_name);
+        if !source.is_file() {
+            continue;
+        }
+        let target = home.join(target_rel);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("theme: cannot create {}", parent.display()))?;
+        }
+        let _ = std::fs::remove_file(&target);
+        std::os::unix::fs::symlink(&source, &target)
+            .with_context(|| format!("theme: cannot link {}", target.display()))?;
+    }
+
+    if run_optional(
+        path_env,
+        "pgrep",
+        &[String::from("-x"), String::from("waybar")],
+        None,
+    ) == Some(true)
+    {
+        let _ = run_optional(
+            path_env,
+            "pkill",
+            &[String::from("-SIGUSR2"), String::from("waybar")],
+            None,
+        );
+    }
+    if resolve_tool("hyprctl", path_env).is_some() {
+        let _ = run_optional(path_env, "hyprctl", &[String::from("reload")], None);
+    }
+    if run_optional(
+        path_env,
+        "pgrep",
+        &[String::from("-x"), String::from("kitty")],
+        None,
+    ) == Some(true)
+    {
+        let _ = run_optional(
+            path_env,
+            "killall",
+            &[String::from("-SIGUSR1"), String::from("kitty")],
+            None,
+        );
+    }
+    let _ = run_optional(
+        path_env,
+        "notify-send",
+        &[
+            String::from("-a"),
+            String::from("Theme Switcher"),
+            String::from("-i"),
+            String::from("preferences-desktop-color"),
+            String::from("Theme Activated"),
+            format!("Switched to: {name}"),
+        ],
+        None,
+    );
+    Ok(())
+}
+
+/// The seven `current/…` sources and their `$HOME/…` config targets (the
+/// wrapper's parallel `config_targets` / `theme_files` arrays).
+const CONFIG_LINKS: [(&str, &str); 7] = [
+    (".config/waybar/theme.css", "theme.css"),
+    (".config/hypr/theme.lua", "theme.lua"),
+    (".config/kitty/current-theme.conf", "kitty.conf"),
+    (".config/yazi/theme.toml", "yazi.toml"),
+    (".config/tmux/tmux-colors.conf", "tmux-colors.conf"),
+    (".config/nvim/lua/theme.lua", "nvim-colors.lua"),
+    (".config/nvim/lua/nvim-hl.lua", "nvim-hl.lua"),
+];
+
 /// What [`execute`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecuteReport {
-    /// Switcher invoked (`None` when `noop` short-circuited first — the
-    /// wrapper exits before reading `THEME_SWITCHER`, so this does too).
+    /// Override switcher invoked (`None` for `noop` and for the native
+    /// activator — the wrapper exits before reading `THEME_SWITCHER` on
+    /// `noop`, and the native path has no switcher).
     pub switcher: Option<PathBuf>,
     /// Activated theme name (`None` for `noop`).
     pub name: Option<String>,
 }
 
 /// Activate the selected theme: validate the id, short-circuit `noop`,
-/// resolve the hash to a name, and run `<switcher> activate <name>`.
-/// `path_env` shadows the ambient `PATH` when `Some` (the stub seam tests
-/// use); `None` inherits it.
+/// resolve the hash to a name, then run the `THEME_SWITCHER` override if set,
+/// else the ported native activator. `path_env` shadows the ambient `PATH`
+/// when `Some` (the stub seam tests use); `None` inherits it.
 ///
 /// # Errors
 ///
 /// When the id is malformed (`bad id`, like the wrapper), the hash resolves
 /// to nothing (`unknown id`), the resolved name is malformed (`bad name`),
-/// the switcher is missing, or the switcher fails. Messages carry no `flex:`
-/// prefix; the runner reports them.
+/// the override switcher is missing or fails, or the native activator fails.
+/// Messages carry no `flex:` prefix; the runner reports them.
 pub fn execute(action_id: &str, path_env: Option<&str>) -> Result<ExecuteReport> {
     let Some(action) = ThemeAction::parse(action_id) else {
         anyhow::bail!("theme: bad id '{action_id}'");
@@ -199,8 +468,15 @@ pub fn execute(action_id: &str, path_env: Option<&str>) -> Result<ExecuteReport>
     if name.is_empty() || name.contains('/') || name.contains('\n') {
         anyhow::bail!("theme: bad name: {name}");
     }
-    let switcher = theme_switcher()?;
-    execute_with(&name, &switcher, path_env)
+    if let Some(switcher) = theme_switcher_override() {
+        return execute_with(&name, &switcher, path_env);
+    }
+    let path_env = path_env.map_or_else(ambient_path, str::to_string);
+    activate_theme_native(&name, &path_env)?;
+    Ok(ExecuteReport {
+        switcher: None,
+        name: Some(name),
+    })
 }
 
 /// Activate half of [`execute`], with the resolved inputs given (no env
@@ -268,28 +544,20 @@ mod tests {
     }
 
     #[test]
-    fn theme_switcher_prefers_the_override() {
-        let saved = std::env::var("THEME_SWITCHER").ok();
-        std::env::set_var("THEME_SWITCHER", "/tmp/stub-switcher.sh");
-        let switcher = theme_switcher().expect("override switcher");
-        assert_eq!(switcher, Path::new("/tmp/stub-switcher.sh"));
-        match saved {
-            Some(value) => std::env::set_var("THEME_SWITCHER", value),
-            None => std::env::remove_var("THEME_SWITCHER"),
-        }
-    }
-
-    #[test]
-    fn theme_switcher_empty_falls_back_to_the_home_default() {
+    fn theme_switcher_override_only_returns_a_nonempty_override() {
         let saved_switcher = std::env::var("THEME_SWITCHER").ok();
         let saved_home = std::env::var("HOME").ok();
+        std::env::set_var("THEME_SWITCHER", "/tmp/stub-switcher.sh");
+        assert_eq!(
+            theme_switcher_override().as_deref(),
+            Some(Path::new("/tmp/stub-switcher.sh"))
+        );
+        // Empty means native: no HOME fallback to the retired script.
         std::env::set_var("THEME_SWITCHER", "");
         std::env::set_var("HOME", "/tmp/fake-home");
-        let switcher = theme_switcher().expect("default switcher");
-        assert_eq!(
-            switcher,
-            Path::new("/tmp/fake-home/.config/scripts/theme-switcher.sh")
-        );
+        assert_eq!(theme_switcher_override(), None);
+        std::env::remove_var("THEME_SWITCHER");
+        assert_eq!(theme_switcher_override(), None);
         match saved_switcher {
             Some(value) => std::env::set_var("THEME_SWITCHER", value),
             None => std::env::remove_var("THEME_SWITCHER"),
@@ -298,5 +566,59 @@ mod tests {
             Some(value) => std::env::set_var("HOME", value),
             None => std::env::remove_var("HOME"),
         }
+    }
+
+    #[test]
+    fn activate_theme_native_rejects_bad_names() {
+        for bad in ["", "a/b", "a\nb"] {
+            let err = activate_theme_native_in(bad, Path::new("/tmp/flex-theme-native-home"), "")
+                .expect_err("bad name");
+            assert_eq!(format!("{err:#}"), format!("theme: bad name: {bad}"));
+        }
+    }
+
+    #[test]
+    fn update_theme_name_replaces_an_existing_value() {
+        let text = "{\n    \"theme_name\": \"old\",\n    \"wallpaper\": \"/walls/old.png\"\n}\n";
+        let updated = update_theme_name(text, "demo").expect("updated");
+        assert_eq!(
+            updated,
+            "{\n    \"theme_name\": \"demo\",\n    \"wallpaper\": \"/walls/old.png\"\n}\n"
+        );
+    }
+
+    #[test]
+    fn update_theme_name_inserts_a_missing_key_before_the_final_brace() {
+        let updated = update_theme_name("{\"wallpaper\": \"/w.png\"}", "demo").expect("updated");
+        assert_eq!(
+            updated,
+            "{\"wallpaper\": \"/w.png\",\n    \"theme_name\": \"demo\"}"
+        );
+    }
+
+    #[test]
+    fn update_theme_name_inserts_into_an_empty_object_without_a_leading_comma() {
+        assert_eq!(
+            update_theme_name("{}", "demo").expect("updated"),
+            "{\n    \"theme_name\": \"demo\"}"
+        );
+        assert_eq!(
+            update_theme_name("{  }", "demo").expect("updated"),
+            "{  \n    \"theme_name\": \"demo\"}"
+        );
+    }
+
+    #[test]
+    fn update_theme_name_json_escapes_quotes_and_backslashes() {
+        let updated = update_theme_name("{\"theme_name\": \"old\"}", "a\"b\\c").expect("updated");
+        assert_eq!(updated, "{\"theme_name\": \"a\\\"b\\\\c\"}");
+    }
+
+    #[test]
+    fn update_theme_name_leaves_non_json_unchanged() {
+        assert_eq!(update_theme_name("not json", "demo"), None);
+        assert_eq!(update_theme_name("{\"theme_name\": \"old\"", "demo"), None);
+        // A key hit without a string value is left untouched.
+        assert_eq!(update_theme_name("{\"theme_name\": 3}", "demo"), None);
     }
 }

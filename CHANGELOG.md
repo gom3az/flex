@@ -38,6 +38,14 @@ directly.
   `<terminal> -e <cmd…>` form — no popup class, font override or
   `POPUP_KITTY` marker) instead of a hardcoded `kitty -e`; the variable is
   read only for those entries, so a plain GUI launch never consults it.
+- Theme activation (`flex-theme`, `flex-center`) and wallpaper setting
+  (`flex-wallpaper`) are now in-process: the activator copies the theme into
+  `current/`, relinks the per-app config targets and reloads Waybar/Hyprland/
+  Kitty, and the setter talks to the hyprpaper socket and rewrites
+  `hyprpaper.conf` + the ml4w cache. `THEME_SWITCHER`/`SET_WALLPAPER` are now
+  override-only seams (unset runs the native path); the standalone
+  `theme-switcher.sh`/`set-wallpaper.sh` scripts are no longer on the call
+  path.
 
 ### Fixed
 - Providers no longer abort when a diagnostic write fails. `eprintln!`/

@@ -4,9 +4,9 @@
 //! row, the executor validates the id (16 lowercase hex chars, the FNV-1a
 //! path hash), resolves it back to the image path (the same
 //! [`resolve`](crate::providers::wallpaper::resolve) scan), refuses paths
-//! that are not files, and `exec`s
-//! `$SET_WALLPAPER <path>` (default
-//! `$HOME/.config/scripts/set-wallpaper.sh`).
+//! that are not files, and sets the wallpaper with the ported native setter
+//! ([`set_wallpaper_native`]) unless `SET_WALLPAPER` names an explicit
+//! override program ([`set_wallpaper_override`]).
 //!
 //! Unlike `theme`, there is no `noop` placeholder: an empty store exits 130
 //! in the shared runner before any menu is built, and the wrapper has no
@@ -17,11 +17,15 @@
 //! as a single line — `<setter> <path>` — unit tests pin the lines, and
 //! integration tests diff the stub-`PATH` call logs against the same shapes.
 //!
-//! Two deliberate departures from the wrapper (both tested):
+//! Three deliberate departures from the wrapper (all tested):
 //!
-//! - No subprocess: the hash is resolved in-process with the same
-//!   [`resolve`](crate::providers::wallpaper::resolve) the library exposes,
-//!   so the resolution semantics are identical with one fewer spawn.
+//! - No subprocess for the default: the wrapper `exec`s the
+//!   `set-wallpaper.sh` script; the port runs its body in-process
+//!   ([`set_wallpaper_native`]) and keeps `SET_WALLPAPER` as an explicit
+//!   override seam only.
+//! - No subprocess for resolution: the hash is resolved in-process with the
+//!   same [`resolve`](crate::providers::wallpaper::resolve) the library
+//!   exposes, so the resolution semantics are identical with one fewer spawn.
 //! - Exit-code normalisation: the wrapper `exec`s the setter so its exit
 //!   status propagates verbatim; the port maps every failure through the
 //!   shared runner, so any tool failure exits `1` with the single
@@ -34,8 +38,12 @@
 //! the existing preview pane. Nothing moves in this port and no row, id, or
 //! filter depends on it.
 
+use std::ffi::OsStr;
+use std::io::Write as _;
+use std::os::unix::fs::FileTypeExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 
@@ -111,21 +119,14 @@ pub fn describe_plan(steps: &[Step]) -> Vec<String> {
     steps.iter().map(describe).collect()
 }
 
-/// Wallpaper-setter program: `SET_WALLPAPER`, else
-/// `$HOME/.config/scripts/set-wallpaper.sh` (empty values fall back, like
-/// the wrapper's `${VAR:-default}`).
-///
-/// # Errors
-///
-/// When `HOME` is unset and no override is set.
-pub fn set_wallpaper() -> Result<PathBuf> {
-    if let Ok(setter) = std::env::var("SET_WALLPAPER") {
-        if !setter.is_empty() {
-            return Ok(PathBuf::from(setter));
-        }
+/// The explicit `SET_WALLPAPER` override seam: `Some` when the variable is
+/// set and non-empty, `None` otherwise (the ported native setter then runs).
+#[must_use]
+pub fn set_wallpaper_override() -> Option<PathBuf> {
+    match std::env::var("SET_WALLPAPER") {
+        Ok(setter) if !setter.is_empty() => Some(PathBuf::from(setter)),
+        _ => None,
     }
-    let home = std::env::var("HOME").context("wallpaper: HOME is not set")?;
-    Ok(Path::new(&home).join(".config/scripts/set-wallpaper.sh"))
 }
 
 /// The ambient `PATH`, empty when unset (tool resolution then fails cleanly
@@ -169,25 +170,233 @@ fn tool(path_env: &str, name: &str, args: &[String]) -> Result<bool> {
     Ok(status.success())
 }
 
+/// Run one optional tool with `args` (and `stdin` piped when set).
+///
+/// Returns `None` when `name` is not resolvable from `path_env` (or cannot
+/// be spawned); otherwise `Some(status.success())`. Stdout/stderr are always
+/// nulled, so a `socat` reply never reaches the popup and a missing helper
+/// is quiet — the native setter ignores both `None` and `false`, exactly
+/// like the wrapper's `… 2>/dev/null || true`.
+fn run_optional(path_env: &str, name: &str, args: &[String], stdin: Option<&[u8]>) -> Option<bool> {
+    let bin = resolve_tool(name, path_env)?;
+    let mut cmd = Command::new(&bin);
+    cmd.args(args).stdout(Stdio::null()).stderr(Stdio::null());
+    if stdin.is_some() {
+        cmd.stdin(Stdio::piped());
+    } else {
+        cmd.stdin(Stdio::null());
+    }
+    let mut child = cmd.spawn().ok()?;
+    if let Some(input) = stdin {
+        if let Some(mut handle) = child.stdin.take() {
+            let _ = handle.write_all(input);
+        }
+    }
+    Some(child.wait().is_ok_and(|status| status.success()))
+}
+
+/// First socket named `.hyprpaper.sock` under `run_dir`, depth-first in
+/// sorted directory-entry order (deterministic, unlike the wrapper's
+/// `find … | head -1`).
+///
+/// Only real sockets count: a regular file with the same name is skipped
+/// (matching `find -type s`), as is a failed directory read.
+fn find_socket(run_dir: &Path) -> Option<PathBuf> {
+    let mut entries: Vec<_> = std::fs::read_dir(run_dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .collect();
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    for entry in entries {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            if let Some(found) = find_socket(&entry.path()) {
+                return Some(found);
+            }
+        } else if file_type.is_socket() && entry.file_name() == OsStr::new(".hyprpaper.sock") {
+            return Some(entry.path());
+        }
+    }
+    None
+}
+
+/// Current numeric uid: `MetadataExt::uid` on `/proc/self`, falling back to
+/// `id -u` when the metadata read fails.
+///
+/// # Errors
+///
+/// When `/proc/self` cannot be read and `id -u` is missing, fails, or prints
+/// no parseable integer. Messages carry no `flex:` prefix.
+fn current_uid(path_env: &str) -> Result<u32> {
+    if let Ok(metadata) = std::fs::metadata("/proc/self") {
+        return Ok(std::os::unix::fs::MetadataExt::uid(&metadata));
+    }
+    let Some(id) = resolve_tool("id", path_env) else {
+        anyhow::bail!("wallpaper: id not found on PATH");
+    };
+    let output = Command::new(id)
+        .arg("-u")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .context("wallpaper: failed to run id")?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.trim()
+        .parse()
+        .context("wallpaper: cannot parse id -u output")
+}
+
+/// Spawn `hyprpaper` detached with stdio nulled: `setsid -f hyprpaper` when
+/// `setsid` resolves from `path_env`, else a direct `hyprpaper` spawn.
+///
+/// Best-effort, like the wrapper's `nohup … &`/`disown`: a missing `setsid`
+/// or `hyprpaper`, or a failed spawn, is ignored.
+fn spawn_hyprpaper(path_env: &str) {
+    if let Some(setsid) = resolve_tool("setsid", path_env) {
+        let _ = Command::new(setsid)
+            .arg("-f")
+            .arg("hyprpaper")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        return;
+    }
+    if let Some(hyprpaper) = resolve_tool("hyprpaper", path_env) {
+        let _ = Command::new(hyprpaper)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+    }
+}
+
+/// Set `path` with the ported `set-wallpaper.sh` flow, reading `HOME` and
+/// deriving the Hyprland runtime dir from `XDG_RUNTIME_DIR` (else
+/// `/run/user/<uid>/hypr`).
+///
+/// # Errors
+///
+/// When `HOME` is unset (`wallpaper: HOME is not set`), the uid cannot be
+/// determined, or [`set_wallpaper_native_in`] fails. Messages carry no
+/// `flex:` prefix; the runner reports them.
+pub fn set_wallpaper_native(path: &Path, path_env: &str) -> Result<()> {
+    let home = std::env::var("HOME").context("wallpaper: HOME is not set")?;
+    let run_dir = match std::env::var("XDG_RUNTIME_DIR") {
+        Ok(dir) if !dir.is_empty() => Path::new(&dir).join("hypr"),
+        _ => PathBuf::from(format!("/run/user/{}/hypr", current_uid(path_env)?)),
+    };
+    set_wallpaper_native_in(path, Path::new(&home), &run_dir, path_env)
+}
+
+/// Native setter body with the resolved inputs given (the test seam).
+///
+/// Preserves the wrapper's order: best-effort `swaync-client` inhibitor,
+/// hyprpaper socket (test → `preload` → 200 ms → `wallpaper`), restart when
+/// `pgrep -x hyprpaper` fails, then the persisted `hyprpaper.conf` and the
+/// optional ml4w cache file, and finally the inhibitor release. The conf
+/// write does not create parent directories (a missing parent errors, like
+/// `cat >`).
+///
+/// # Errors
+///
+/// When the conf or the existing cache file cannot be written. Messages
+/// carry no `flex:` prefix.
+pub fn set_wallpaper_native_in(
+    path: &Path,
+    home: &Path,
+    run_dir: &Path,
+    path_env: &str,
+) -> Result<()> {
+    let _ = run_optional(
+        path_env,
+        "swaync-client",
+        &[String::from("-Ia"), String::from("wallpaper-setter")],
+        None,
+    );
+
+    let hyprpaper_running = |path_env: &str| {
+        run_optional(
+            path_env,
+            "pgrep",
+            &[String::from("-x"), String::from("hyprpaper")],
+            None,
+        )
+        .unwrap_or(false)
+    };
+
+    if hyprpaper_running(path_env) {
+        if let Some(socket) = find_socket(run_dir) {
+            let target = vec![
+                String::from("-"),
+                format!("UNIX-CONNECT:{}", socket.display()),
+            ];
+            let connected = run_optional(path_env, "socat", &target, Some(b"\n")).unwrap_or(false);
+            if connected {
+                let preload = format!("preload {}\n", path.display());
+                let _ = run_optional(path_env, "socat", &target, Some(preload.as_bytes()));
+                std::thread::sleep(Duration::from_millis(200));
+                let wallpaper = format!("wallpaper ,{}\n", path.display());
+                let _ = run_optional(path_env, "socat", &target, Some(wallpaper.as_bytes()));
+            }
+        }
+    }
+
+    if !hyprpaper_running(path_env) {
+        let _ = run_optional(path_env, "killall", &[String::from("hyprpaper")], None);
+        std::thread::sleep(Duration::from_millis(300));
+        spawn_hyprpaper(path_env);
+        std::thread::sleep(Duration::from_secs(1));
+    }
+
+    let conf = home.join(".config/hypr/hyprpaper.conf");
+    let conf_body = format!(
+        "preload = {}\nwallpaper = , {}\n",
+        path.display(),
+        path.display()
+    );
+    std::fs::write(&conf, conf_body)
+        .with_context(|| format!("wallpaper: cannot write {}", conf.display()))?;
+
+    let cache_dir = home.join(".cache/ml4w/hyprland-dotfiles");
+    if cache_dir.is_dir() {
+        let cache = cache_dir.join("current_wallpaper");
+        std::fs::write(&cache, format!("{}\n", path.display()))
+            .with_context(|| format!("wallpaper: cannot write {}", cache.display()))?;
+    }
+
+    let _ = run_optional(
+        path_env,
+        "swaync-client",
+        &[String::from("-Ir"), String::from("wallpaper-setter")],
+        None,
+    );
+    Ok(())
+}
+
 /// What [`execute`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecuteReport {
-    /// Setter invoked.
-    pub setter: PathBuf,
+    /// Override setter invoked (`None` when the native setter ran).
+    pub setter: Option<PathBuf>,
     /// Image path handed to the setter.
     pub path: PathBuf,
 }
 
 /// Set the selected wallpaper: validate the id, resolve the hash to a path,
-/// refuse non-files, and run `<setter> <path>`. `path_env` shadows the
-/// ambient `PATH` when `Some` (the stub seam tests use); `None` inherits it.
+/// refuse non-files, then run the `SET_WALLPAPER` override if set, else the
+/// ported native setter. `path_env` shadows the ambient `PATH` when `Some`
+/// (the stub seam tests use); `None` inherits it.
 ///
 /// # Errors
 ///
 /// When the id is malformed (`bad id`, like the wrapper), the hash resolves
 /// to nothing (`unknown id`), the resolved path is not a file (`not a
-/// file`), the setter is missing, or the setter fails. Messages carry no
-/// `flex:` prefix; the runner reports them.
+/// file`), the override setter is missing or fails, or the native setter
+/// fails. Messages carry no `flex:` prefix; the runner reports them.
 pub fn execute(action_id: &str, path_env: Option<&str>) -> Result<ExecuteReport> {
     let Some(action) = WallpaperAction::parse(action_id) else {
         anyhow::bail!("wallpaper: bad id '{action_id}'");
@@ -198,8 +407,12 @@ pub fn execute(action_id: &str, path_env: Option<&str>) -> Result<ExecuteReport>
     if !path.is_file() {
         anyhow::bail!("wallpaper: not a file: {}", path.display());
     }
-    let setter = set_wallpaper()?;
-    execute_with(&path, &setter, path_env)
+    if let Some(setter) = set_wallpaper_override() {
+        return execute_with(&path, &setter, path_env);
+    }
+    let path_env = path_env.map_or_else(ambient_path, str::to_string);
+    set_wallpaper_native(&path, &path_env)?;
+    Ok(ExecuteReport { setter: None, path })
 }
 
 /// Set half of [`execute`], with the resolved inputs given (no env reads):
@@ -224,7 +437,7 @@ pub fn execute_with(path: &Path, setter: &Path, path_env: Option<&str>) -> Resul
         }
     }
     Ok(ExecuteReport {
-        setter: setter.to_path_buf(),
+        setter: Some(setter.to_path_buf()),
         path: path.to_path_buf(),
     })
 }
@@ -275,5 +488,48 @@ mod tests {
             describe(&steps[0]),
             "/sw/set-wallpaper.sh /walls/pick me.jpg"
         );
+    }
+
+    fn unit_scratch(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("flex-wallpaper-unit-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    #[test]
+    fn find_socket_finds_a_nested_socket_and_ignores_a_regular_file() {
+        let dir = unit_scratch("find-socket");
+        let nested = dir.join("nested/deeper");
+        std::fs::create_dir_all(&nested).expect("nested dir");
+        // A regular file with the socket name must not satisfy `-type s`.
+        std::fs::write(dir.join(".hyprpaper.sock"), b"not a socket").expect("regular file");
+        assert_eq!(find_socket(&dir), None, "regular files are not sockets");
+
+        let listener = std::os::unix::net::UnixListener::bind(nested.join(".hyprpaper.sock"))
+            .expect("bind socket");
+        assert_eq!(
+            find_socket(&dir).as_deref(),
+            Some(nested.join(".hyprpaper.sock").as_path())
+        );
+        drop(listener);
+        assert_eq!(
+            find_socket(&dir.join("missing")),
+            None,
+            "absent dir is None"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_optional_returns_none_for_a_missing_tool() {
+        let dir = unit_scratch("run-optional");
+        let path_env = dir.to_string_lossy().into_owned();
+        assert_eq!(
+            run_optional(&path_env, "definitely-not-a-tool", &[], None),
+            None
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

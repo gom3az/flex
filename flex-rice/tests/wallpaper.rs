@@ -611,6 +611,52 @@ fn stub_path_env(dir: &std::path::Path) -> String {
     )
 }
 
+/// Executable stub at `dir/name` running `body` (0700 like the other stubs).
+fn install_stub(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
+    let stub = dir.join(name);
+    std::fs::write(&stub, body).expect("stub");
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    stub
+}
+
+/// Lowercase-hex encoding of stdin, so the socat stub logs exact bytes
+/// (command substitution would strip the trailing newline).
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes.iter().fold(String::new(), |mut out, byte| {
+        let _ = write!(out, "{byte:02x}");
+        out
+    })
+}
+
+/// A `socat` stub appending `[arg]… <stdin-hex>\n` per call.
+fn install_socat(dir: &std::path::Path, log: &std::path::Path) -> std::path::PathBuf {
+    install_stub(
+        dir,
+        "socat",
+        &format!(
+            "#!/usr/bin/env bash\n{{ for arg in \"$@\"; do printf '[%s]' \"$arg\"; done; printf ' '; od -An -v -tx1 | tr -d ' \\n'; printf '\\n'; }} >> '{}'\n",
+            log.display()
+        ),
+    )
+}
+
+/// A stub logging every argv element bracketed, one line per call.
+fn install_argv_logger(
+    dir: &std::path::Path,
+    name: &str,
+    log: &std::path::Path,
+) -> std::path::PathBuf {
+    install_stub(
+        dir,
+        name,
+        &format!(
+            "#!/usr/bin/env bash\n{{ for arg in \"$@\"; do printf '[%s]' \"$arg\"; done; printf '\\n'; }} >> '{}'\n",
+            log.display()
+        ),
+    )
+}
+
 /// Full action-id matrix: every wallpaper (including the space-bearing name)
 /// sets through the setter seam as one call with the path intact.
 #[test]
@@ -629,7 +675,7 @@ fn executor_matrix_sets_every_wallpaper_through_the_setter_seam() {
         let report =
             flex_rice::exec::wallpaper::execute(&id, Some(&path_env)).expect("set succeeds");
         assert_eq!(report.path.as_path(), image.as_path());
-        assert_eq!(report.setter.as_path(), setter.as_path());
+        assert_eq!(report.setter.as_deref(), Some(setter.as_path()));
     }
     let log = std::fs::read_to_string(dir.join("set-wallpaper.sh.log")).expect("call log");
     let lines: Vec<&str> = log.lines().collect();
@@ -645,9 +691,8 @@ fn executor_matrix_sets_every_wallpaper_through_the_setter_seam() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The `SET_WALLPAPER` seam: the override wins, the empty value falls back
-/// to the wrapper's exact `$HOME` default, and a missing `HOME` with no
-/// override is an error (never a silent empty spawn).
+/// The `SET_WALLPAPER` seam: the override wins, and an empty or unset value
+/// returns `None` so `execute` runs the ported native setter instead.
 #[test]
 fn executor_setter_seam_prefers_override_then_home_default() {
     let _env = env_lock();
@@ -656,27 +701,158 @@ fn executor_setter_seam_prefers_override_then_home_default() {
     let setter = install_setter(&dir, "set-wallpaper.sh");
     let _setter_env = set_env("SET_WALLPAPER", &setter);
     assert_eq!(
-        flex_rice::exec::wallpaper::set_wallpaper().expect("override setter"),
-        setter
+        flex_rice::exec::wallpaper::set_wallpaper_override(),
+        Some(setter.clone())
     );
 
-    let fake_home = dir.join("fake-home");
-    std::fs::create_dir_all(&fake_home).expect("fake home");
     let _empty = set_env("SET_WALLPAPER", "");
-    let _home = set_env("HOME", &fake_home);
     assert_eq!(
-        flex_rice::exec::wallpaper::set_wallpaper().expect("default setter"),
-        fake_home.join(".config/scripts/set-wallpaper.sh"),
-        "empty falls back to the wrapper's exact default-path derivation"
+        flex_rice::exec::wallpaper::set_wallpaper_override(),
+        None,
+        "empty falls back to the native setter"
     );
 
     let _no_setter = remove_env("SET_WALLPAPER");
-    let _no_home = remove_env("HOME");
-    let err = flex_rice::exec::wallpaper::set_wallpaper().expect_err("no HOME must fail");
-    let message = format!("{err:#}");
-    assert!(
-        message.starts_with("wallpaper: HOME is not set"),
-        "unexpected message: {message:?}"
+    assert_eq!(
+        flex_rice::exec::wallpaper::set_wallpaper_override(),
+        None,
+        "unset falls back to the native setter"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Native socket path: a real `.hyprpaper.sock` gets the connection test,
+/// `preload`, and `wallpaper` socat calls in order, the conf and ml4w cache
+/// are written byte-exact, and the swaync inhibitor brackets the flow.
+#[test]
+fn executor_native_sets_via_the_hyprpaper_socket_and_cache() {
+    let _env = env_lock();
+    let dir = scratch("exec-native-socket");
+    std::fs::create_dir_all(&dir).expect("stub dir");
+    let home = dir.join("home");
+    let runtime = dir.join("runtime");
+    std::fs::create_dir_all(home.join(".config/hypr")).expect("hypr conf dir");
+    std::fs::create_dir_all(home.join(".cache/ml4w/hyprland-dotfiles")).expect("cache dir");
+    let socket = runtime.join("hypr/.hyprpaper.sock");
+    std::fs::create_dir_all(socket.parent().expect("socket parent")).expect("run dir");
+    let _listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind .hyprpaper.sock");
+
+    install_stub(&dir, "pgrep", "#!/usr/bin/env bash\nexit 0\n");
+    let socat_log = dir.join("socat.log");
+    install_socat(&dir, &socat_log);
+    let swaync_log = dir.join("swaync.log");
+    install_argv_logger(&dir, "swaync-client", &swaync_log);
+
+    let image = dir.join("wall sun.jpg");
+    write_image(&image);
+    flex_rice::exec::wallpaper::set_wallpaper_native_in(
+        &image,
+        &home,
+        &runtime,
+        &stub_path_env(&dir),
+    )
+    .expect("native set succeeds");
+
+    let socat = std::fs::read_to_string(&socat_log).expect("socat log");
+    let calls: Vec<&str> = socat.lines().collect();
+    let target = format!("[-][UNIX-CONNECT:{}] ", socket.display());
+    assert_eq!(
+        calls,
+        vec![
+            format!("{target}{}", hex(b"\n")),
+            format!(
+                "{target}{}",
+                hex(format!("preload {}\n", image.display()).as_bytes())
+            ),
+            format!(
+                "{target}{}",
+                hex(format!("wallpaper ,{}\n", image.display()).as_bytes())
+            ),
+        ],
+        "socket test, preload, then wallpaper against the same socket",
+    );
+
+    assert_eq!(
+        std::fs::read(home.join(".config/hypr/hyprpaper.conf")).expect("conf"),
+        format!("preload = {0}\nwallpaper = , {0}\n", image.display()).as_bytes(),
+    );
+    assert_eq!(
+        std::fs::read(home.join(".cache/ml4w/hyprland-dotfiles/current_wallpaper")).expect("cache"),
+        format!("{}\n", image.display()).as_bytes(),
+    );
+
+    let swaync = std::fs::read_to_string(&swaync_log).expect("swaync log");
+    assert_eq!(
+        swaync.lines().collect::<Vec<_>>(),
+        vec!["[-Ia][wallpaper-setter]", "[-Ir][wallpaper-setter]"],
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Native restart path: when `pgrep` reports no hyprpaper, `killall` runs,
+/// then `hyprpaper` is spawned detached (through `setsid -f` here), and the
+/// conf is still persisted.
+#[test]
+fn executor_native_restarts_hyprpaper_when_not_running() {
+    let _env = env_lock();
+    let dir = scratch("exec-native-restart");
+    std::fs::create_dir_all(&dir).expect("stub dir");
+    let home = dir.join("home");
+    let runtime = dir.join("runtime");
+    std::fs::create_dir_all(home.join(".config/hypr")).expect("hypr conf dir");
+    std::fs::create_dir_all(&runtime).expect("run dir");
+
+    install_stub(&dir, "pgrep", "#!/usr/bin/env bash\nexit 1\n");
+    let killall_log = dir.join("killall.log");
+    install_argv_logger(&dir, "killall", &killall_log);
+    let hyprpaper_log = dir.join("hyprpaper.log");
+    install_stub(
+        &dir,
+        "hyprpaper",
+        &format!(
+            "#!/usr/bin/env bash\nprintf '[hyprpaper]\\n' >> '{}'\n",
+            hyprpaper_log.display()
+        ),
+    );
+    let setsid_log = dir.join("setsid.log");
+    install_stub(
+        &dir,
+        "setsid",
+        &format!(
+            "#!/usr/bin/env bash\n{{ for arg in \"$@\"; do printf '[%s]' \"$arg\"; done; printf '\\n'; }} >> '{}'\nshift\nexec '{}'\n",
+            setsid_log.display(),
+            dir.join("hyprpaper").display()
+        ),
+    );
+    let swaync_log = dir.join("swaync.log");
+    install_argv_logger(&dir, "swaync-client", &swaync_log);
+
+    let image = dir.join("night.png");
+    write_image(&image);
+    flex_rice::exec::wallpaper::set_wallpaper_native_in(
+        &image,
+        &home,
+        &runtime,
+        &stub_path_env(&dir),
+    )
+    .expect("native set succeeds");
+
+    assert_eq!(
+        std::fs::read_to_string(&killall_log).expect("killall log"),
+        "[hyprpaper]\n",
+    );
+    assert_eq!(
+        std::fs::read_to_string(&setsid_log).expect("setsid log"),
+        "[-f][hyprpaper]\n",
+    );
+    assert_eq!(
+        std::fs::read_to_string(&hyprpaper_log).expect("hyprpaper log"),
+        "[hyprpaper]\n",
+        "setsid execs hyprpaper, which is detached with stdio nulled",
+    );
+    assert_eq!(
+        std::fs::read(home.join(".config/hypr/hyprpaper.conf")).expect("conf"),
+        format!("preload = {0}\nwallpaper = , {0}\n", image.display()).as_bytes(),
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

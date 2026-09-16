@@ -532,6 +532,101 @@ fn executor_tool_failure_is_a_loud_error_not_a_quiet_cancel() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+/// Native activation (no `THEME_SWITCHER`): copies the theme files, refreshes
+/// the compat/config symlinks, updates `theme_name`, and best-effort reloads.
+#[test]
+fn native_activation_copies_links_symlinks_and_reloads() {
+    let dir = scratch("native-stubs");
+    std::fs::create_dir_all(&dir).expect("stub dir");
+    let home = scratch("native-home");
+    let available = home.join(".config/themes/available/demo");
+    std::fs::create_dir_all(&available).expect("theme dir");
+    let sources = [
+        ("theme.css", "body { color: red; }\n"),
+        ("theme.lua", "return {}\n"),
+        ("kitty.conf", "foreground #fff\n"),
+        ("yazi.toml", "theme = 'demo'\n"),
+        ("tmux-colors.conf", "set -g status-bg red\n"),
+        ("nvim-colors.lua", "return {}\n"),
+        ("nvim-hl.lua", "return {}\n"),
+    ];
+    for (name, body) in sources {
+        std::fs::write(available.join(name), body).expect("theme source");
+    }
+    std::fs::write(
+        available.join("metadata.json"),
+        "{\n    \"theme_name\": \"old\",\n    \"wallpaper\": \"/walls/old.png\"\n}\n",
+    )
+    .expect("metadata");
+    std::fs::write(available.join("extra.txt"), "extra\n").expect("extra file");
+
+    let log = dir.join("calls.log");
+    let body = format!(
+        "#!/usr/bin/env bash\nprintf '%s %s\\n' \"$(basename \"$0\")\" \"$*\" >> \"{}\"\nexit 0\n",
+        log.display()
+    );
+    for tool in ["pgrep", "pkill", "hyprctl", "killall", "notify-send"] {
+        write_exe(&dir.join(tool), &body);
+    }
+    let path_env = stub_path_env(&dir);
+
+    flex_rice::exec::theme::activate_theme_native_in("demo", &home, &path_env)
+        .expect("native activation succeeds");
+
+    let current = home.join(".config/themes/current");
+    assert_eq!(
+        std::fs::read(current.join("theme.css")).expect("copied css"),
+        std::fs::read(available.join("theme.css")).expect("source css"),
+    );
+    assert!(current.join("extra.txt").is_file(), "extra file copied");
+    assert_eq!(
+        std::fs::read_link(current.join("colors.css")).expect("colors.css symlink"),
+        std::path::Path::new("theme.css"),
+        "compat symlink is relative",
+    );
+    let metadata = std::fs::read_to_string(current.join("metadata.json")).expect("metadata");
+    assert!(
+        metadata.contains("/walls/old.png"),
+        "other key retained: {metadata:?}"
+    );
+    assert_eq!(
+        theme_::current_name_in(&current),
+        "demo",
+        "theme_name updated"
+    );
+
+    for (target, source) in [
+        (".config/waybar/theme.css", "theme.css"),
+        (".config/hypr/theme.lua", "theme.lua"),
+        (".config/kitty/current-theme.conf", "kitty.conf"),
+        (".config/yazi/theme.toml", "yazi.toml"),
+        (".config/tmux/tmux-colors.conf", "tmux-colors.conf"),
+        (".config/nvim/lua/theme.lua", "nvim-colors.lua"),
+        (".config/nvim/lua/nvim-hl.lua", "nvim-hl.lua"),
+    ] {
+        let target = home.join(target);
+        assert!(target.is_symlink(), "{target:?} is a symlink");
+        assert_eq!(
+            std::fs::read_link(&target).expect("read link"),
+            current.join(source),
+            "{target:?} points at current/{source}",
+        );
+        assert!(target.exists(), "{target:?} resolves");
+    }
+
+    let logged = std::fs::read_to_string(&log).expect("stub call log");
+    for line in [
+        "pkill -SIGUSR2 waybar",
+        "hyprctl reload",
+        "killall -SIGUSR1 kitty",
+        "notify-send -a Theme Switcher -i preferences-desktop-color Theme Activated Switched to: demo",
+    ] {
+        assert!(logged.contains(line), "missing {line:?} in {logged:?}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
 /// Binary level without a pty: the menu cannot start, so the binary exits 1
 /// with exactly one `flex: error:` prefix (the runner owns it; executor
 /// errors carry none). `setsid` detaches the controlling terminal so no

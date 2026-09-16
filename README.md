@@ -42,10 +42,10 @@ binary per provider.
 | `flex-power` | power | Shutdown/reboot/logout menu: `hyprlock`, `systemctl suspend\|reboot\|poweroff`, `pkill -SIGTERM Hyprland` |
 | `flex-launch` | launch | Application launcher: scans `.desktop` entries and detaches the chosen app with `setsid -f` (`$TERMINAL -e` for `Terminal=true`) |
 | `flex-shot` | shot | Screenshot/recording flow: `slurp`, `grim`, `wl-copy`, `notify-send`, or the `RECORDING_START` helper |
-| `flex-theme` | theme | Theme switcher: scans `~/.config/themes/available`, runs `theme-switcher.sh activate <name>` |
+| `flex-theme` | theme | Theme switcher: scans `~/.config/themes/available` and activates the selection in-process (`$THEME_SWITCHER` overrides with `<switcher> activate <name>`) |
 | `flex-clip` | clip | Clipboard history: `wl-copy` a selection, delete it, pin/unpin it |
 | `flex-center` | center | Control center: volume/brightness/network/bluetooth/power/theme tabs |
-| `flex-wallpaper` | wallpaper | Wallpaper picker with a kitty-graphics preview pane; runs `set-wallpaper.sh <path>` |
+| `flex-wallpaper` | wallpaper | Wallpaper picker with a kitty-graphics preview pane; sets the selection in-process (hyprpaper socket + `hyprpaper.conf`; `$SET_WALLPAPER` overrides with `<setter> <path>`) |
 | `flex-wifi` | wifi | Wi-Fi picker: radio on/off, disconnect, connect (saved profile or password prompt) |
 
 Every provider binary runs the same shared flow:
@@ -109,8 +109,8 @@ These are direct `Command` spawns of the named tools, not shell invocations.
 |---|---|---|
 | `NMCLI`, `BLUETOOTHCTL`, `WPCTL` | wifi, center | Tool overrides |
 | `NOTIFY_SEND` | wifi, center | Notification tool override |
-| `THEME_SWITCHER` | theme, center | Theme switcher script override |
-| `SET_WALLPAPER` | wallpaper | Wallpaper setter script override |
+| `THEME_SWITCHER` | theme, center | Theme-activation override; unset/empty runs the in-process activator |
+| `SET_WALLPAPER` | wallpaper | Wallpaper-setting override; unset/empty runs the in-process setter |
 | `DRY_RUN` | power | When exactly `1`, print `would run: <cmd>` instead of executing |
 | `FLEX_WIFI_PASSWORD`, `FLEX_CENTER_PASSWORD` | wifi, center | Skip the `/dev/tty` password prompt |
 | `SCREENSHOT_DIR`, `RECORDING_START` | shot | Capture output dir / recording helper override |

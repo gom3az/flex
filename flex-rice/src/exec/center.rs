@@ -21,8 +21,10 @@
 //! - `select`/`toggle vol` → `wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle`;
 //! - `select pwlock|pwsuspend|pwreboot|pwoff|pwlogout` → `hyprlock` /
 //!   `systemctl suspend|reboot|poweroff` / `pkill -SIGTERM Hyprland`;
-//! - `select theme` → `<switcher> activate <name>` with the name stripped
-//!   from the `Theme: {name}` label;
+//! - `select theme` → the ported native activator
+//!   ([`theme::activate_theme_native`]) with the name stripped from the
+//!   `Theme: {name}` label, unless `THEME_SWITCHER` names an override that
+//!   runs `<switcher> activate <name>`;
 //! - `select bright`, `select noop`, any `delete`, and non-volume/bt
 //!   `toggle`s → exit `0` with no effect (brightness adjust is a v1 gap,
 //!   exactly like the wrapper).
@@ -42,7 +44,7 @@
 //! - `notify-send -a Control Center <Connected|Disconnected|Failed> <ssid>`
 //! - `setsid -f [<terminal> -e ]<program> [args…]`
 //! - `hyprlock`, `systemctl suspend|reboot|poweroff`, `pkill -SIGTERM Hyprland`
-//! - `<switcher> activate <name>`
+//! - `<switcher> activate <name>` (override) / `<native> activate <name>`
 //!
 //! Planning reads (`nmcli` discovery/list, `bluetoothctl info`) run inside
 //! [`execute`] to decide the [`PlannedAction`] and are therefore not [`Step`]s
@@ -89,9 +91,9 @@
 //!   `panic = "abort"` means no guard runs.
 //!
 //! Env seams (empty values fall back, like the wrapper's `${VAR:-default}`):
-//! `NMCLI`, `BLUETOOTHCTL`, `WPCTL` (tool overrides), `THEME_SWITCHER` (else
-//! `$HOME/.config/scripts/theme-switcher.sh`), `FLEX_CENTER_PASSWORD` (skips
-//! the `/dev/tty` prompt), `HOME` (desktop dirs + switcher default).
+//! `NMCLI`, `BLUETOOTHCTL`, `WPCTL` (tool overrides), `THEME_SWITCHER`
+//! (override only; unset/empty runs the native activator), `FLEX_CENTER_PASSWORD`
+//! (skips the `/dev/tty` prompt), `HOME` (desktop dirs + native theme dirs).
 
 use std::fs::File;
 use std::io::{BufRead as _, BufReader};
@@ -100,6 +102,7 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context as _, Result};
 
+use crate::exec::theme;
 use crate::providers::{center, launch};
 use crate::terminal::{self, TerminalKind};
 
@@ -304,10 +307,11 @@ pub enum Step {
         /// Power row.
         kind: PowerKind,
     },
-    /// `<switcher> activate <name>` (loud, the wrapper's `exec` line).
+    /// `<switcher> activate <name>` (loud, the wrapper's `exec` line) or the
+    /// native activator when no override is set.
     ThemeActivate {
-        /// Theme-switcher program.
-        switcher: String,
+        /// Theme-switcher override program (`None` = native activator).
+        switcher: Option<String>,
         /// Resolved theme name (one argument, so spaces survive — B-021).
         name: String,
     },
@@ -382,8 +386,8 @@ pub enum PlannedAction {
     Power(PowerKind),
     /// Theme activation.
     Theme {
-        /// Theme-switcher program.
-        switcher: String,
+        /// Theme-switcher override program (`None` = native activator).
+        switcher: Option<String>,
         /// Resolved theme name.
         name: String,
     },
@@ -527,7 +531,10 @@ pub fn describe(step: &Step) -> String {
             PowerKind::Off => String::from("systemctl poweroff"),
             PowerKind::Logout => String::from("pkill -SIGTERM Hyprland"),
         },
-        Step::ThemeActivate { switcher, name } => format!("{switcher} activate {name}"),
+        Step::ThemeActivate { switcher, name } => match switcher {
+            Some(switcher) => format!("{switcher} activate {name}"),
+            None => format!("<native> activate {name}"),
+        },
     }
 }
 
@@ -569,23 +576,6 @@ pub fn wpctl_cmd() -> String {
         }
     }
     String::from("wpctl")
-}
-
-/// Theme-switcher program: `THEME_SWITCHER`, else
-/// `$HOME/.config/scripts/theme-switcher.sh` (empty values fall back, like
-/// the wrapper's `${THEME_SWITCHER:-…}`).
-///
-/// # Errors
-///
-/// When `HOME` is unset and no override is set.
-pub fn theme_switcher() -> Result<PathBuf> {
-    if let Ok(switcher) = std::env::var("THEME_SWITCHER") {
-        if !switcher.is_empty() {
-            return Ok(PathBuf::from(switcher));
-        }
-    }
-    let home = std::env::var("HOME").context("center: HOME is not set")?;
-    Ok(Path::new(&home).join(".config/scripts/theme-switcher.sh"))
 }
 
 /// The ambient `PATH`, empty when unset (tool resolution then fails cleanly
@@ -933,16 +923,17 @@ fn decide_bt(mac: &str, path_env: &str) -> Result<PlannedAction> {
     })
 }
 
-/// Resolve a `theme` row to its switcher invocation (the name is stripped
-/// from the `Theme: {name}` label; empty errors, like the wrapper).
+/// Resolve a `theme` row to its activation inputs (the name is stripped
+/// from the `Theme: {name}` label; empty errors, like the wrapper). The
+/// `THEME_SWITCHER` override is captured as `Some`, else `None` (native).
 fn decide_theme(label: &str) -> Result<PlannedAction> {
     let name = label.strip_prefix("Theme: ").unwrap_or(label);
     if name.is_empty() {
         anyhow::bail!("center: empty theme name");
     }
-    let switcher = theme_switcher()?;
     Ok(PlannedAction::Theme {
-        switcher: switcher.to_string_lossy().into_owned(),
+        switcher: theme::theme_switcher_override()
+            .map(|switcher| switcher.to_string_lossy().into_owned()),
         name: name.to_string(),
     })
 }
@@ -1074,12 +1065,18 @@ fn run_step(
                 anyhow::bail!("center: {} failed", describe(&Step::Power { kind }));
             }
         }
-        Step::ThemeActivate { switcher, name } => {
-            let args = vec![String::from("activate"), name.clone()];
-            if !tool(path_env, &switcher, &args)? {
-                anyhow::bail!("center: activate {name} failed");
+        Step::ThemeActivate { switcher, name } => match switcher {
+            Some(switcher) => {
+                let args = vec![String::from("activate"), name.clone()];
+                if !tool(path_env, &switcher, &args)? {
+                    anyhow::bail!("center: activate {name} failed");
+                }
             }
-        }
+            None => {
+                crate::exec::theme::activate_theme_native(&name, path_env)
+                    .map_err(|err| anyhow::anyhow!("center: {err}"))?;
+            }
+        },
     }
     Ok(())
 }
@@ -1335,10 +1332,17 @@ mod tests {
     fn plan_snapshot_theme_is_the_switcher_activate_line() {
         assert_eq!(
             describe_plan(&plan(&PlannedAction::Theme {
-                switcher: String::from("/sw/theme-switcher.sh"),
+                switcher: Some(String::from("/sw/theme-switcher.sh")),
                 name: String::from("tokyo-night"),
             })),
             vec!["/sw/theme-switcher.sh activate tokyo-night"],
+        );
+        assert_eq!(
+            describe_plan(&plan(&PlannedAction::Theme {
+                switcher: None,
+                name: String::from("tokyo-night"),
+            })),
+            vec!["<native> activate tokyo-night"],
         );
     }
 
@@ -1373,16 +1377,17 @@ mod tests {
     }
 
     #[test]
-    fn theme_switcher_empty_falls_back_to_the_home_default() {
+    fn theme_switcher_override_empty_means_native() {
         let saved_switcher = std::env::var("THEME_SWITCHER").ok();
         let saved_home = std::env::var("HOME").ok();
+        std::env::set_var("THEME_SWITCHER", "/tmp/stub-switcher.sh");
+        assert_eq!(
+            theme::theme_switcher_override().as_deref(),
+            Some(Path::new("/tmp/stub-switcher.sh"))
+        );
         std::env::set_var("THEME_SWITCHER", "");
         std::env::set_var("HOME", "/tmp/fake-home");
-        let switcher = theme_switcher().expect("default switcher");
-        assert_eq!(
-            switcher,
-            Path::new("/tmp/fake-home/.config/scripts/theme-switcher.sh")
-        );
+        assert_eq!(theme::theme_switcher_override(), None);
         match saved_switcher {
             Some(value) => std::env::set_var("THEME_SWITCHER", value),
             None => std::env::remove_var("THEME_SWITCHER"),

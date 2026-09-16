@@ -1020,6 +1020,7 @@ fn executor_matrix_runs_every_action_through_stub_tools() {
     let info = dir.join("info.txt");
     let log = dir.join("calls.log");
     let home = install_center_home("matrix");
+    let switcher = home.join(".config/scripts/theme-switcher.sh");
     let _guard = EnvGuard::set(&[
         ("HOME", home.to_str().expect("utf8")),
         ("TERMINAL", "kitty"),
@@ -1029,7 +1030,7 @@ fn executor_matrix_runs_every_action_through_stub_tools() {
             dir.join("bluetoothctl").to_str().expect("utf8"),
         ),
         ("WPCTL", dir.join("wpctl").to_str().expect("utf8")),
-        ("THEME_SWITCHER", ""),
+        ("THEME_SWITCHER", switcher.to_str().expect("utf8")),
         ("FLEX_CENTER_PASSWORD", ""),
         ("STUB_LOG", log.to_str().expect("utf8")),
         ("WIFI_LIST", wifi_list.to_str().expect("utf8")),
