@@ -506,6 +506,112 @@ pub fn execute_with(name: &str, switcher: &Path, path_env: Option<&str>) -> Resu
     })
 }
 
+// === `theme-switcher.sh` list/current/activate/delete verbs =================
+//
+// The retired wrapper's non-pick entry points, so the `theme-switcher.sh`
+// CLI can go away. Output is functional rather than byte-identical: the bash
+// `info`/`warn` helpers prefix ANSI color codes, which are dropped here
+// (warnings go to stderr via `flex_core::diag`).
+
+/// Basename of a slash-separated path (the wrapper's `basename`).
+fn basename(path: &str) -> String {
+    path.rsplit('/').next().unwrap_or(path).to_string()
+}
+
+/// `theme-switcher.sh list`: one `name  wallpaper  generated` line per
+/// available theme (sorted), or a warning when `available/` is absent.
+///
+/// # Errors
+///
+/// When stdout cannot be written.
+pub fn list() -> Result<()> {
+    let available = theme_::available_dir();
+    if !available.is_dir() {
+        flex_core::diag::warn(&format!(
+            "No available themes directory found at {}",
+            available.display()
+        ));
+        return Ok(());
+    }
+    let mut out = std::io::stdout();
+    for entry in theme_::scan_available(&available, "") {
+        let dir = available.join(&entry.name);
+        let generated = if dir.join("metadata.json").is_file() {
+            let text = std::fs::read_to_string(dir.join("metadata.json")).unwrap_or_default();
+            theme_::json_string_field(&text, "generated").unwrap_or_else(|| String::from("unknown"))
+        } else {
+            String::new()
+        };
+        writeln!(
+            out,
+            "  {:<30} {:<50} {}",
+            entry.name, entry.wallpaper, generated
+        )
+        .context("theme: cannot write list")?;
+    }
+    Ok(())
+}
+
+/// `theme-switcher.sh current`: print the active theme name and wallpaper
+/// basename, or a warning when `current/metadata.json` is absent.
+///
+/// # Errors
+///
+/// When stdout cannot be written.
+pub fn current() -> Result<()> {
+    let meta = theme_::current_dir().join("metadata.json");
+    if !meta.is_file() {
+        flex_core::diag::warn("No active theme metadata found");
+        return Ok(());
+    }
+    let text = std::fs::read_to_string(&meta).unwrap_or_default();
+    let name =
+        theme_::json_string_field(&text, "theme_name").unwrap_or_else(|| String::from("unknown"));
+    let wallpaper =
+        theme_::json_string_field(&text, "wallpaper").unwrap_or_else(|| String::from("unknown"));
+    let mut out = std::io::stdout();
+    writeln!(out, "Active theme: {name}").context("theme: cannot write current")?;
+    writeln!(out, "  Wallpaper: {}", basename(&wallpaper))
+        .context("theme: cannot write current")?;
+    Ok(())
+}
+
+/// `theme-switcher.sh activate <name>`: run the native activator directly
+/// (the `THEME_SWITCHER` override is for the TUI path, not this verb).
+///
+/// # Errors
+///
+/// When `HOME` is unset or [`activate_theme_native_in`] fails.
+pub fn activate(name: &str, path_env: Option<&str>) -> Result<()> {
+    let home = std::env::var("HOME").context("theme: HOME is not set")?;
+    let path_env = path_env.map_or_else(ambient_path, str::to_string);
+    activate_theme_native_in(name, Path::new(&home), &path_env)
+}
+
+/// `theme-switcher.sh delete <name>`: remove an available theme, warning
+/// first for the auto-generated ones (`auto`, `auto-*`).
+///
+/// # Errors
+///
+/// When the name is malformed, the theme is missing, or its directory cannot
+/// be removed.
+pub fn delete(name: &str) -> Result<()> {
+    if name.is_empty() || name.contains('/') || name.contains('\n') {
+        anyhow::bail!("theme: bad name: {name}");
+    }
+    let src = theme_::available_dir().join(name);
+    if !src.is_dir() {
+        anyhow::bail!("theme: theme '{name}' not found");
+    }
+    if name == "auto" || name.starts_with("auto-") {
+        flex_core::diag::warn(&format!("Deleting auto-generated theme: {name}"));
+    }
+    std::fs::remove_dir_all(&src)
+        .with_context(|| format!("theme: cannot delete {}", src.display()))?;
+    println!("Deleted theme: {name}");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -8,13 +8,13 @@
 //! [`runner`]: flex_rice::runner
 //! [`exec::wallpaper`]: flex_rice::exec::wallpaper
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use flex_core::backend::EXIT_CANCELLED;
 use flex_core::Outcome;
 use flex_rice::exec::wallpaper;
 use flex_rice::runner::{self, GlobalStyle, Provider};
 
-/// Wallpaper picker: select a row and set it.
+/// Wallpaper picker: select a row and set it; or run the `set <path>` verb.
 #[derive(Debug, Parser)]
 #[command(name = "flex-wallpaper", version, about = "Wallpaper picker")]
 struct Cli {
@@ -26,6 +26,20 @@ struct Cli {
     /// probe of the real binary's row→action mapping with no pty.
     #[arg(long)]
     print_action: bool,
+
+    /// Non-interactive verb; without one the interactive picker runs.
+    #[command(subcommand)]
+    op: Option<Op>,
+}
+
+/// The ported `set-wallpaper.sh` entry point.
+#[derive(Debug, Subcommand)]
+enum Op {
+    /// Set the wallpaper to a file (the standalone `set-wallpaper.sh`).
+    Set {
+        /// Path to the image (resolved like bash `realpath`).
+        path: String,
+    },
 }
 
 fn main() {
@@ -35,7 +49,8 @@ fn main() {
     }
 }
 
-/// Parse args, guard the popup, then select+execute.
+/// Parse args: the `set` verb runs directly (no popup, no TUI); otherwise
+/// guard the popup and select+set.
 ///
 /// # Errors
 ///
@@ -44,6 +59,9 @@ fn main() {
 /// carries no `flex:` prefix; `main` adds it via the runner.
 fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    if let Some(Op::Set { path }) = cli.op {
+        return wallpaper::set(&path, None);
+    }
     let style = cli.style.options();
     runner::popup_guard(Provider::Wallpaper)?;
     if cli.print_action {

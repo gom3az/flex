@@ -62,6 +62,9 @@ enum Command {
         /// Print the selected `ACTION:` line without executing it.
         #[arg(long)]
         print_action: bool,
+        /// Optional CLI verb (`list`/`current`/`activate`/`delete`).
+        #[command(subcommand)]
+        op: Option<ThemeVerb>,
     },
     /// Clipboard history.
     Clip {
@@ -83,6 +86,9 @@ enum Command {
         /// Print the selected `ACTION:` line without executing it.
         #[arg(long)]
         print_action: bool,
+        /// Optional `set <path>` verb.
+        #[command(subcommand)]
+        op: Option<WallpaperVerb>,
     },
     /// Wi-Fi picker (connect/disconnect, radio on/off).
     Wifi {
@@ -132,6 +138,47 @@ fn verb_with_text(verb: &str, text: Option<&str>) -> Vec<String> {
     tail
 }
 
+/// Non-interactive `theme` verbs forwarded to `flex-theme` (mirrors the `Op`
+/// enum in `bin/flex-theme.rs`).
+#[derive(Debug, Subcommand)]
+enum ThemeVerb {
+    /// List available themes.
+    List,
+    /// Print the active theme and wallpaper.
+    Current,
+    /// Activate a theme by name.
+    Activate { name: String },
+    /// Delete an available theme by name.
+    Delete { name: String },
+}
+
+/// Re-exec tokens for a `theme` verb.
+fn theme_verb_tail(op: Option<&ThemeVerb>) -> Vec<String> {
+    match op {
+        None => Vec::new(),
+        Some(ThemeVerb::List) => vec![String::from("list")],
+        Some(ThemeVerb::Current) => vec![String::from("current")],
+        Some(ThemeVerb::Activate { name }) => verb_with_text("activate", Some(name)),
+        Some(ThemeVerb::Delete { name }) => verb_with_text("delete", Some(name)),
+    }
+}
+
+/// Non-interactive `wallpaper` verb forwarded to `flex-wallpaper` (mirrors
+/// the `Op` enum in `bin/flex-wallpaper.rs`).
+#[derive(Debug, Subcommand)]
+enum WallpaperVerb {
+    /// Set the wallpaper to a file.
+    Set { path: String },
+}
+
+/// Re-exec tokens for a `wallpaper` verb.
+fn wallpaper_verb_tail(op: Option<&WallpaperVerb>) -> Vec<String> {
+    match op {
+        None => Vec::new(),
+        Some(WallpaperVerb::Set { path }) => verb_with_text("set", Some(path)),
+    }
+}
+
 fn main() {
     // `flex: error:` is added once, in the runner, and nowhere else: errors
     // bubbling up must carry no `flex:` prefix of their own (B-022).
@@ -156,7 +203,12 @@ fn run() -> Result<()> {
         Command::Power { print_action } => reexec(Provider::Power, style, *print_action, &[]),
         Command::Launch { print_action } => reexec(Provider::Launch, style, *print_action, &[]),
         Command::Shot { print_action } => reexec(Provider::Shot, style, *print_action, &[]),
-        Command::Theme { print_action } => reexec(Provider::Theme, style, *print_action, &[]),
+        Command::Theme { print_action, op } => reexec(
+            Provider::Theme,
+            style,
+            *print_action,
+            &theme_verb_tail(op.as_ref()),
+        ),
         Command::Clip { print_action, op } => reexec(
             Provider::Clip,
             style,
@@ -164,9 +216,12 @@ fn run() -> Result<()> {
             &clip_verb_tail(op.as_ref()),
         ),
         Command::Center { print_action } => reexec(Provider::Center, style, *print_action, &[]),
-        Command::Wallpaper { print_action } => {
-            reexec(Provider::Wallpaper, style, *print_action, &[])
-        }
+        Command::Wallpaper { print_action, op } => reexec(
+            Provider::Wallpaper,
+            style,
+            *print_action,
+            &wallpaper_verb_tail(op.as_ref()),
+        ),
         Command::Wifi { print_action } => reexec(Provider::Wifi, style, *print_action, &[]),
         Command::Proc { print_action } => reexec(Provider::Proc, style, *print_action, &[]),
     }

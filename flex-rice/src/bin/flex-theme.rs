@@ -8,13 +8,14 @@
 //! [`runner`]: flex_rice::runner
 //! [`exec::theme`]: flex_rice::exec::theme
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use flex_core::backend::EXIT_CANCELLED;
 use flex_core::Outcome;
 use flex_rice::exec::theme;
 use flex_rice::runner::{self, GlobalStyle, Provider};
 
-/// Theme switcher: select a row and activate it.
+/// Theme switcher: select a row and activate it; or run one of the
+/// `list`/`current`/`activate`/`delete` verbs.
 #[derive(Debug, Parser)]
 #[command(name = "flex-theme", version, about = "Theme switcher")]
 struct Cli {
@@ -26,6 +27,29 @@ struct Cli {
     /// probe of the real binary's row→action mapping with no pty.
     #[arg(long)]
     print_action: bool,
+
+    /// Non-interactive verb; without one the interactive picker runs.
+    #[command(subcommand)]
+    op: Option<Op>,
+}
+
+/// The ported `theme-switcher.sh` entry points (`pick` is the default TUI).
+#[derive(Debug, Subcommand)]
+enum Op {
+    /// List available themes (name, wallpaper, generated).
+    List,
+    /// Print the active theme and wallpaper.
+    Current,
+    /// Activate a theme by name.
+    Activate {
+        /// Theme (directory) name.
+        name: String,
+    },
+    /// Delete an available theme by name.
+    Delete {
+        /// Theme (directory) name.
+        name: String,
+    },
 }
 
 fn main() {
@@ -35,15 +59,24 @@ fn main() {
     }
 }
 
-/// Parse args, guard the popup, then select+execute.
+/// Parse args: a CLI verb runs directly (no popup, no TUI); otherwise guard
+/// the popup and select+execute.
 ///
 /// # Errors
 ///
-/// Returns an error when the popup toggle or the select loop fails, the
-/// action id is unknown, or the theme switcher cannot run. The error
-/// carries no `flex:` prefix; `main` adds it via the runner.
+/// Returns an error when a verb fails, the popup toggle or the select loop
+/// fails, the action id is unknown, or the theme switcher cannot run. The
+/// error carries no `flex:` prefix; `main` adds it via the runner.
 fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    if let Some(op) = cli.op {
+        return match op {
+            Op::List => theme::list(),
+            Op::Current => theme::current(),
+            Op::Activate { name } => theme::activate(&name, None),
+            Op::Delete { name } => theme::delete(&name),
+        };
+    }
     let style = cli.style.options();
     runner::popup_guard(Provider::Theme)?;
     if cli.print_action {

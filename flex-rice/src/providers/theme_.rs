@@ -209,7 +209,7 @@ fn wallpaper_base(dir: &std::path::Path) -> String {
 /// unresolved (theme names/wallpapers never contain them, and the value
 /// is display-only). Returns `None` when the key or a well-formed
 /// value is absent.
-fn json_string_field(text: &str, key: &str) -> Option<String> {
+pub(crate) fn json_string_field(text: &str, key: &str) -> Option<String> {
     let quoted = format!("\"{key}\"");
     let mut rest = text;
     while let Some(at) = rest.find(&quoted) {

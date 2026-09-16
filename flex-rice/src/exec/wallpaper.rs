@@ -443,6 +443,25 @@ pub fn execute_with(path: &Path, setter: &Path, path_env: Option<&str>) -> Resul
     })
 }
 
+/// `set-wallpaper.sh <path>` as a verb: resolve the path (bash `realpath`),
+/// require a regular file, then run the native setter.
+///
+/// # Errors
+///
+/// When `path` is not a regular file (`wallpaper: not a file: <path>`) or
+/// [`set_wallpaper_native`] fails. Messages carry no `flex:` prefix; the
+/// runner reports them.
+pub fn set(path: &str, path_env: Option<&str>) -> Result<()> {
+    let given = Path::new(path);
+    if !given.is_file() {
+        anyhow::bail!("wallpaper: not a file: {path}");
+    }
+    let absolute = std::fs::canonicalize(given)
+        .with_context(|| format!("wallpaper: cannot resolve {path}"))?;
+    let path_env = path_env.map_or_else(ambient_path, str::to_string);
+    set_wallpaper_native(&absolute, &path_env)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
