@@ -374,7 +374,7 @@ pub fn execute_with(
         let mut lines = Vec::with_capacity(steps.len());
         for step in &steps {
             let line = format!("would run: {}", describe(step));
-            println!("{line}");
+            flex_core::diag::note(&line);
             lines.push(line);
         }
         return Ok(ExecuteReport {

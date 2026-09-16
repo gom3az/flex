@@ -996,8 +996,8 @@ fn install_center_home(tag: &str) -> PathBuf {
 }
 
 /// Full action matrix through one shared call log: launch (plain + the
-/// verbatim `kitty` branch), mute, bt connect/disconnect on fresh `info`
-/// state, wifi open connect, all five power arms, theme, and the quiet
+/// `$TERMINAL` branch), mute, bt connect/disconnect on fresh `info` state,
+/// wifi open connect, all five power arms, theme, and the quiet
 /// `bright`/`noop` rows. Byte-compared against the wrapper's shapes.
 #[test]
 fn executor_matrix_runs_every_action_through_stub_tools() {
@@ -1022,6 +1022,7 @@ fn executor_matrix_runs_every_action_through_stub_tools() {
     let home = install_center_home("matrix");
     let _guard = EnvGuard::set(&[
         ("HOME", home.to_str().expect("utf8")),
+        ("TERMINAL", "kitty"),
         ("NMCLI", dir.join("nmcli").to_str().expect("utf8")),
         (
             "BLUETOOTHCTL",
@@ -1042,14 +1043,12 @@ fn executor_matrix_runs_every_action_through_stub_tools() {
     // Launcher rows: the hash resolves in-process (no `flex --resolve`).
     let firefox_id = format!("launch:{}", launch::entry_id("firefox.desktop"));
     let term_id = format!("launch:{}", launch::entry_id("termapp.desktop"));
-    assert_eq!(
-        run(select, &firefox_id, "Firefox").detail.as_deref(),
-        Some("firefox.desktop")
-    );
-    assert_eq!(
-        run(select, &term_id, "Htop").detail.as_deref(),
-        Some("termapp.desktop")
-    );
+    for (id, label, desktop_id) in [
+        (&firefox_id, "Firefox", "firefox.desktop"),
+        (&term_id, "Htop", "termapp.desktop"),
+    ] {
+        assert_eq!(run(select, id, label).detail.as_deref(), Some(desktop_id));
+    }
     run(select, "vol", "Volume  55%  [bar]");
     std::fs::write(&info, "Device X\n\tConnected: yes\n").expect("info");
     run(select, "bt:AA:BB:CC:DD:EE:FF", "Headphones");
@@ -1092,8 +1091,7 @@ fn executor_matrix_runs_every_action_through_stub_tools() {
             "nmcli -t -f IN-USE,SSID,SIGNAL,SECURITY device wifi list ifname wlan0",
             "nmcli device wifi connect Coffee Shop ifname wlan0",
             "notify-send -a Control Center Connected Coffee Shop",
-            // `hyprlock` takes no args; `LOG_STUB` joins `name + space +
-            // args` unconditionally, so the zero-arg call keeps its space.
+            // `hyprlock` takes no args, so `LOG_STUB`'s space separator shows.
             "hyprlock ",
             "systemctl suspend",
             "systemctl reboot",
@@ -1103,6 +1101,91 @@ fn executor_matrix_runs_every_action_through_stub_tools() {
         ],
         "one tool sequence per action (describe: one line per step)",
     );
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// Child half of [`terminal_launch_follows_terminal_env_with_a_kitty_fallback`]:
+/// when `FLEX_TERMINAL_PROBE` names a case, run the matching launch so the
+/// parent can capture `detect()`'s warning on real stderr. Without the env
+/// var this is a no-op, so the normal suite runs it harmlessly.
+#[test]
+fn terminal_env_probe() {
+    let Ok(case) = std::env::var("FLEX_TERMINAL_PROBE") else {
+        return;
+    };
+    let desktop_id = match case.as_str() {
+        "terminal" => "termapp.desktop",
+        _ => "firefox.desktop",
+    };
+    let id = format!("launch:{}", launch::entry_id(desktop_id));
+    let path_env = std::env::var("PATH").unwrap_or_default();
+    exec_center::execute(exec_center::CenterOp::Select, &id, "probe", Some(&path_env))
+        .expect("probe launch succeeds");
+}
+
+/// The center launch branch reads `$TERMINAL` through the shared helper:
+/// an absolute path still resolves to kitty, an unknown value warns exactly
+/// once on stderr and falls back to kitty, and a `Terminal=false` launch
+/// never consults `$TERMINAL` at all. Each case runs in a child process so
+/// the warning on real stderr can be captured (the executor itself is
+/// in-process and its stderr is swallowed by the test harness).
+#[test]
+fn terminal_launch_follows_terminal_env_with_a_kitty_fallback() {
+    let _env = EXEC_ENV_LOCK.lock().expect("env lock");
+    let dir = stub_dir("exec-terminal-env");
+    log_stub(&dir, "setsid", LOG_STUB);
+    let home = install_center_home("terminal-env");
+    let log = dir.join("calls.log");
+    let path_env = exec_path_env(&dir);
+    let exe = std::env::current_exe().expect("test binary path");
+    let run_probe = |case: &str, terminal: &str| -> String {
+        let output = std::process::Command::new(&exe)
+            .args(["--exact", "terminal_env_probe", "--nocapture"])
+            .env("FLEX_TERMINAL_PROBE", case)
+            .env("TERMINAL", terminal)
+            .env("HOME", &home)
+            .env("PATH", &path_env)
+            .env("STUB_LOG", &log)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("run probe child");
+        assert!(
+            output.status.success(),
+            "probe {case}/{terminal} exits 0: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stderr).into_owned()
+    };
+    // (a) An absolute TERMINAL still resolves to the kitty basename.
+    let stderr = run_probe("terminal", "/usr/bin/kitty");
+    assert!(
+        !stderr.contains("unknown TERMINAL"),
+        "a known value must not warn: {stderr:?}"
+    );
+    assert_eq!(read_log(&dir).trim(), "setsid -f kitty -e htop");
+    // (b) An unknown value warns exactly once and still uses kitty.
+    let _ = std::fs::remove_file(&log);
+    let stderr = run_probe("terminal", "wezterm");
+    assert_eq!(
+        stderr.matches("flex: warning: unknown TERMINAL").count(),
+        1,
+        "exactly one warning: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("\"wezterm\""),
+        "the warning names the value: {stderr:?}"
+    );
+    assert_eq!(read_log(&dir).trim(), "setsid -f kitty -e htop");
+    // (c) A plain GUI launch never reads `$TERMINAL`: no warning even when
+    // the value is bogus.
+    let _ = std::fs::remove_file(&log);
+    let stderr = run_probe("plain", "wezterm");
+    assert!(
+        !stderr.contains("unknown TERMINAL"),
+        "Terminal=false must not consult $TERMINAL: {stderr:?}"
+    );
+    assert_eq!(read_log(&dir).trim(), "setsid -f firefox");
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&home);
 }

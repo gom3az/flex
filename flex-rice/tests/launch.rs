@@ -519,8 +519,9 @@ fn engine_errors_are_reported_with_a_single_prefix() {
 // The launch port of the `exec::shot` template: `LaunchAction::parse`
 // validates the id, `execute` resolves the hash in-process (no
 // `flex launch --resolve` subprocess) and detaches through the `setsid`
-// seam — `kitty -e` prefixed verbatim for `Terminal=true` apps (the
-// deferred behaviour change). No TUI, no pty: stub `PATH` + scratch `HOME`.
+// seam — `Terminal=true` apps run inside the terminal from `$TERMINAL`
+// (via the shared `terminal` helper, kitty fallback). No TUI, no pty:
+// stub `PATH` + scratch `HOME`.
 //
 // Like the theme suite, the popup guard itself lives in the shared runner
 // (covered by `popup.rs`), with one binary-level re-exec probe below.
@@ -543,6 +544,13 @@ fn set_exec_env(key: &'static str, value: &std::path::Path) -> ExecEnvGuard {
     ExecEnvGuard { key, old }
 }
 
+/// Save/restore one string-valued process env var (e.g. `TERMINAL`).
+fn set_exec_env_str(key: &'static str, value: &str) -> ExecEnvGuard {
+    let old = std::env::var(key).ok();
+    std::env::set_var(key, value);
+    ExecEnvGuard { key, old }
+}
+
 impl Drop for ExecEnvGuard {
     fn drop(&mut self) {
         match &self.old {
@@ -553,7 +561,7 @@ impl Drop for ExecEnvGuard {
 }
 
 /// Scratch `HOME` with an applications dir: a plain app, a `Terminal=true`
-/// app (the hardcoded kitty branch), and a space-bearing desktop-id whose
+/// app (the `$TERMINAL` branch), and a space-bearing desktop-id whose
 /// `Exec` carries field codes plus real flags (B-021 + strip in one row).
 fn install_launch_home(tag: &str) -> PathBuf {
     let home = scratch(&format!("exec-home-{tag}"));
@@ -602,9 +610,9 @@ fn read_setsid_log(dir: &std::path::Path) -> String {
     std::fs::read_to_string(dir.join("setsid.log")).unwrap_or_default()
 }
 
-/// Full action-id matrix: every installed app (plain, `Terminal=true`
-/// kitty, space-bearing id with field codes) launches through the `setsid`
-/// seam as one detached call.
+/// Full action-id matrix: every installed app (plain, `Terminal=true`,
+/// space-bearing id with field codes) launches through the `setsid` seam as
+/// one detached call.
 #[test]
 fn executor_matrix_launches_every_app_through_the_setsid_seam() {
     let _env = EXEC_ENV_LOCK.lock().expect("env lock");
@@ -613,6 +621,9 @@ fn executor_matrix_launches_every_app_through_the_setsid_seam() {
     install_setsid(&dir);
     let home = install_launch_home("matrix");
     let _home = set_exec_env("HOME", &home);
+    // The `Terminal=true` row follows `$TERMINAL`; pin it to kitty so the
+    // expected call log is deterministic.
+    let _terminal = set_exec_env_str("TERMINAL", "kitty");
     let path_env = exec_stub_path(&dir);
     for desktop_id in ["firefox.desktop", "termapp.desktop", "My App.desktop"] {
         let id = launch::entry_id(desktop_id);
@@ -628,9 +639,92 @@ fn executor_matrix_launches_every_app_through_the_setsid_seam() {
             "setsid -f kitty -e htop",
             "setsid -f myapp --open",
         ],
-        "one detached call per id: field codes stripped, kitty prefix verbatim \
-         (describe: `setsid -f [kitty -e ]<program> [args…]`)",
+        "one detached call per id: field codes stripped, terminal prefix from \
+         $TERMINAL (describe: `setsid -f [<terminal> -e ]<program> [args…]`)",
     );
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// Child half of [`terminal_branch_follows_terminal_env_with_a_kitty_fallback`]:
+/// when `FLEX_TERMINAL_PROBE` names a case, run the matching launch so the
+/// parent can capture `detect()`'s warning on real stderr. Without the env
+/// var this is a no-op, so the normal suite runs it harmlessly.
+#[test]
+fn terminal_env_probe() {
+    let Ok(case) = std::env::var("FLEX_TERMINAL_PROBE") else {
+        return;
+    };
+    let desktop_id = match case.as_str() {
+        "terminal" => "termapp.desktop",
+        _ => "firefox.desktop",
+    };
+    let path_env = std::env::var("PATH").unwrap_or_default();
+    let id = launch::entry_id(desktop_id);
+    flex_rice::exec::launch::execute(&id, Some(&path_env)).expect("probe launch succeeds");
+}
+
+/// The `Terminal=true` branch reads `$TERMINAL` through the shared helper:
+/// an absolute path still resolves to kitty, an unknown value warns exactly
+/// once on stderr and falls back to kitty, and a `Terminal=false` launch
+/// never consults `$TERMINAL` at all. Each case runs in a child process so
+/// the warning on real stderr can be captured (the executor itself is
+/// in-process and its stderr is swallowed by the test harness).
+#[test]
+fn terminal_branch_follows_terminal_env_with_a_kitty_fallback() {
+    let _env = EXEC_ENV_LOCK.lock().expect("env lock");
+    let dir = scratch("exec-terminal-env");
+    std::fs::create_dir_all(&dir).expect("stub dir");
+    install_setsid(&dir);
+    let home = install_launch_home("terminal-env");
+    let path_env = exec_stub_path(&dir);
+    let exe = std::env::current_exe().expect("test binary path");
+    let run_probe = |case: &str, terminal: &str| -> String {
+        let output = std::process::Command::new(&exe)
+            .args(["--exact", "terminal_env_probe", "--nocapture"])
+            .env("FLEX_TERMINAL_PROBE", case)
+            .env("TERMINAL", terminal)
+            .env("HOME", &home)
+            .env("PATH", &path_env)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("run probe child");
+        assert!(
+            output.status.success(),
+            "probe {case}/{terminal} exits 0: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stderr).into_owned()
+    };
+    // (a) An absolute TERMINAL still resolves to the kitty basename.
+    let stderr = run_probe("terminal", "/usr/bin/kitty");
+    assert!(
+        !stderr.contains("unknown TERMINAL"),
+        "a known value must not warn: {stderr:?}"
+    );
+    assert_eq!(read_setsid_log(&dir).trim(), "setsid -f kitty -e htop");
+    // (b) An unknown value warns exactly once and still uses kitty.
+    let _ = std::fs::remove_file(dir.join("setsid.log"));
+    let stderr = run_probe("terminal", "wezterm");
+    assert_eq!(
+        stderr.matches("flex: warning: unknown TERMINAL").count(),
+        1,
+        "exactly one warning: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("\"wezterm\""),
+        "the warning names the value: {stderr:?}"
+    );
+    assert_eq!(read_setsid_log(&dir).trim(), "setsid -f kitty -e htop");
+    // (c) A plain GUI launch never reads `$TERMINAL`: no warning even when
+    // the value is bogus.
+    let _ = std::fs::remove_file(dir.join("setsid.log"));
+    let stderr = run_probe("plain", "wezterm");
+    assert!(
+        !stderr.contains("unknown TERMINAL"),
+        "Terminal=false must not consult $TERMINAL: {stderr:?}"
+    );
+    assert_eq!(read_setsid_log(&dir).trim(), "setsid -f firefox");
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&home);
 }

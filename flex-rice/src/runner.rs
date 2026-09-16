@@ -293,7 +293,7 @@ pub fn build_menu(provider: Provider, style: StyleOptions) -> Result<Menu> {
         Provider::Clip => {
             let tab = clip::clip_tab();
             if tab.rows.is_empty() {
-                eprintln!("flex: clip: no history yet");
+                flex_core::diag::warn("flex: clip: no history yet");
                 std::process::exit(EXIT_CANCELLED);
             }
             Ok(style.apply(menu(clip::PROVIDER, vec![tab])))
@@ -302,7 +302,7 @@ pub fn build_menu(provider: Provider, style: StyleOptions) -> Result<Menu> {
         Provider::Wallpaper => {
             let tab = wallpaper::wallpaper_tab();
             if tab.rows.is_empty() {
-                eprintln!("flex: wallpaper: no wallpapers found");
+                flex_core::diag::warn("flex: wallpaper: no wallpapers found");
                 std::process::exit(EXIT_CANCELLED);
             }
             let mut built = style.apply(menu(wallpaper::PROVIDER, vec![tab]));
@@ -448,7 +448,7 @@ pub fn canonical_tail(style: StyleOptions, print_action: bool) -> Vec<String> {
 /// (B-022/B-027) — otherwise the line would read
 /// `flex: error: flex: …`. Exit code is [`EXIT_ERROR`].
 pub fn fail(err: &anyhow::Error) -> ! {
-    eprintln!("flex: error: {err:#}");
+    flex_core::diag::warn(&format!("flex: error: {err:#}"));
     std::process::exit(EXIT_ERROR);
 }
 

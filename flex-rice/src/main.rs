@@ -184,7 +184,7 @@ fn resolve_lookup(command: &Command) -> Result<Option<()>> {
     let Some(value) = resolved else {
         anyhow::bail!("{provider}: unknown id '{id}'");
     };
-    println!("{value}");
+    flex_core::diag::note(&value);
     Ok(Some(()))
 }
 

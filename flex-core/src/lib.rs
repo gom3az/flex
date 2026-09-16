@@ -8,6 +8,7 @@
 
 pub mod backend;
 pub mod charset;
+pub mod diag;
 pub mod filter;
 pub mod keys;
 pub mod meter;

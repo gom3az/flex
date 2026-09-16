@@ -9,7 +9,8 @@
 //!   (the same [`resolve_id`](crate::providers::launch::resolve_id) the
 //!   hidden `--resolve` lookup uses), re-resolve to `(Exec, Terminal)` via
 //!   [`find_exec`](crate::providers::launch::find_exec), strip field codes,
-//!   detach with `setsid -f` (`kitty -e` prefixed for `Terminal=true` apps);
+//!   detach with `setsid -f` (`<terminal> -e` prefixed for `Terminal=true`
+//!   apps, following `$TERMINAL`);
 //! - `select wifi` → fresh `nmcli` state (interface discovery, wifi-list
 //!   scan matched on the unescaped SSID label): connected → disconnect +
 //!   notify, open/unknown → connect (+ notify on success), secure → password
@@ -39,7 +40,7 @@
 //! - `nmcli device wifi connect <ssid> password <password> ifname <iface>`
 //!   (the password renders verbatim, like clip's entry preview)
 //! - `notify-send -a Control Center <Connected|Disconnected|Failed> <ssid>`
-//! - `setsid -f [kitty -e ]<program> [args…]`
+//! - `setsid -f [<terminal> -e ]<program> [args…]`
 //! - `hyprlock`, `systemctl suspend|reboot|poweroff`, `pkill -SIGTERM Hyprland`
 //! - `<switcher> activate <name>`
 //!
@@ -72,11 +73,13 @@
 //!   failure exits `1` with the single `flex: error:` prefix. The quiet arms
 //!   (`|| true` in the wrapper: mute, bt-toggle, every wifi path) stay quiet
 //!   and return `Ok` even when a tool is missing or fails.
-//! - The `Terminal=true` branch keeps the hardcoded `kitty` spawn verbatim
-//!   (`setsid -f kitty -e …`, exactly like the wrapper's `flex-center.sh:87`).
-//!   Routing terminal apps through the shared `terminal` helper (following
-//!   `$TERMINAL`) is a deliberately deferred behaviour change, not smuggled
-//!   into this port (same note as the launch port).
+//! - The `Terminal=true` branch follows `$TERMINAL` through the shared
+//!   [`terminal`](crate::terminal) helper ([`terminal::exec_argv`]) instead
+//!   of the wrapper's hardcoded `kitty -e` (`flex-center.sh:87`), so
+//!   terminal apps are hosted by the user's configured terminal. An unknown
+//!   or empty `$TERMINAL` warns once on stderr and falls back to kitty. The
+//!   variable is read only for `Terminal=true` entries, so a plain GUI
+//!   launch never touches it (same behaviour as the launch port).
 //! - The secure-wifi prompt uses `stty -echo`/`stty echo` subprocesses around
 //!   a `/dev/tty` read (the wrapper's `read -rs` builtin disables echo
 //!   internally; `unsafe_code = "deny"` forbids `termios`, so the subprocess
@@ -91,13 +94,14 @@
 //! the `/dev/tty` prompt), `HOME` (desktop dirs + switcher default).
 
 use std::fs::File;
-use std::io::{BufRead as _, BufReader, Write as _};
+use std::io::{BufRead as _, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context as _, Result};
 
 use crate::providers::{center, launch};
+use crate::terminal::{self, TerminalKind};
 
 /// Which menu outcome is being executed: the wrapper has live `select` and
 /// `toggle` arms (toggle only acts on `vol`/`bt:*`, everything else no-ops).
@@ -283,11 +287,12 @@ pub enum Step {
         /// Which outcome runs it (see [`NotifyWhen`]).
         when: NotifyWhen,
     },
-    /// `setsid -f [kitty -e ]<program> [args…]` (loud; the `kitty -e`
-    /// prefix is verbatim for `Terminal=true` entries — deferred change).
+    /// `setsid -f [<terminal> -e ]<program> [args…]` (loud; the terminal
+    /// prefix comes from [`terminal::exec_argv`] for `Terminal=true`).
     Launch {
-        /// Whether the desktop entry sets `Terminal=true`.
-        terminal: bool,
+        /// Terminal decision: `None` spawns directly, `Some` runs the
+        /// program inside that terminal.
+        terminal: Option<TerminalKind>,
         /// Launched program (first token of the stripped `Exec` line).
         program: String,
         /// Remaining tokens of the stripped `Exec` line.
@@ -366,8 +371,8 @@ pub enum PlannedAction {
     Launch {
         /// Resolved desktop-id (report detail + failure messages).
         desktop_id: String,
-        /// Whether the entry sets `Terminal=true` (verbatim `kitty -e`).
-        terminal: bool,
+        /// Terminal decision (`Some` for a `Terminal=true` entry).
+        terminal: Option<TerminalKind>,
         /// Launched program.
         program: String,
         /// Remaining `Exec` tokens.
@@ -469,6 +474,19 @@ pub fn plan(planned: &PlannedAction) -> Vec<Step> {
     }
 }
 
+/// The full command run inside the `setsid` spawn for one [`Step::Launch`]:
+/// the terminal argv from [`terminal::exec_argv`] wrapping `program`/`args`
+/// when a terminal was selected, else the bare program argv.
+fn launch_argv(terminal: Option<TerminalKind>, program: &str, args: &[String]) -> Vec<String> {
+    let mut program_argv = Vec::with_capacity(1 + args.len());
+    program_argv.push(program.to_string());
+    program_argv.extend(args.iter().cloned());
+    match terminal {
+        Some(kind) => terminal::exec_argv(kind, &program_argv),
+        None => program_argv,
+    }
+}
+
 /// Render one [`Step`] as a single snapshot line: `argv` joined by spaces.
 ///
 /// This is the template snapshot convention: unit tests pin these lines per
@@ -499,12 +517,7 @@ pub fn describe(step: &Step) -> String {
             args,
         } => {
             let mut parts = vec![String::from("setsid"), String::from("-f")];
-            if *terminal {
-                parts.push(String::from("kitty"));
-                parts.push(String::from("-e"));
-            }
-            parts.push(program.clone());
-            parts.extend(args.iter().cloned());
+            parts.extend(launch_argv(*terminal, program, args));
             parts.join(" ")
         }
         Step::Power { kind } => match kind {
@@ -699,16 +712,15 @@ pub fn read_password(ssid: &str, path_env: &str) -> String {
         }
     }
     let Ok(tty) = File::open("/dev/tty") else {
-        eprintln!();
+        flex_core::diag::warn("");
         return String::new();
     };
-    eprint!("Password for {ssid}: ");
-    let _ = std::io::stderr().flush();
+    flex_core::diag::warn_inline(&format!("Password for {ssid}: "));
     set_echo(path_env, false);
     let mut line = String::new();
     let read = BufReader::new(tty).read_line(&mut line);
     set_echo(path_env, true);
-    eprintln!();
+    flex_core::diag::warn("");
     if read.is_err() {
         return String::new();
     }
@@ -843,6 +855,13 @@ fn decide_launch(hash: &str) -> Result<PlannedAction> {
     let mut tokens = stripped.split_whitespace().map(str::to_string);
     let Some(program) = tokens.next() else {
         anyhow::bail!("center: empty Exec in {desk_id}");
+    };
+    // Read `$TERMINAL` only for `Terminal=true` entries: a plain GUI launch
+    // must never consult it (and so never warns about a bogus value).
+    let terminal = if terminal {
+        Some(terminal::detect())
+    } else {
+        None
     };
     Ok(PlannedAction::Launch {
         desktop_id: desk_id,
@@ -1047,7 +1066,7 @@ fn run_step(
             program,
             args,
         } => {
-            run_launch_step(path_env, planned, action_id, terminal, program, args)?;
+            run_launch_step(path_env, planned, action_id, terminal, &program, &args)?;
         }
         Step::Power { kind } => {
             let (name, args) = power_argv(kind);
@@ -1065,7 +1084,7 @@ fn run_step(
     Ok(())
 }
 
-/// Run one [`Step::Launch`]: `setsid -f [kitty -e ]…` detached.
+/// Run one [`Step::Launch`]: `setsid -f [<terminal> -e ]…` detached.
 ///
 /// # Errors
 ///
@@ -1075,17 +1094,12 @@ fn run_launch_step(
     path_env: &str,
     planned: &PlannedAction,
     action_id: &str,
-    terminal: bool,
-    program: String,
-    args: Vec<String>,
+    terminal: Option<TerminalKind>,
+    program: &str,
+    args: &[String],
 ) -> Result<()> {
     let mut cmd = vec![String::from("-f")];
-    if terminal {
-        cmd.push(String::from("kitty"));
-        cmd.push(String::from("-e"));
-    }
-    cmd.push(program);
-    cmd.extend(args);
+    cmd.extend(launch_argv(terminal, program, args));
     if run_detached(path_env, &cmd)? {
         return Ok(());
     }
@@ -1126,8 +1140,8 @@ fn power_argv(kind: PowerKind) -> (&'static str, Vec<String>) {
 
 /// Run `setsid -f …` detached: stdio nulled, like the wrapper's
 /// `</dev/null >/dev/null 2>&1` redirections (same helper shape as the
-/// launch port; the launched program and `kitty` stay arguments, exactly
-/// like the wrapper's `eval 'setsid -f [kitty -e ]…'` line).
+/// launch port; the terminal prefix and the launched program stay arguments,
+/// exactly like the wrapper's `eval 'setsid -f [<terminal> -e ]…'` line).
 ///
 /// # Errors
 ///
@@ -1279,13 +1293,11 @@ mod tests {
     }
 
     #[test]
-    fn plan_snapshot_launch_keeps_the_kitty_prefix_verbatim() {
-        // Deferred behaviour change: `Terminal=true` keeps
-        // `setsid -f kitty -e …` instead of following `$TERMINAL`.
+    fn plan_snapshot_launch_uses_the_terminal_decision() {
         assert_eq!(
             describe_plan(&plan(&PlannedAction::Launch {
                 desktop_id: String::from("firefox.desktop"),
-                terminal: false,
+                terminal: None,
                 program: String::from("firefox"),
                 args: Vec::new(),
             })),
@@ -1294,7 +1306,7 @@ mod tests {
         assert_eq!(
             describe_plan(&plan(&PlannedAction::Launch {
                 desktop_id: String::from("termapp.desktop"),
-                terminal: true,
+                terminal: Some(TerminalKind::Kitty),
                 program: String::from("htop"),
                 args: Vec::new(),
             })),

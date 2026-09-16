@@ -70,7 +70,10 @@ pub fn app_dirs() -> Vec<PathBuf> {
 #[must_use]
 pub fn scan_dirs(dirs: &[PathBuf]) -> Vec<DesktopEntry> {
     scan(dirs, &|path| {
-        eprintln!("flex: launch: skipping malformed entry {}", path.display());
+        flex_core::diag::warn(&format!(
+            "flex: launch: skipping malformed entry {}",
+            path.display()
+        ));
     })
 }
 

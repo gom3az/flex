@@ -77,7 +77,9 @@ pub fn detect() -> TerminalKind {
         kind
     } else {
         let shown: &str = raw.lines().next().unwrap_or_default();
-        eprintln!("flex: warning: unknown TERMINAL {shown:?}, falling back to kitty");
+        flex_core::diag::warn(&format!(
+            "flex: warning: unknown TERMINAL {shown:?}, falling back to kitty"
+        ));
         TerminalKind::Kitty
     }
 }
@@ -102,6 +104,28 @@ pub fn spawn_argv(kind: TerminalKind, class: &str, cmd: &[String]) -> Vec<String
             argv.push("-e".to_string());
             argv.push("env".to_string());
             argv.push("POPUP_KITTY=1".to_string());
+            argv.extend(cmd.iter().cloned());
+            argv
+        }
+    }
+}
+
+/// Build the argv that runs a user command inside a terminal of `kind`.
+///
+/// For [`TerminalKind::Kitty`] this is `kitty -e <cmd…>`. This is the
+/// "run this app in a terminal" form used for `Terminal=true` desktop
+/// entries ([`crate::exec::launch`], [`crate::exec::center`]) — **not** a
+/// popup. Unlike [`spawn_argv`] it carries no `--class`, no
+/// `-o font_size=10` override and no `POPUP_KITTY=1` marker: the launched
+/// application must not be mistaken for a flex popup by
+/// [`in_popup`](crate::popup::in_popup).
+#[must_use]
+pub fn exec_argv(kind: TerminalKind, cmd: &[String]) -> Vec<String> {
+    match kind {
+        TerminalKind::Kitty => {
+            let mut argv = Vec::with_capacity(2 + cmd.len());
+            argv.push("kitty".to_string());
+            argv.push("-e".to_string());
             argv.extend(cmd.iter().cloned());
             argv
         }
@@ -140,6 +164,28 @@ mod tests {
                 "power",
             ]),
         );
+    }
+
+    #[test]
+    fn kitty_exec_argv_is_the_bare_run_a_command_form() {
+        assert_eq!(
+            exec_argv(TerminalKind::Kitty, &cmd(&["htop"])),
+            cmd(&["kitty", "-e", "htop"]),
+        );
+        assert_eq!(
+            exec_argv(TerminalKind::Kitty, &cmd(&["myapp", "--open", "file"])),
+            cmd(&["kitty", "-e", "myapp", "--open", "file"]),
+        );
+    }
+
+    #[test]
+    fn exec_argv_has_no_popup_class_font_or_marker() {
+        // A launched app must not inherit the popup template: no `--class`,
+        // no `-o font_size=10`, no `POPUP_KITTY=1`.
+        let argv = exec_argv(TerminalKind::Kitty, &cmd(&["htop"]));
+        assert!(!argv.iter().any(|arg| arg == "--class"));
+        assert!(!argv.iter().any(|arg| arg == "font_size=10"));
+        assert!(!argv.iter().any(|arg| arg == "POPUP_KITTY=1"));
     }
 
     #[test]

@@ -10,16 +10,17 @@
 //! [`find_exec`](crate::providers::launch::find_exec) parse the provider
 //! scan uses: first `Exec` wins, last `Terminal` wins), strips `.desktop`
 //! field codes (`%U`/`%F`/…, like the wrapper's `sed`), and detaches with
-//! `setsid -f` — `kitty -e` prefixed for `Terminal=true` apps.
+//! `setsid -f` — `<terminal> -e` prefixed for `Terminal=true` apps.
 //!
 //! Snapshot convention (the [`exec::shot`](super::shot) template): [`plan`]
 //! builds the [`Step`]s from resolved inputs, [`describe`] renders one step
 //! as a single line — `setsid -f <program> [args…]` for plain apps,
-//! `setsid -f kitty -e <program> [args…]` for `Terminal=true` apps — unit
-//! tests pin the lines, and integration tests diff the stub-`PATH` call logs
-//! against the same shapes.
+//! `setsid -f kitty -e <program> [args…]` for `Terminal=true` apps (the
+//! prefix comes from [`terminal::exec_argv`]) — unit tests pin the lines,
+//! and integration tests diff the stub-`PATH` call logs against the same
+//! shapes.
 //!
-//! Three deliberate departures from the wrapper (all tested):
+//! Four deliberate departures from the wrapper (all tested):
 //!
 //! - No `flex launch --resolve` subprocess: the hash is resolved in-process
 //!   with the same [`resolve_id`](crate::providers::launch::resolve_id)
@@ -35,11 +36,13 @@
 //!   the shared runner, so any tool failure exits `1` with the single
 //!   `flex: error:` prefix. There is no quiet-cancel step (unlike `shot`'s
 //!   `slurp`): a failing launch is always a loud error.
-//! - The `Terminal=true` branch keeps the hardcoded `kitty` spawn verbatim
-//!   (`setsid -f kitty -e …`, exactly like the wrapper's
-//!   `flex-launch.sh:58`). Routing terminal apps through the shared
-//!   `terminal` helper (following `$TERMINAL`) is a deliberately deferred
-//!   behaviour change, not smuggled into this port.
+//! - The `Terminal=true` branch follows `$TERMINAL` through the shared
+//!   [`terminal`](crate::terminal) helper ([`terminal::exec_argv`]) instead
+//!   of the wrapper's hardcoded `kitty -e` (`flex-launch.sh:58`), so
+//!   terminal apps are hosted by the user's configured terminal. An unknown
+//!   or empty `$TERMINAL` warns once on stderr and falls back to kitty. The
+//!   variable is read only for `Terminal=true` entries, so a plain GUI
+//!   launch never touches it.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -47,6 +50,7 @@ use std::process::{Command, Stdio};
 use anyhow::{Context as _, Result};
 
 use crate::providers::launch;
+use crate::terminal::{self, TerminalKind};
 
 /// A validated launch action id.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,12 +82,12 @@ impl LaunchAction {
 /// One launch step: a detached spawn (pure data, no process started).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Step {
-    /// `setsid -f [kitty -e ]<program> [args…]` (the wrapper's `eval` line,
-    /// with the `kitty -e` prefix exactly when `terminal` is set).
+    /// `setsid -f [<terminal> -e ]<program> [args…]` (the wrapper's `eval`
+    /// line, with the terminal prefix exactly when `terminal` is `Some`).
     Launch {
-        /// Whether the desktop entry sets `Terminal=true` (the hardcoded
-        /// `kitty -e` prefix, kept verbatim per the deferred-change note).
-        terminal: bool,
+        /// Terminal decision: `None` spawns the program directly, `Some`
+        /// runs it inside that terminal (the desktop entry's `Terminal=true`).
+        terminal: Option<TerminalKind>,
         /// Launched program (first whitespace-separated token of the
         /// field-code-stripped `Exec` line).
         program: String,
@@ -94,15 +98,29 @@ pub enum Step {
 
 /// Build the launch [`Step`]s for `program` + `args` (no process started).
 ///
-/// `terminal` selects the hardcoded `kitty -e` prefix; `program`/`args` are
-/// the whitespace-split tokens of the already-stripped `Exec` line.
+/// `terminal` carries the terminal decision (`None` = spawn directly,
+/// `Some` = run inside that terminal); `program`/`args` are the
+/// whitespace-split tokens of the already-stripped `Exec` line.
 #[must_use]
-pub fn plan(program: &str, args: &[String], terminal: bool) -> Vec<Step> {
+pub fn plan(program: &str, args: &[String], terminal: Option<TerminalKind>) -> Vec<Step> {
     vec![Step::Launch {
         terminal,
         program: program.to_string(),
         args: args.to_vec(),
     }]
+}
+
+/// The full command run inside the `setsid` spawn for one [`Step::Launch`]:
+/// the terminal argv from [`terminal::exec_argv`] wrapping `program`/`args`
+/// when a terminal was selected, else the bare program argv.
+fn launch_argv(terminal: Option<TerminalKind>, program: &str, args: &[String]) -> Vec<String> {
+    let mut program_argv = Vec::with_capacity(1 + args.len());
+    program_argv.push(program.to_string());
+    program_argv.extend(args.iter().cloned());
+    match terminal {
+        Some(kind) => terminal::exec_argv(kind, &program_argv),
+        None => program_argv,
+    }
 }
 
 /// Render one [`Step`] as a single snapshot line: `argv` joined by spaces.
@@ -119,12 +137,7 @@ pub fn describe(step: &Step) -> String {
             args,
         } => {
             let mut parts = vec![String::from("setsid"), String::from("-f")];
-            if *terminal {
-                parts.push(String::from("kitty"));
-                parts.push(String::from("-e"));
-            }
-            parts.push(program.clone());
-            parts.extend(args.iter().cloned());
+            parts.extend(launch_argv(*terminal, program, args));
             parts.join(" ")
         }
     }
@@ -146,9 +159,9 @@ fn ambient_path() -> String {
 ///
 /// Returns the first entry naming an existing file, so stub-`PATH` tests can
 /// shadow the real tools without touching the process env. `setsid` is
-/// always resolved this way; `kitty` (terminal branch) and the launched
-/// program stay arguments of the `setsid` spawn, exactly like the wrapper's
-/// `eval 'setsid -f [kitty -e ]…'` line.
+/// always resolved this way; the terminal prefix and the launched program
+/// stay arguments of the `setsid` spawn, exactly like the wrapper's
+/// `eval 'setsid -f [<terminal> -e ]…'` line.
 fn resolve_tool(name: &str, path_env: &str) -> Option<PathBuf> {
     path_env
         .split(':')
@@ -186,7 +199,7 @@ pub struct ExecuteReport {
     pub desktop_id: Option<String>,
     /// Launched program (`None` for `noop`).
     pub program: Option<String>,
-    /// Whether the `kitty -e` terminal prefix was used.
+    /// Whether a terminal prefix was used (`Terminal=true`).
     pub terminal: bool,
 }
 
@@ -235,6 +248,13 @@ pub fn execute(action_id: &str, path_env: Option<&str>) -> Result<ExecuteReport>
         anyhow::bail!("launch: empty Exec in {desk_id}");
     };
     let args: Vec<String> = tokens.collect();
+    // Read `$TERMINAL` only for `Terminal=true` entries: a plain GUI launch
+    // must never consult it (and so never warns about a bogus value).
+    let terminal = if terminal {
+        Some(terminal::detect())
+    } else {
+        None
+    };
     execute_with(&desk_id, &program, &args, terminal, path_env)
 }
 
@@ -259,7 +279,7 @@ pub fn execute_with(
     desk_id: &str,
     program: &str,
     args: &[String],
-    terminal: bool,
+    terminal: Option<TerminalKind>,
     path_env: Option<&str>,
 ) -> Result<ExecuteReport> {
     let path_env = path_env.map_or_else(ambient_path, str::to_string);
@@ -270,12 +290,7 @@ pub fn execute_with(
             args,
         } = step;
         let mut cmd = vec![String::from("-f")];
-        if terminal {
-            cmd.push(String::from("kitty"));
-            cmd.push(String::from("-e"));
-        }
-        cmd.push(program.clone());
-        cmd.extend(args.iter().cloned());
+        cmd.extend(launch_argv(terminal, &program, &args));
         if !tool(&path_env, &cmd)? {
             anyhow::bail!("launch: failed to launch {desk_id}");
         }
@@ -283,7 +298,7 @@ pub fn execute_with(
     Ok(ExecuteReport {
         desktop_id: Some(desk_id.to_string()),
         program: Some(program.to_string()),
-        terminal,
+        terminal: terminal.is_some(),
     })
 }
 
@@ -310,24 +325,22 @@ mod tests {
     #[test]
     fn plan_snapshot_is_the_setsid_detach_line() {
         assert_eq!(
-            describe_plan(&plan("myapp", &[String::from("--open")], false)),
+            describe_plan(&plan("myapp", &[String::from("--open")], None)),
             vec!["setsid -f myapp --open"],
         );
     }
 
     #[test]
-    fn terminal_plan_keeps_the_hardcoded_kitty_prefix_verbatim() {
-        // Deferred behaviour change (plan): terminal apps keep
-        // `setsid -f kitty -e …` instead of following `$TERMINAL`.
+    fn terminal_plan_runs_inside_the_selected_terminal() {
         assert_eq!(
-            describe_plan(&plan("htop", &[], true)),
+            describe_plan(&plan("htop", &[], Some(TerminalKind::Kitty))),
             vec!["setsid -f kitty -e htop"],
         );
         assert_eq!(
             describe_plan(&plan(
                 "myapp",
                 &[String::from("--open"), String::from("file")],
-                true
+                Some(TerminalKind::Kitty)
             )),
             vec!["setsid -f kitty -e myapp --open file"],
         );
@@ -336,7 +349,7 @@ mod tests {
     #[test]
     fn plan_keeps_stripped_exec_tokens_whole() {
         let args = vec![String::from("--open")];
-        let steps = plan("myapp", &args, false);
+        let steps = plan("myapp", &args, None);
         assert_eq!(steps.len(), 1);
         assert_eq!(describe(&steps[0]), "setsid -f myapp --open");
     }

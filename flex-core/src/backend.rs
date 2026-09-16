@@ -74,7 +74,7 @@ pub fn restore() {
 /// Print exactly one `ACTION:` line to stdout.
 ///
 /// Format: `ACTION: <provider> <action_id> <escaped-label>`. Diagnostics must
-/// never go through this function — use `eprintln!` instead.
+/// never go through this function — use [`crate::diag::warn`] instead.
 ///
 /// # Errors
 ///
