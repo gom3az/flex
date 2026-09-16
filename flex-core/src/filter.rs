@@ -153,10 +153,7 @@ pub fn score(needle: &str, haystack: &str) -> Option<(u16, Vec<u32>)> {
                 break;
             }
         }
-        match found {
-            Some(index) => positions.push(u32::try_from(index).unwrap_or(u32::MAX)),
-            None => return None,
-        }
+        positions.push(u32::try_from(found?).unwrap_or(u32::MAX));
     }
     let tier = if longest_run(&positions) >= MIN_RUN {
         TIER_RUN
