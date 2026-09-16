@@ -26,3 +26,5 @@ jobs:
         run: cargo test --locked
       - name: Release build (workspace profile)
         run: cargo build --locked --release
+      - name: Install + verify the nine links (setup.sh)
+        run: ./setup.sh && ./setup.sh --check
