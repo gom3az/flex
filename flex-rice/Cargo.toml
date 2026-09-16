@@ -54,6 +54,14 @@ path = "src/bin/flex-proc.rs"
 name = "flex-record"
 path = "src/bin/flex-record.rs"
 
+[[bin]]
+name = "flex-mixer"
+path = "src/bin/flex-mixer.rs"
+
+[[bin]]
+name = "flex-net"
+path = "src/bin/flex-net.rs"
+
 [dependencies]
 # The engine, built from the sibling `flex-core` member (see the workspace root).
 flex-core.workspace = true
