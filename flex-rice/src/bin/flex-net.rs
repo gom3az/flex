@@ -1,7 +1,8 @@
 //! `flex-net` binary: network throughput monitor & process bandwidth manager.
 //!
-//! Provides both headless Waybar reporting (default, `--stream`) and an interactive
-//! Wiremix TUI (`flex-net -m` or `flex net`) showing Top Bandwidth Consumers and Network Interfaces.
+//! Provides both headless Waybar reporting (default, `--stream`), an interactive
+//! Wiremix TUI (`flex-net -m` or `flex net`) showing Top Bandwidth Consumers, Network Interfaces,
+//! and Speedtest Benchmark, and a fast terminal benchmark (`flex-net -B` / `flex-net --speedtest`).
 
 use std::time::Duration;
 
@@ -9,10 +10,12 @@ use clap::Parser;
 use flex_core::backend::EXIT_CANCELLED;
 use flex_core::Outcome;
 use flex_rice::exec::net::{self, format_speed, scan_top_talkers};
+use flex_rice::exec::speedtest;
 use flex_rice::runner::{self, GlobalStyle, Provider};
 
 /// Network throughput monitor and bandwidth manager.
 #[derive(Debug, Parser)]
+#[allow(clippy::struct_excessive_bools)]
 #[command(
     name = "flex-net",
     version,
@@ -31,6 +34,10 @@ struct Cli {
     #[arg(short = 'T', long)]
     top: bool,
 
+    /// Run speedtest benchmark and print summary to stdout.
+    #[arg(short = 'B', long)]
+    speedtest: bool,
+
     /// Run continuously, streaming JSON lines at the specified interval in seconds.
     #[arg(short = 'S', long, value_name = "SECS")]
     stream: Option<u64>,
@@ -48,6 +55,10 @@ fn main() {
 
 fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
+
+    if cli.speedtest {
+        return speedtest::run_cli_benchmark();
+    }
 
     if cli.top {
         let talkers = scan_top_talkers();

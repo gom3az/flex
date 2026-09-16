@@ -7,6 +7,7 @@
 //! dispatch coverage to become Rust tests. Each module documents its
 //! deliberate departures from the wrapper it ported.
 
+pub mod bt;
 pub mod center;
 pub mod clip;
 pub mod launch;
@@ -16,6 +17,7 @@ pub mod power;
 pub mod proc;
 pub mod record;
 pub mod shot;
+pub mod speedtest;
 pub mod theme;
 pub mod wallpaper;
 pub mod wifi;

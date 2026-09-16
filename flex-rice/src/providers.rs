@@ -7,6 +7,7 @@
 #[path = "providers/theme_.rs"]
 pub mod theme_;
 
+pub mod bt;
 pub mod center;
 pub mod clip;
 pub mod launch;
@@ -54,6 +55,9 @@ pub fn tick_hook(menu: &mut Menu) {
     }
     if menu.provider == net::PROVIDER {
         net::refresh(menu);
+    }
+    if menu.provider == bt::PROVIDER {
+        bt::refresh(menu);
     }
 }
 

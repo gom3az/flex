@@ -50,6 +50,7 @@ fn every_binary_answers_help_with_exit_0() {
         env!("CARGO_BIN_EXE_flex-record"),
         env!("CARGO_BIN_EXE_flex-mixer"),
         env!("CARGO_BIN_EXE_flex-net"),
+        env!("CARGO_BIN_EXE_flex-bt"),
     ];
     for bin in bins {
         let output = std::process::Command::new(bin)
@@ -104,6 +105,7 @@ fn provider_binaries_answer_version_with_exit_0() {
         env!("CARGO_BIN_EXE_flex-record"),
         env!("CARGO_BIN_EXE_flex-mixer"),
         env!("CARGO_BIN_EXE_flex-net"),
+        env!("CARGO_BIN_EXE_flex-bt"),
     ];
     for bin in bins {
         let output = std::process::Command::new(bin)

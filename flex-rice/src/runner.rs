@@ -26,9 +26,9 @@ use flex_core::backend::{EXIT_CANCELLED, EXIT_ERROR, EXIT_OK};
 use flex_core::{CharSet, CharSetName, Menu, Outcome, Peaks, Theme, ThemeName};
 
 use crate::{menu, popup, providers};
-use providers::{center, clip, launch, net, power, proc, shot, theme_, wallpaper, wifi};
+use providers::{bt, center, clip, launch, net, power, proc, shot, theme_, wallpaper, wifi};
 
-/// The ten menu providers, one per `flex-<name>` binary.
+/// The eleven menu providers, one per `flex-<name>` binary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provider {
     /// Shutdown/reboot/logout menu.
@@ -51,11 +51,13 @@ pub enum Provider {
     Proc,
     /// Network monitor and top bandwidth consumers.
     Net,
+    /// Native Bluetooth manager.
+    Bt,
 }
 
 impl Provider {
     /// Every provider, in binary-name order.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Power,
         Self::Launch,
         Self::Shot,
@@ -66,6 +68,7 @@ impl Provider {
         Self::Wifi,
         Self::Proc,
         Self::Net,
+        Self::Bt,
     ];
 
     /// Parse a provider subcommand/binary name (`None` for anything else).
@@ -82,6 +85,7 @@ impl Provider {
             "wifi" => Some(Self::Wifi),
             "proc" => Some(Self::Proc),
             "net" => Some(Self::Net),
+            "bt" => Some(Self::Bt),
             _ => None,
         }
     }
@@ -100,6 +104,7 @@ impl Provider {
             Self::Wifi => wifi::PROVIDER,
             Self::Proc => proc::PROVIDER,
             Self::Net => net::PROVIDER,
+            Self::Bt => bt::PROVIDER,
         }
     }
 
@@ -109,13 +114,13 @@ impl Provider {
         format!("flex-{}", self.name())
     }
 
-    /// Popup variant for this provider (`menu` for power/shot/theme/wifi,
+    /// Popup variant for this provider (`menu` for power/shot/theme/wifi/bt,
     /// `menu-wide` for launch/clip/center/wallpaper/proc/net — see
     /// [`popup::MENU_VARIANT`] / [`popup::WIDE_VARIANT`]).
     #[must_use]
     pub fn variant(self) -> &'static str {
         match self {
-            Self::Power | Self::Shot | Self::Theme | Self::Wifi => popup::MENU_VARIANT,
+            Self::Power | Self::Shot | Self::Theme | Self::Wifi | Self::Bt => popup::MENU_VARIANT,
             Self::Launch | Self::Clip | Self::Center | Self::Wallpaper | Self::Proc | Self::Net => {
                 popup::WIDE_VARIANT
             }
@@ -126,7 +131,7 @@ impl Provider {
     #[must_use]
     pub fn variant_class(self) -> &'static str {
         match self {
-            Self::Power | Self::Shot | Self::Theme | Self::Wifi => popup::MENU_CLASS,
+            Self::Power | Self::Shot | Self::Theme | Self::Wifi | Self::Bt => popup::MENU_CLASS,
             Self::Launch | Self::Clip | Self::Center | Self::Wallpaper | Self::Proc | Self::Net => {
                 popup::WIDE_CLASS
             }
@@ -328,6 +333,7 @@ pub fn build_menu(provider: Provider, style: StyleOptions) -> Result<Menu> {
         Provider::Wifi => Ok(style.apply(wifi::menu())),
         Provider::Proc => Ok(style.apply(menu(proc::PROVIDER, vec![proc::proc_tab()]))),
         Provider::Net => Ok(style.apply(net::net_menu())),
+        Provider::Bt => Ok(style.apply(bt::bt_menu())),
     }
 }
 
@@ -495,7 +501,7 @@ mod tests {
     fn providers_map_to_the_wrappers_popup_table() {
         for provider in Provider::ALL {
             let (variant, class) = match provider.name() {
-                "power" | "shot" | "theme" | "wifi" => ("menu", popup::MENU_CLASS),
+                "power" | "shot" | "theme" | "wifi" | "bt" => ("menu", popup::MENU_CLASS),
                 "launch" | "clip" | "center" | "wallpaper" | "proc" | "net" => {
                     ("menu-wide", popup::WIDE_CLASS)
                 }
@@ -558,6 +564,7 @@ mod tests {
             Provider::Wifi,
             Provider::Proc,
             Provider::Net,
+            Provider::Bt,
         ] {
             let built = build_menu(provider, style()).expect("menu builds");
             assert_eq!(built.provider, provider.name());

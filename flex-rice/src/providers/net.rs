@@ -1,13 +1,15 @@
-//! `net` provider: bandwidth consumption monitor and network interface status.
+//! `net` provider: bandwidth consumption monitor, network interface status, and speedtest benchmark.
 //!
-//! Implements Tab 1 (`Bandwidth`) with top network-consuming processes ("Top Talkers")
-//! and Tab 2 (`Interfaces`) with network interface metadata and default route indicators.
+//! Implements Tab 1 (`Bandwidth`) with top network-consuming processes ("Top Talkers"),
+//! Tab 2 (`Interfaces`) with network interface metadata and default route indicators,
+//! and Tab 3 (`Speedtest`) with non-blocking network throughput & latency benchmarks.
 
 use flex_core::{Menu, Row, RowId, Tab, Target};
 
 use crate::exec::net::{
     format_bytes, format_speed, scan_interfaces, scan_top_talkers, InterfaceInfo, ProcessBandwidth,
 };
+use crate::exec::speedtest::{self, SpeedtestPhase, SpeedtestSnapshot};
 use crate::providers;
 
 /// Provider name for the `ACTION:` line.
@@ -18,6 +20,12 @@ pub const TAB_BANDWIDTH: &str = "Bandwidth";
 
 /// Tab 2 title: Network interfaces.
 pub const TAB_INTERFACES: &str = "Interfaces";
+
+/// Tab 3 title: Speedtest benchmark.
+pub const TAB_SPEEDTEST: &str = "Speedtest";
+
+/// Action ID for triggering the speedtest benchmark.
+pub const SPEEDTEST_RUN_ID: &str = "speedtest:run";
 
 /// Build the `Bandwidth` tab: lists active processes sorted by bandwidth consumption.
 #[must_use]
@@ -112,10 +120,65 @@ fn build_interface_rows(ifaces: &[InterfaceInfo]) -> Vec<Row> {
         .collect()
 }
 
+/// Build the `Speedtest` tab: interactive throughput & latency benchmark.
+#[must_use]
+pub fn speedtest_tab() -> Tab {
+    let snapshot = speedtest::get_snapshot();
+    let rows = build_speedtest_rows(&snapshot);
+    let mut tab = Tab::with_rows(TAB_SPEEDTEST, rows);
+    tab.bare_rows = false;
+    tab.filterable = false;
+    tab.deletable = false;
+    tab
+}
+
+/// Convert speedtest state snapshot into wiremix `Row` objects.
+#[must_use]
+pub fn build_speedtest_rows(snapshot: &SpeedtestSnapshot) -> Vec<Row> {
+    let run_meta = match snapshot.phase {
+        SpeedtestPhase::Idle => "[Enter] Start",
+        SpeedtestPhase::TestingPing => "Probing Ping...",
+        SpeedtestPhase::TestingDownload => "Testing Download...",
+        SpeedtestPhase::TestingUpload => "Testing Upload...",
+        SpeedtestPhase::Complete => "[Enter] Retest",
+        SpeedtestPhase::Failed => "[Enter] Retry",
+    };
+
+    let run_row = Row::with_meta(RowId::new(SPEEDTEST_RUN_ID), "Run Full Speedtest", run_meta);
+
+    let ping_row = Row::with_meta(
+        RowId::new("speedtest:ping"),
+        "Latency / Ping",
+        snapshot.ping_display(),
+    );
+
+    let mut download_row = Row::with_meta(
+        RowId::new("speedtest:download"),
+        "Download Speed",
+        snapshot.download_display(),
+    );
+    download_row.volume = Some(snapshot.download_volume());
+
+    let mut upload_row = Row::with_meta(
+        RowId::new("speedtest:upload"),
+        "Upload Speed",
+        snapshot.upload_display(),
+    );
+    upload_row.volume = Some(snapshot.upload_volume());
+
+    let server_row = Row::with_meta(
+        RowId::new("speedtest:server"),
+        "Target Server",
+        snapshot.target_server.clone(),
+    );
+
+    vec![run_row, ping_row, download_row, upload_row, server_row]
+}
+
 /// Build the complete interactive `flex-net` menu.
 #[must_use]
 pub fn net_menu() -> Menu {
-    let tabs = vec![bandwidth_tab(), interfaces_tab()];
+    let tabs = vec![bandwidth_tab(), interfaces_tab(), speedtest_tab()];
     providers::menu(PROVIDER, tabs)
 }
 
@@ -143,6 +206,13 @@ pub fn refresh(menu: &mut Menu) {
         if tab.name == TAB_INTERFACES {
             let ifaces = scan_interfaces();
             tab.rows = build_interface_rows(&ifaces);
+        }
+    }
+
+    if let Some(tab) = menu.app.tabs.get_mut(2) {
+        if tab.name == TAB_SPEEDTEST {
+            let snapshot = speedtest::get_snapshot();
+            tab.rows = build_speedtest_rows(&snapshot);
         }
     }
 

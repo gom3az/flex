@@ -740,6 +740,10 @@ pub fn execute(action_id: &str) -> Result<()> {
         let mut cmd = std::process::Command::new("flex");
         cmd.args(["popup", "menu", "flex-wifi"]);
         let _ = crate::spawn::spawn(&mut cmd)?;
+    } else if action_id == "speedtest:run" || action_id == "speedtest" {
+        crate::exec::speedtest::trigger_background();
+    } else if action_id.starts_with("speedtest:") {
+        return Ok(());
     }
     Ok(())
 }
