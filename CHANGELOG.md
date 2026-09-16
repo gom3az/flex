@@ -92,7 +92,7 @@ the wrappers and break every keybind, which `04e2599` demonstrated.
 with the `workflow` scope, which this checkout's token lacks. The workflow
 (fmt → clippy `-D warnings` → test) is written and ready to add.
 
-[gom3az/flex-core]: https://github.com/gom3az/flex-core (archived; the engine now lives in this repo at `flex-core/`)
+[gom3az/flex-core]: https://github.com/gom3az/flex (retired; the engine now lives in this repo at `flex-core/`)
 
 ### Added
 - `flex wifi` provider (`src/providers/wifi.rs`): the network dialog. Rows are

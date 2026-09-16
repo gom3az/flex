@@ -30,7 +30,7 @@ cargo clippy --all-targets -- -D warnings
 To iterate on the engine locally, patch it in without committing the override —
 see `Docs/project_structure.md` → "Working on the engine".
 
-[gom3az/flex-core]: https://github.com/gom3az/flex-core (archived; the engine now lives in this repo at `flex-core/`)
+[gom3az/flex-core]: https://github.com/gom3az/flex (retired; the engine now lives in this repo at `flex-core/`)
 
 ## `ACTION:` protocol
 
