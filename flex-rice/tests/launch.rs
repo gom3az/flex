@@ -193,6 +193,9 @@ fn only_malformed_entries_reach_stderr() {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_flex"))
         .arg("launch")
         .env("HOME", &home)
+        // In-popup half: the dispatcher re-execs `flex-launch`, which only
+        // reaches the menu (and its diagnostics) inside a popup.
+        .env("POPUP_KITTY", "1")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .output()
@@ -642,6 +645,9 @@ fn engine_errors_are_reported_with_a_single_prefix() {
     let output = std::process::Command::new("setsid")
         .arg(env!("CARGO_BIN_EXE_flex"))
         .arg("launch")
+        // In-popup half: the dispatcher re-execs `flex-launch`, which only
+        // reaches the TTY probe inside a popup.
+        .env("POPUP_KITTY", "1")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .output()

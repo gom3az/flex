@@ -32,7 +32,7 @@ use crate::backend;
 use crate::keys::{self, KeyOutcome};
 use crate::preview;
 use crate::render;
-use crate::Menu;
+use crate::{Menu, Outcome};
 
 /// Deterministic per-event step for `FLEX_TEST` replays.
 ///
@@ -68,17 +68,19 @@ pub fn replay_keys(menu: &mut Menu, keys: &[KeyEvent], base: Instant) -> KeyOutc
     KeyOutcome::Consumed
 }
 
-/// Run the interactive menu until it selects, deletes, quits, or errors.
+/// Run the interactive menu in-process until it selects, deletes, toggles,
+/// chooses a target, quits, or errors.
 ///
-/// See the module docs for the frame/outcome contract. Diverges via
-/// [`std::process::exit`] on terminal outcomes (matching `main.rs` stub
-/// behavior); returns `Ok` only on TTY errors handled by the caller.
+/// Shares the [`run`] event loop but stays execute-in-process: on terminal
+/// outcomes it calls [`backend::restore`], prints nothing, exits nowhere, and
+/// returns the corresponding [`Outcome`]. Focused-row reads are identical to
+/// [`run`] (a missing row continues the loop).
 ///
 /// # Errors
 ///
 /// Returns an error when the terminal cannot initialize, frames cannot
 /// draw, or events cannot be polled/read.
-pub fn run(mut menu: Menu) -> Result<()> {
+pub fn run_capture(mut menu: Menu) -> Result<Outcome> {
     let provider = menu.provider.clone();
     let mut terminal = backend::init()?;
     let base = Instant::now();
@@ -124,8 +126,11 @@ pub fn run(mut menu: Menu) -> Result<()> {
                             };
                             let (id, label) = (row.id.as_str().to_string(), row.label.clone());
                             backend::restore();
-                            backend::emit_action(&provider, &id, &label)?;
-                            std::process::exit(backend::EXIT_OK);
+                            return Ok(Outcome::Chosen {
+                                provider: provider.clone(),
+                                action_id: id,
+                                label,
+                            });
                         }
                         KeyOutcome::Delete => {
                             let Some(row) = menu.app.focused_row() else {
@@ -133,8 +138,11 @@ pub fn run(mut menu: Menu) -> Result<()> {
                             };
                             let (id, label) = (row.id.as_str().to_string(), row.label.clone());
                             backend::restore();
-                            backend::emit_delete(&provider, &id, &label)?;
-                            std::process::exit(backend::EXIT_OK);
+                            return Ok(Outcome::Delete {
+                                provider: provider.clone(),
+                                action_id: id,
+                                label,
+                            });
                         }
                         KeyOutcome::Toggle => {
                             let Some(row) = menu.app.focused_row() else {
@@ -142,17 +150,24 @@ pub fn run(mut menu: Menu) -> Result<()> {
                             };
                             let (id, label) = (row.id.as_str().to_string(), row.label.clone());
                             backend::restore();
-                            backend::emit_toggle(&provider, &id, &label)?;
-                            std::process::exit(backend::EXIT_OK);
+                            return Ok(Outcome::Toggle {
+                                provider: provider.clone(),
+                                action_id: id,
+                                label,
+                            });
                         }
                         KeyOutcome::ChooseTarget { row, target, title } => {
                             backend::restore();
-                            backend::emit_target(&provider, row.as_str(), target.as_str(), &title)?;
-                            std::process::exit(backend::EXIT_OK);
+                            return Ok(Outcome::Target {
+                                provider: provider.clone(),
+                                row: row.as_str().to_string(),
+                                target: target.as_str().to_string(),
+                                title,
+                            });
                         }
                         KeyOutcome::Quit(code) => {
                             backend::restore();
-                            std::process::exit(code);
+                            return Ok(Outcome::Quit { code });
                         }
                     }
                 }
@@ -166,6 +181,67 @@ pub fn run(mut menu: Menu) -> Result<()> {
             }
         } else {
             menu.tick(loop_now(base, &mut step, seeded));
+        }
+    }
+}
+
+/// Run the interactive menu until it selects, deletes, quits, or errors.
+///
+/// Thin wrapper over [`run_capture`]: it performs today's exact emit+exit
+/// mapping (`Chosen` prints one `ACTION:` line and exits `0`, `Delete`
+/// prints one `ACTION:DELETE` line and exits `0`, `Toggle` prints one
+/// `ACTION:TOGGLE` line and exits `0`, `Target` prints one `ACTION:TARGET`
+/// line and exits `0`, `Quit(code)` exits with `code` and prints nothing,
+/// `Cancelled` exits `130` and prints nothing). See the module docs for the
+/// frame/outcome contract. Diverges via [`std::process::exit`] on terminal
+/// outcomes (matching `main.rs` stub behavior); returns `Ok` only on TTY
+/// errors handled by the caller.
+///
+/// # Errors
+///
+/// Returns an error when the terminal cannot initialize, frames cannot
+/// draw, events cannot be polled/read, or the `ACTION:` line cannot be
+/// written.
+pub fn run(menu: Menu) -> Result<()> {
+    match run_capture(menu)? {
+        Outcome::Chosen {
+            provider,
+            action_id,
+            label,
+        } => {
+            backend::emit_action(&provider, &action_id, &label)?;
+            std::process::exit(backend::EXIT_OK);
+        }
+        Outcome::Delete {
+            provider,
+            action_id,
+            label,
+        } => {
+            backend::emit_delete(&provider, &action_id, &label)?;
+            std::process::exit(backend::EXIT_OK);
+        }
+        Outcome::Toggle {
+            provider,
+            action_id,
+            label,
+        } => {
+            backend::emit_toggle(&provider, &action_id, &label)?;
+            std::process::exit(backend::EXIT_OK);
+        }
+        Outcome::Target {
+            provider,
+            row,
+            target,
+            title,
+        } => {
+            backend::emit_target(&provider, &row, &target, &title)?;
+            std::process::exit(backend::EXIT_OK);
+        }
+        Outcome::Quit { code } => {
+            std::process::exit(code);
+        }
+        Outcome::Cancelled => {
+            std::process::exit(backend::EXIT_CANCELLED);
         }
     }
 }
@@ -189,5 +265,92 @@ mod tests {
     fn flex_test_step_confirms_confirmable_in_replays() {
         assert!(FLEX_TEST_STEP >= keys::ARM_CONFIRM_DELAY);
         assert!(FLEX_TEST_STEP < keys::ARM_EXPIRE);
+    }
+
+    #[test]
+    fn chosen_outcome_holds_select_fields() {
+        let outcome = Outcome::Chosen {
+            provider: String::from("power"),
+            action_id: String::from("id-1"),
+            label: String::from("Shutdown"),
+        };
+        assert_eq!(
+            outcome,
+            Outcome::Chosen {
+                provider: String::from("power"),
+                action_id: String::from("id-1"),
+                label: String::from("Shutdown"),
+            }
+        );
+    }
+
+    #[test]
+    fn delete_outcome_holds_delete_fields() {
+        let outcome = Outcome::Delete {
+            provider: String::from("clip"),
+            action_id: String::from("abc123"),
+            label: String::from("paste me"),
+        };
+        let Outcome::Delete {
+            provider,
+            action_id,
+            label,
+        } = outcome
+        else {
+            panic!("expected Outcome::Delete");
+        };
+        assert_eq!(provider, "clip");
+        assert_eq!(action_id, "abc123");
+        assert_eq!(label, "paste me");
+    }
+
+    #[test]
+    fn toggle_outcome_holds_toggle_fields() {
+        let outcome = Outcome::Toggle {
+            provider: String::from("clip"),
+            action_id: String::from("abc123"),
+            label: String::from("paste me"),
+        };
+        let Outcome::Toggle {
+            provider,
+            action_id,
+            label,
+        } = outcome
+        else {
+            panic!("expected Outcome::Toggle");
+        };
+        assert_eq!(provider, "clip");
+        assert_eq!(action_id, "abc123");
+        assert_eq!(label, "paste me");
+    }
+
+    #[test]
+    fn target_outcome_holds_target_fields() {
+        let outcome = Outcome::Target {
+            provider: String::from("center"),
+            row: String::from("vol"),
+            target: String::from("t-hdmi"),
+            title: String::from("HDMI"),
+        };
+        let Outcome::Target {
+            provider,
+            row,
+            target,
+            title,
+        } = outcome
+        else {
+            panic!("expected Outcome::Target");
+        };
+        assert_eq!(provider, "center");
+        assert_eq!(row, "vol");
+        assert_eq!(target, "t-hdmi");
+        assert_eq!(title, "HDMI");
+    }
+
+    #[test]
+    fn quit_outcome_holds_exit_code() {
+        assert_eq!(Outcome::Quit { code: 130 }, Outcome::Quit { code: 130 });
+        assert_ne!(Outcome::Quit { code: 0 }, Outcome::Quit { code: 1 });
+        assert_ne!(Outcome::Quit { code: 130 }, Outcome::Cancelled);
     }
 }

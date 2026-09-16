@@ -11,6 +11,10 @@
 //! Nothing in [`flex_core`] depends on this crate — the dependency runs one
 //! way, so the engine stays publishable and this crate stays local.
 
+pub mod exec;
+pub mod popup;
 pub mod providers;
+pub mod runner;
+pub mod terminal;
 
 pub use providers::{menu, tick_hook};

@@ -14,6 +14,38 @@ publish = false
 name = "flex"
 path = "src/main.rs"
 
+[[bin]]
+name = "flex-power"
+path = "src/bin/flex-power.rs"
+
+[[bin]]
+name = "flex-launch"
+path = "src/bin/flex-launch.rs"
+
+[[bin]]
+name = "flex-shot"
+path = "src/bin/flex-shot.rs"
+
+[[bin]]
+name = "flex-theme"
+path = "src/bin/flex-theme.rs"
+
+[[bin]]
+name = "flex-clip"
+path = "src/bin/flex-clip.rs"
+
+[[bin]]
+name = "flex-center"
+path = "src/bin/flex-center.rs"
+
+[[bin]]
+name = "flex-wallpaper"
+path = "src/bin/flex-wallpaper.rs"
+
+[[bin]]
+name = "flex-wifi"
+path = "src/bin/flex-wifi.rs"
+
 [dependencies]
 # The engine, built from the sibling `flex-core` member (see the workspace root).
 flex-core.workspace = true

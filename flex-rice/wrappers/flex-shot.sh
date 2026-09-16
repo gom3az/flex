@@ -87,7 +87,7 @@ setsid --fork bash "$cap_script" "$id" "$filepath" "$rec_start" &
 cap_pid=$!
 
 # Close popup window so slurp/grim get a clean screen.
-popup_pid=$(pgrep -f 'kitty --class kitty-menu' | head -1)
+popup_pid=$(pgrep -f 'kitty --class flex-menu' | head -1)
 if [[ -n "$popup_pid" ]]; then
     kill "$popup_pid" 2>/dev/null || true
 fi
@@ -98,7 +98,7 @@ for _ in {1..20}; do
 import sys, json
 cls = json.load(sys.stdin)
 for c in cls:
-    if 'kitty-menu' in str(c.get('class','')):
+    if 'flex-menu' in str(c.get('class','')):
         sys.exit(0)
 sys.exit(1)
 " 2>/dev/null; then

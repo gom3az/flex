@@ -287,3 +287,349 @@ fn wrapper_rejects_malformed_action_lines() {
     assert!(!output.status.success(), "malformed ACTION: must fail");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// --- Executor (`flex-rice/src/exec/shot.rs`) ----------------------------------
+//
+// The detached worker (`flex-shot --capture ID FILE REC`) runs the capture
+// synchronously with a stub `PATH`: no TUI, no pty, no live tools. The parent
+// half (`execute_with`) is covered at the library level with stubbed
+// `setsid`/`pgrep`/`pkill`; the popup guard itself lives in the shared
+// runner (covered by `popup.rs`), with one binary-level re-exec probe below.
+
+use std::os::unix::fs::PermissionsExt as _;
+
+/// Write an executable stub script.
+fn write_exe(path: &std::path::Path, body: &str) {
+    std::fs::write(path, body).expect("stub script");
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+}
+
+/// Stub `PATH` for the worker: every capture tool logs `name args` to
+/// `calls.log`; `grim` and the recording helper also touch their last arg
+/// (the output file) so the later `wl-copy < file` redirect succeeds.
+struct WorkerStubs {
+    dir: std::path::PathBuf,
+    log: std::path::PathBuf,
+    path_env: String,
+}
+
+fn install_worker_stubs(
+    name: &str,
+    slurp_exit: i32,
+    geometry: &str,
+    hypr_json: &str,
+) -> WorkerStubs {
+    let dir = stub_dir(&format!("exec-{name}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("stub dir");
+    let log = dir.join("calls.log");
+    let logged = log.display().to_string();
+    write_exe(
+        &dir.join("slurp"),
+        &format!(
+            "#!/usr/bin/env bash\necho \"slurp $@\" >> \"{logged}\"\nprintf '%s' \"{geometry}\"\nexit {slurp_exit}\n"
+        ),
+    );
+    std::fs::write(dir.join("hypr.json"), hypr_json).expect("hypr json");
+    write_exe(
+        &dir.join("hyprctl"),
+        &format!(
+            "#!/usr/bin/env bash\necho \"hyprctl $@\" >> \"{logged}\"\ncat \"{}/hypr.json\"\n",
+            dir.display()
+        ),
+    );
+    for tool in ["grim", "rec"] {
+        write_exe(
+            &dir.join(tool),
+            &format!(
+                "#!/usr/bin/env bash\necho \"{tool} $@\" >> \"{logged}\"\ntouch \"${{@: -1}}\"\n"
+            ),
+        );
+    }
+    write_exe(
+        &dir.join("wl-copy"),
+        &format!(
+            "#!/usr/bin/env bash\nbytes=$(wc -c | tr -d ' ')\necho \"wl-copy <$bytes bytes>\" >> \"{logged}\"\n"
+        ),
+    );
+    write_exe(
+        &dir.join("notify-send"),
+        &format!("#!/usr/bin/env bash\necho \"notify-send $@\" >> \"{logged}\"\n"),
+    );
+    let path_env = format!(
+        "{}:{}",
+        dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    WorkerStubs { dir, log, path_env }
+}
+
+/// Run the detached worker the way the parent spawns it (minus `setsid`):
+/// `flex-shot --capture ID FILE REC` with a stub `PATH`.
+fn run_capture_worker(
+    id: &str,
+    file: &std::path::Path,
+    rec: &std::path::Path,
+    stubs: &WorkerStubs,
+) -> std::process::Output {
+    std::process::Command::new(env!("CARGO_BIN_EXE_flex-shot"))
+        .arg("--capture")
+        .arg(id)
+        .arg(file)
+        .arg(rec)
+        .env("PATH", &stubs.path_env)
+        .env("POPUP_KITTY", "1")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("run capture worker")
+}
+
+fn call_lines(log: &std::path::Path) -> Vec<String> {
+    std::fs::read_to_string(log)
+        .expect("call log")
+        .lines()
+        .map(|line| line.trim().to_string())
+        .collect()
+}
+
+/// Seven ids, one pipeline each: the worker must spawn exactly the wrapper's
+/// tool sequence (see `exec::shot::describe` for the snapshot convention).
+#[test]
+fn worker_matrix_runs_the_wrapper_pipeline_per_id() {
+    let geometry = "11,22 33x44";
+    let hypr_json = "{\"at\":[11,22],\"size\":[33,44]}";
+    let ids = [
+        "area-shot",
+        "full-shot",
+        "win-shot",
+        "area-rec",
+        "area-rec-audio",
+        "full-rec",
+        "full-rec-audio",
+    ];
+    for id in ids {
+        let stubs = install_worker_stubs(id, 0, geometry, hypr_json);
+        let ext = if id.contains("rec") { "mp4" } else { "png" };
+        let file = stubs.dir.join(format!("out.{ext}"));
+        let rec = stubs.dir.join("rec");
+        let output = run_capture_worker(id, &file, &rec, &stubs);
+        assert!(
+            output.status.success(),
+            "{id}: {:?}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(file.is_file(), "{id}: grim/rec stages the output file");
+        let lines = call_lines(&stubs.log);
+        let painted = file.display().to_string();
+        let shot_tail = vec![
+            format!("grim -g {geometry} {painted}"),
+            String::from("wl-copy <0 bytes>"),
+            format!("notify-send Screenshot saved {painted}"),
+        ];
+        // The `grim`/`rec` stubs log their fixed tool word plus `$@`, so the
+        // expected lines name the stub (`rec …`), not the helper path.
+        let expected: Vec<String> = match id {
+            "area-shot" => {
+                let mut rows = vec![String::from("slurp")];
+                rows.extend(shot_tail);
+                rows
+            }
+            "full-shot" => {
+                let mut rows = vec![format!("grim {painted}")];
+                rows.extend(shot_tail.into_iter().skip(1));
+                rows
+            }
+            "win-shot" => {
+                let mut rows = vec![String::from("hyprctl -j activewindow")];
+                rows.extend(shot_tail);
+                rows
+            }
+            "area-rec" => vec![
+                String::from("slurp"),
+                format!("rec -g {geometry} {painted}"),
+            ],
+            "area-rec-audio" => vec![
+                String::from("slurp"),
+                format!("rec -a -g {geometry} {painted}"),
+            ],
+            "full-rec" => vec![format!("rec {painted}")],
+            "full-rec-audio" => vec![format!("rec -a {painted}")],
+            other => panic!("unexpected id {other}"),
+        };
+        let _ = std::fs::remove_dir_all(&stubs.dir);
+        assert_eq!(lines, expected, "{id}: worker tool sequence");
+    }
+}
+
+/// `slurp` cancel (non-zero exit, no geometry): exit 130 quietly, before
+/// `grim` — the deliberate fix over the wrapper's `set +e` fallthrough.
+#[test]
+fn worker_slurp_cancel_exits_130_quietly() {
+    let stubs = install_worker_stubs("cancel", 1, "11,22 33x44", "{}");
+    let file = stubs.dir.join("out.png");
+    let rec = stubs.dir.join("rec");
+    let output = run_capture_worker("area-shot", &file, &rec, &stubs);
+    assert_eq!(output.status.code(), Some(130), "cancel exits 130");
+    assert!(output.stdout.is_empty(), "no stdout on cancel");
+    assert!(output.stderr.is_empty(), "no diagnostics on cancel");
+    assert_eq!(call_lines(&stubs.log), vec![String::from("slurp")]);
+    assert!(!file.exists(), "nothing is staged on cancel");
+    let _ = std::fs::remove_dir_all(&stubs.dir);
+}
+
+/// Unknown ids exit 1 with exactly one `flex: error:` prefix (the runner
+/// owns the prefix; executor errors carry none of their own).
+#[test]
+fn worker_rejects_unknown_ids_with_a_single_prefix() {
+    let stubs = install_worker_stubs("bad-id", 0, "11,22 33x44", "{}");
+    let file = stubs.dir.join("out.png");
+    let rec = stubs.dir.join("rec");
+    let output = run_capture_worker("bogus", &file, &rec, &stubs);
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert_eq!(stderr, "flex: error: shot: unknown id 'bogus'\n");
+    let _ = std::fs::remove_dir_all(&stubs.dir);
+}
+
+/// Parent half at the library level: detach the worker via `setsid -f`,
+/// then close the exact popup class — all against stub tools.
+#[test]
+fn parent_detaches_the_worker_then_closes_the_popup() {
+    use flex_rice::exec::shot::{execute_with, ShotId};
+
+    let dir = stub_dir("exec-parent");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("stub dir");
+    let setsid_log = dir.join("setsid.log");
+    let pkill_log = dir.join("pkill.log");
+    write_exe(
+        &dir.join("setsid"),
+        &format!(
+            "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > '{}'\n",
+            setsid_log.display()
+        ),
+    );
+    write_exe(&dir.join("pgrep"), "#!/usr/bin/env bash\nexit 1\n");
+    write_exe(
+        &dir.join("pkill"),
+        &format!(
+            "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > '{}'\n",
+            pkill_log.display()
+        ),
+    );
+    let path_env = format!(
+        "{}:{}",
+        dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let file = dir.join("Screenshot-ts.png");
+    let rec = dir.join("rec.sh");
+    let report = execute_with(ShotId::AreaShot, &file, &rec, Some(&path_env))
+        .expect("execute with stub PATH");
+    assert_eq!(report.filepath, file);
+    // The detach is spawned, not waited on: poll for the stub log.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let argv: Vec<String> = loop {
+        if let Ok(body) = std::fs::read_to_string(&setsid_log) {
+            if body.lines().count() == 6 {
+                break body.lines().map(str::to_string).collect();
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "setsid spawn never logged"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    assert_eq!(
+        argv.len(),
+        6,
+        "setsid -f <exe> --capture ID FILE REC: {argv:?}"
+    );
+    assert_eq!(argv[0], "-f");
+    assert_eq!(
+        argv.get(2..4),
+        Some(&[String::from("--capture"), String::from("area-shot")][..]),
+        "worker subcommand and id follow the exe"
+    );
+    assert_eq!(
+        argv.get(4..),
+        Some(&[file.display().to_string(), rec.display().to_string()][..]),
+        "worker gets the staged file and the recording helper"
+    );
+    // `call_lines` trims, which would eat the load-bearing trailing space
+    // in the pkill pattern — read this log raw.
+    let pkill_argv: Vec<String> = std::fs::read_to_string(&pkill_log)
+        .expect("pkill log")
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        pkill_argv,
+        vec![String::from("-f"), String::from("flex-menu ")],
+        "pkill probes the exact popup class with the trailing space"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Outside a popup the binary re-execs into the `menu` popup (the shared
+/// runner guard); the kitty spawn is asserted against a stub `PATH`.
+#[test]
+fn binary_outside_a_popup_reexecs_into_the_menu_popup() {
+    let dir = stub_dir("exec-guard");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("stub dir");
+    let kitty_log = dir.join("kitty.log");
+    write_exe(&dir.join("pgrep"), "#!/usr/bin/env bash\nexit 1\n");
+    write_exe(
+        &dir.join("kitty"),
+        &format!(
+            "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > '{}.tmp'\nmv '{}.tmp' '{}'\n",
+            kitty_log.display(),
+            kitty_log.display(),
+            kitty_log.display(),
+        ),
+    );
+    let path_env = format!(
+        "{}:{}",
+        dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let saved_path = std::env::var("PATH").ok();
+    std::env::set_var("PATH", &path_env);
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).expect("scratch HOME");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_flex-shot"))
+        .env("HOME", &home)
+        .env_remove("POPUP_KITTY")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("run flex-shot outside a popup");
+    match saved_path {
+        Some(value) => std::env::set_var("PATH", value),
+        None => std::env::remove_var("PATH"),
+    }
+    assert!(
+        output.status.success(),
+        "toggle exits 0: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let logged = loop {
+        if let Ok(body) = std::fs::read_to_string(&kitty_log) {
+            break body.lines().map(str::to_string).collect::<Vec<_>>();
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "kitty spawn never logged"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    assert!(
+        logged.contains(&String::from("--class"))
+            && logged.contains(&String::from("flex-menu"))
+            && logged.contains(&String::from("POPUP_KITTY=1")),
+        "re-exec uses the menu popup template: {logged:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

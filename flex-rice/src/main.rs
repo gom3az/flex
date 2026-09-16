@@ -1,97 +1,55 @@
-//! `flex` binary: parse `power|launch|shot|theme|clip|center|wallpaper|wifi`
-//! and print one `ACTION:` line. All providers run the full TUI event loop
-//! (`run::run`); thin `wrappers/*.sh` scripts own the side effects.
+//! `flex` binary: compat dispatcher over the eight `flex-<provider>` binaries.
+//!
+//! `flex <provider> [flags]` re-execs the matching `flex-<provider>` binary
+//! with flags reconstructed in canonical order (so `flex -t nocolor launch`
+//! ≡ `flex launch -t nocolor`); `flex popup <menu|menu-wide> <cmd…>`
+//! toggles the popup for dotfiles `kill-menu.sh`. Hidden `--resolve`
+//! lookups are handled inline, exactly as before. All providers run the
+//! full TUI event loop; thin `wrappers/*.sh` scripts own the side effects.
 
-use anyhow::Result;
+use std::path::PathBuf;
+
+use anyhow::{Context as _, Result};
 use clap::{Parser, Subcommand};
-use flex_core::backend::{EXIT_CANCELLED, EXIT_ERROR};
-use flex_core::{CharSet, CharSetName, Menu, Peaks, Theme, ThemeName};
-use flex_rice::{menu, providers};
+use flex_core::backend::EXIT_ERROR;
+use flex_rice::runner::{self, GlobalStyle, Provider, StyleOptions};
 
-/// Reusable TUI menu: select a row, print `ACTION:`, let wrappers act.
+/// Compat dispatcher: parse a provider (or `popup`) and re-exec or toggle.
 #[derive(Debug, Parser)]
 #[command(name = "flex", version, about = "Reusable TUI menu library")]
 struct Cli {
-    /// Ranking engine override (R1 escape hatch; `legacy` preserves
-    /// provider order instead of score-reordering).
-    #[arg(long, hide = true, default_value = "spec", global = true)]
-    filter_mode: FilterModeArg,
+    /// Global presentation flags (accepted before or after the provider).
+    #[command(flatten)]
+    style: GlobalStyle,
 
-    /// Character set (upstream `-s/--char-set`): default, compat, extracompat.
-    #[arg(
-        short = 's',
-        long,
-        default_value = "default",
-        value_parser = parse_char_set,
-        global = true
-    )]
-    char_set: CharSetName,
-
-    /// Theme (upstream `-t/--theme`): default, nocolor, plain.
-    #[arg(
-        short = 't',
-        long,
-        default_value = "default",
-        value_parser = parse_theme,
-        global = true
-    )]
-    theme: ThemeName,
-
-    /// Peak meters (upstream `-p/--peaks`): off, mono, auto.
-    #[arg(
-        short = 'p',
-        long,
-        default_value = "auto",
-        value_parser = parse_peaks,
-        global = true
-    )]
-    peaks: Peaks,
-
-    /// Which menu provider to show.
+    /// Which menu provider to show (or the `popup` toggle helper).
     #[command(subcommand)]
     command: Command,
 }
 
-/// Parse an upstream character-set name.
-fn parse_char_set(name: &str) -> Result<CharSetName, String> {
-    CharSetName::parse(name).ok_or_else(|| {
-        format!("'{name}' is not a built-in character set (default, compat, extracompat)")
-    })
-}
-
-/// Parse an upstream theme name.
-fn parse_theme(name: &str) -> Result<ThemeName, String> {
-    ThemeName::parse(name)
-        .ok_or_else(|| format!("'{name}' is not a built-in theme (default, nocolor, plain)"))
-}
-
-/// Parse an upstream peaks mode.
-fn parse_peaks(name: &str) -> Result<Peaks, String> {
-    match name {
-        "off" => Ok(Peaks::Off),
-        "mono" => Ok(Peaks::Mono),
-        "auto" => Ok(Peaks::Auto),
-        other => Err(format!("'{other}' is not a peaks mode (off, mono, auto)")),
-    }
-}
-
-/// Hidden ranking-engine flag values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
-enum FilterModeArg {
-    /// Tiered fuzzy (default).
-    #[default]
-    Spec,
-    /// Subsequence predicate, provider order preserved.
-    Legacy,
-}
-
-/// Menu providers (each becomes an `ACTION: <provider> …` line).
+/// Menu providers (each becomes an `ACTION: <provider> …` line) plus the
+/// `popup` toggle helper for dotfiles `kill-menu.sh`.
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Toggle a popup variant running the given command.
+    Popup {
+        /// Popup variant: `menu` or `menu-wide` (class names accepted too).
+        variant: String,
+        /// Command to run inside the popup when opening.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        cmd: Vec<String>,
+    },
     /// Power menu (shutdown/reboot/…).
-    Power,
+    Power {
+        /// Print the selected `ACTION:` line without executing it.
+        #[arg(long)]
+        print_action: bool,
+    },
     /// Application launcher.
     Launch {
+        /// Print the selected `ACTION:` line without executing it.
+        #[arg(long)]
+        print_action: bool,
         /// Resolve a row-hash id to its desktop-id (`firefox.desktop`).
         /// Hidden wrapper lookup: `flex-launch.sh` and `flex-center.sh`
         /// resolve the id from the `ACTION:` line back to the `.desktop`
@@ -100,9 +58,16 @@ enum Command {
         resolve: Option<String>,
     },
     /// Screenshot flow.
-    Shot,
+    Shot {
+        /// Print the selected `ACTION:` line without executing it.
+        #[arg(long)]
+        print_action: bool,
+    },
     /// Theme switcher.
     Theme {
+        /// Print the selected `ACTION:` line without executing it.
+        #[arg(long)]
+        print_action: bool,
         /// Resolve a row-hash id to its theme (directory) name. Hidden
         /// wrapper lookup: `flex-theme.sh` resolves the id from the
         /// `ACTION:` line before handing the name to `theme-switcher.sh`.
@@ -111,6 +76,9 @@ enum Command {
     },
     /// Clipboard history.
     Clip {
+        /// Print the selected `ACTION:` line without executing it.
+        #[arg(long)]
+        print_action: bool,
         /// Resolve a content-hash id to its stored (`<NEWLINE>`-encoded)
         /// line. Hidden wrapper lookup: `flex-clip.sh` resolves the hash
         /// from the `ACTION:` line back to content AFTER the TUI exits.
@@ -118,9 +86,16 @@ enum Command {
         resolve: Option<String>,
     },
     /// Control center (volume/brightness/network).
-    Center,
+    Center {
+        /// Print the selected `ACTION:` line without executing it.
+        #[arg(long)]
+        print_action: bool,
+    },
     /// Wallpaper picker (image previews).
     Wallpaper {
+        /// Print the selected `ACTION:` line without executing it.
+        #[arg(long)]
+        print_action: bool,
         /// Resolve a path-hash id to its absolute wallpaper path. Hidden
         /// wrapper lookup: `flex-wallpaper.sh` resolves the id from the
         /// `ACTION:` line back to a path AFTER the TUI exits.
@@ -128,106 +103,50 @@ enum Command {
         resolve: Option<String>,
     },
     /// Wi-Fi picker (connect/disconnect, radio on/off).
-    Wifi,
+    Wifi {
+        /// Print the selected `ACTION:` line without executing it.
+        #[arg(long)]
+        print_action: bool,
+    },
 }
 
 fn main() {
-    // `flex: error:` is added once, here, and nowhere else: errors bubbling
-    // up from `run` must carry no `flex:` prefix of their own (B-022).
-    // Diagnostics printed directly by a provider use the full
-    // `flex: <provider>: …` form instead.
+    // `flex: error:` is added once, in the runner, and nowhere else: errors
+    // bubbling up must carry no `flex:` prefix of their own (B-022).
     if let Err(err) = run() {
-        eprintln!("flex: error: {err:#}");
-        std::process::exit(EXIT_ERROR);
+        runner::fail(&err);
     }
 }
 
-/// Parse args and dispatch to the provider.
-///
-/// Every provider runs the interactive loop (diverging via `process::exit`
-/// on a terminal outcome); wrappers own the side effects.
+/// Parse args and dispatch: `popup` toggles, `--resolve` answers inline,
+/// anything else re-execs the provider binary with canonical flags.
 ///
 /// # Errors
 ///
-/// Returns an error when the event loop reports a TTY failure.
+/// Returns an error when the popup toggle fails, a `--resolve` id is
+/// unknown, the sibling provider binary cannot be located, or its spawn
+/// fails. Messages carry no `flex:` prefix; `main` adds it via the runner.
 fn run() -> Result<()> {
     let cli = Cli::parse();
-    let filter_mode = match cli.filter_mode {
-        FilterModeArg::Spec => flex_core::filter::FilterMode::Spec,
-        FilterModeArg::Legacy => flex_core::filter::FilterMode::Legacy,
-    };
-    // Global presentation flags apply to every provider, like upstream's
-    // `-s/-t/-p` options.
-    let style = StyleOptions {
-        filter_mode,
-        char_set: cli.char_set,
-        theme: cli.theme,
-        peaks: cli.peaks,
-    };
+    let style = cli.style.options();
     // Hidden wrapper lookups (`flex <provider> --resolve <id>`) print the
     // provider identity behind a row id and exit; every other invocation
-    // opens the TUI.
+    // re-execs the provider binary (or toggles a popup).
     if resolve_lookup(&cli.command)?.is_some() {
         return Ok(());
     }
-    match cli.command {
-        Command::Power => {
-            let tab = providers::power::power_tab();
-            let menu = style.apply(menu(providers::power::PROVIDER, vec![tab]));
-            flex_core::run::run(menu)?;
-            Ok(())
+    match &cli.command {
+        Command::Popup { variant, cmd } => run_popup(variant, cmd),
+        Command::Power { print_action } => reexec(Provider::Power, style, *print_action),
+        Command::Launch { print_action, .. } => reexec(Provider::Launch, style, *print_action),
+        Command::Shot { print_action } => reexec(Provider::Shot, style, *print_action),
+        Command::Theme { print_action, .. } => reexec(Provider::Theme, style, *print_action),
+        Command::Clip { print_action, .. } => reexec(Provider::Clip, style, *print_action),
+        Command::Center { print_action } => reexec(Provider::Center, style, *print_action),
+        Command::Wallpaper { print_action, .. } => {
+            reexec(Provider::Wallpaper, style, *print_action)
         }
-        Command::Launch { resolve: _ } => {
-            let tab = providers::launch::launch_tab();
-            let menu = style.apply(menu(providers::launch::PROVIDER, vec![tab]));
-            flex_core::run::run(menu)?;
-            Ok(())
-        }
-        Command::Shot => {
-            let tab = providers::shot::shot_tab();
-            let menu = style.apply(menu(providers::shot::PROVIDER, vec![tab]));
-            flex_core::run::run(menu)?;
-            Ok(())
-        }
-        Command::Theme { resolve: _ } => {
-            let tab = providers::theme_::theme_tab();
-            let menu = style.apply(menu(providers::theme_::PROVIDER, vec![tab]));
-            flex_core::run::run(menu)?;
-            Ok(())
-        }
-        Command::Clip { resolve: _ } => {
-            let tab = providers::clip::clip_tab();
-            if tab.rows.is_empty() {
-                eprintln!("flex: clip: no history yet");
-                std::process::exit(EXIT_CANCELLED);
-            }
-            let menu = style.apply(menu(providers::clip::PROVIDER, vec![tab]));
-            flex_core::run::run(menu)?;
-            Ok(())
-        }
-        Command::Center => {
-            let menu = style.apply(providers::center::center_menu());
-            flex_core::run::run(menu)?;
-            Ok(())
-        }
-        Command::Wallpaper { resolve: _ } => {
-            let tab = providers::wallpaper::wallpaper_tab();
-            if tab.rows.is_empty() {
-                eprintln!("flex: wallpaper: no wallpapers found");
-                std::process::exit(EXIT_CANCELLED);
-            }
-            let mut menu = style.apply(menu(providers::wallpaper::PROVIDER, vec![tab]));
-            // Image previews need a kitty-compatible terminal; everywhere
-            // else the picker is a plain list (no pane reserved).
-            menu.preview = flex_core::preview::enabled();
-            flex_core::run::run(menu)?;
-            Ok(())
-        }
-        Command::Wifi => {
-            let menu = style.apply(providers::wifi::menu());
-            flex_core::run::run(menu)?;
-            Ok(())
-        }
+        Command::Wifi { print_action } => reexec(Provider::Wifi, style, *print_action),
     }
 }
 
@@ -235,24 +154,30 @@ fn run() -> Result<()> {
 /// provider identity the id stands for (desktop-id, theme name, wallpaper
 /// path, clipboard line) and returns `Ok(Some(()))`.
 ///
-/// `Ok(None)` means the command is a normal TUI invocation. The message for
-/// an unknown id is built here, in one place, and carries no `flex:`
-/// prefix of its own — `main` adds that exactly once (B-022).
+/// `Ok(None)` means the command is a normal provider invocation. The message
+/// for an unknown id is built here, in one place, and carries no `flex:`
+/// prefix of its own — `main` adds that exactly once via the runner (B-022).
 fn resolve_lookup(command: &Command) -> Result<Option<()>> {
+    use flex_rice::providers;
     let (provider, id, resolved) = match command {
         Command::Clip {
             resolve: Some(hash),
+            ..
         } => ("clip", hash, providers::clip::resolve(hash)),
-        Command::Wallpaper { resolve: Some(id) } => (
+        Command::Wallpaper {
+            resolve: Some(id), ..
+        } => (
             "wallpaper",
             id,
             providers::wallpaper::resolve(id).map(|path| path.display().to_string()),
         ),
         Command::Launch {
             resolve: Some(hash),
+            ..
         } => ("launch", hash, providers::launch::resolve_id(hash)),
         Command::Theme {
             resolve: Some(hash),
+            ..
         } => ("theme", hash, providers::theme_::resolve_name(hash)),
         _ => return Ok(None),
     };
@@ -263,22 +188,150 @@ fn resolve_lookup(command: &Command) -> Result<Option<()>> {
     Ok(Some(()))
 }
 
-/// Presentation flags shared by every provider (upstream `-s/-t/-p/--filter-mode`).
-#[derive(Debug, Clone, Copy)]
-struct StyleOptions {
-    filter_mode: flex_core::filter::FilterMode,
-    char_set: CharSetName,
-    theme: ThemeName,
-    peaks: Peaks,
+/// Toggle a popup variant running `cmd` (the `kill-menu.sh` helper).
+///
+/// # Errors
+///
+/// When `cmd` is empty (`popup.sh` exits 1 on empty args — parity is exact)
+/// or the toggle itself fails. Messages carry no `flex:` prefix.
+fn run_popup(variant: &str, cmd: &[String]) -> Result<()> {
+    if cmd.is_empty() {
+        anyhow::bail!("popup: expected a variant and a command (try `flex popup menu <cmd…>`)");
+    }
+    flex_rice::popup::toggle_with(variant, cmd)
 }
 
-impl StyleOptions {
-    /// Apply the flags to a menu.
-    fn apply(self, mut menu: Menu) -> Menu {
-        menu.app.filter_mode = self.filter_mode;
-        menu.char_set = CharSet::get(self.char_set);
-        menu.theme = Theme::get(self.theme);
-        menu.peaks = self.peaks;
-        menu
+/// Full re-exec argv for a provider binary: its `flex-<name>` program plus
+/// the canonical flag tail.
+///
+/// Pure (no I/O, no spawn): flag order is identical no matter where clap
+/// accepted the globals, so this is unit-testable without opening a TUI.
+#[must_use]
+fn reexec_argv(provider: Provider, style: StyleOptions, print_action: bool) -> Vec<String> {
+    let mut argv = vec![provider.bin_name()];
+    argv.extend(runner::canonical_tail(style, print_action));
+    argv
+}
+
+/// Sibling `flex-<name>` binary next to the running dispatcher.
+///
+/// # Errors
+///
+/// When the current executable path cannot be read or has no parent.
+fn sibling_binary(name: &str) -> Result<PathBuf> {
+    let exe = std::env::current_exe().context("cannot read the current executable path")?;
+    let Some(dir) = exe.parent() else {
+        anyhow::bail!("cannot locate {name} next to the flex binary");
+    };
+    Ok(dir.join(name))
+}
+
+/// Re-exec the provider binary with canonical flags and exit with its code.
+///
+/// # Errors
+///
+/// When the sibling binary cannot be located or spawned. A running child
+/// that exits (any code) never returns an error: its code becomes ours.
+fn reexec(provider: Provider, style: StyleOptions, print_action: bool) -> Result<()> {
+    let argv = reexec_argv(provider, style, print_action);
+    let program = argv.first().map(String::as_str).unwrap_or_default();
+    let bin = sibling_binary(program)?;
+    let tail: Vec<&str> = argv.iter().skip(1).map(String::as_str).collect();
+    let status = std::process::Command::new(&bin)
+        .args(&tail)
+        .status()
+        .with_context(|| format!("cannot spawn {}", bin.display()))?;
+    std::process::exit(status.code().unwrap_or(EXIT_ERROR));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parsed(argv: &[&str]) -> (Provider, StyleOptions, bool) {
+        let cli = Cli::try_parse_from(argv).expect("test argv parses");
+        let style = cli.style.options();
+        match cli.command {
+            Command::Launch { print_action, .. } => (Provider::Launch, style, print_action),
+            other => panic!("expected launch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn global_flags_reconstruct_identically_before_or_after_the_provider() {
+        let (provider, style, print_action) = parsed(&["flex", "-t", "nocolor", "launch"]);
+        let leading = reexec_argv(provider, style, print_action);
+        let (provider, style, print_action) = parsed(&["flex", "launch", "-t", "nocolor"]);
+        let trailing = reexec_argv(provider, style, print_action);
+        let (provider, style, print_action) = parsed(&["flex", "launch"]);
+        let bare = reexec_argv(provider, style, print_action);
+        assert_eq!(
+            leading, trailing,
+            "`flex -t nocolor launch` ≡ `flex launch -t nocolor`"
+        );
+        assert_eq!(
+            leading,
+            vec![
+                "flex-launch",
+                "-s",
+                "default",
+                "-t",
+                "nocolor",
+                "-p",
+                "auto",
+                "--filter-mode",
+                "spec",
+            ]
+            .into_iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+            "canonical order is -s/-t/-p/--filter-mode"
+        );
+        assert_ne!(leading, bare, "a theme override changes the argv");
+    }
+
+    #[test]
+    fn print_action_survives_the_reconstruction() {
+        let cli = Cli::try_parse_from(["flex", "launch", "--print-action"]).expect("parses");
+        let style = cli.style.options();
+        let Command::Launch { print_action, .. } = cli.command else {
+            panic!("expected launch");
+        };
+        let argv = reexec_argv(Provider::Launch, style, print_action);
+        assert_eq!(
+            argv.last().map(String::as_str),
+            Some("--print-action"),
+            "probe flag trails the style flags"
+        );
+    }
+
+    #[test]
+    fn popup_rejects_an_empty_cmd_without_spawning() {
+        assert!(
+            run_popup("menu", &[]).is_err(),
+            "empty cmd errors like popup.sh (exits 1 on empty args)"
+        );
+    }
+
+    #[test]
+    fn all_providers_resolve_to_sibling_binary_names() {
+        for provider in Provider::ALL {
+            let argv = reexec_argv(provider, default_style(), false);
+            assert_eq!(
+                argv.first().map(String::as_str),
+                Some(provider.bin_name()).as_deref(),
+                "program is the sibling binary name"
+            );
+        }
+    }
+
+    /// Test-only default style (mirrors the CLI defaults).
+    fn default_style() -> StyleOptions {
+        StyleOptions {
+            filter_mode: flex_core::filter::FilterMode::Spec,
+            char_set: flex_core::CharSetName::Default,
+            theme: flex_core::ThemeName::Default,
+            peaks: flex_core::Peaks::Auto,
+        }
     }
 }

@@ -442,6 +442,50 @@ pub enum Outcome {
     },
     /// User cancelled (`Esc`, `q` in NORMAL + empty filter).
     Cancelled,
+    /// A deletable row was confirmed for deletion: `(provider, action_id, label)`.
+    ///
+    /// Reported on the `ACTION:DELETE` line; the wrapper performs the removal.
+    Delete {
+        /// Provider name (`clip`, …).
+        provider: String,
+        /// Opaque action id (`RowId` hex).
+        action_id: String,
+        /// Human label (escaped on the `ACTION:DELETE` line).
+        label: String,
+    },
+    /// A pin was toggled on a deletable row: `(provider, action_id, label)`.
+    ///
+    /// Reported on the `ACTION:TOGGLE` line; the wrapper flips the pin.
+    Toggle {
+        /// Provider name (`clip`, …).
+        provider: String,
+        /// Opaque action id (`RowId` hex).
+        action_id: String,
+        /// Human label (escaped on the `ACTION:TOGGLE` line).
+        label: String,
+    },
+    /// A dropdown target was chosen: `(provider, row, target, title)`.
+    ///
+    /// Reported on the `ACTION:TARGET` line; the wrapper applies the routing
+    /// change.
+    Target {
+        /// Provider name (`center`, …).
+        provider: String,
+        /// Opaque action id of the row the dropdown belongs to.
+        row: String,
+        /// Opaque id of the chosen target.
+        target: String,
+        /// Human title of the chosen target (escaped on the line).
+        title: String,
+    },
+    /// Quit the menu with an exit code (no output).
+    ///
+    /// `130` is the user-cancelled code (`Esc`, `q` in NORMAL + empty
+    /// filter, `Ctrl-c`); other codes are runtime quits.
+    Quit {
+        /// Process exit code to quit with.
+        code: i32,
+    },
 }
 
 /// Runtime application state (tabs + mode + help overlay).
