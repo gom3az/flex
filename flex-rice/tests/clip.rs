@@ -222,7 +222,7 @@ fn clip_tab_is_standard_deletable() {
 #[test]
 fn env_overrides_select_the_store() {
     // Serialised with the executor tests below (shared process env).
-    let _env = EXEC_ENV_LOCK.lock().expect("env lock");
+    let _env = exec_env_lock();
     let dir = scratch("env");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
@@ -438,6 +438,10 @@ fn flex_test_replays_are_deterministic_across_bases() {
 /// while the Rust side additionally asserts pins-first + history order.
 #[test]
 fn parity_with_bash_pipeline_on_reference_data() {
+    // Serialised with the executor tests: they mutate/restore `CLIPHIST_FILE`
+    // and `HOME` (and delete their fixtures) while this probe reads them, so
+    // without the lock it can compare bash against a sibling's vanished store.
+    let _env = exec_env_lock();
     let home = std::env::var("HOME").unwrap_or_default();
     let hist = std::env::var(clip::HIST_ENV).unwrap_or_else(|_| format!("{home}/.cache/cliphist"));
     let pins =
@@ -524,6 +528,16 @@ fn unknown_hash_resolves_to_none() {
 /// [`ExecEnvGuard`].
 static EXEC_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// The process-env lock with poison recovery: a panicking sibling must not
+/// fail every other holder with a `PoisonError` that masks the real failure
+/// (its [`ExecEnvGuard`]s already restored the env during unwinding). The
+/// parity probe below also holds this so it never reads a sibling's fixture.
+fn exec_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    EXEC_ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Save/restore one process env var around an executor call.
 struct ExecEnvGuard {
     key: &'static str,
@@ -608,7 +622,7 @@ fn read_call_log(dir: &std::path::Path) -> String {
 #[test]
 fn executor_copy_matrix_copies_decoded_bytes_through_wl_copy() {
     use flex_rice::exec::clip::ClipOp;
-    let _env = EXEC_ENV_LOCK.lock().expect("env lock");
+    let _env = exec_env_lock();
     let long = "L".repeat(200);
     let raws = [
         "alpha<NEWLINE>beta gamma".to_string(),
@@ -668,7 +682,7 @@ fn executor_copy_matrix_copies_decoded_bytes_through_wl_copy() {
 #[test]
 fn executor_delete_scrubs_both_store_files() {
     use flex_rice::exec::clip::ClipOp;
-    let _env = EXEC_ENV_LOCK.lock().expect("env lock");
+    let _env = exec_env_lock();
     let (dir, hist_path, pins_path, path_env) = setup_exec_case(
         "delete",
         b"doomed entry\nkeep me\ndoomextended\n",
@@ -710,7 +724,7 @@ fn executor_delete_scrubs_both_store_files() {
 #[test]
 fn executor_delete_skips_a_missing_history_file() {
     use flex_rice::exec::clip::ClipOp;
-    let _env = EXEC_ENV_LOCK.lock().expect("env lock");
+    let _env = exec_env_lock();
     let (dir, hist_path, pins_path, path_env) =
         setup_exec_case("delete-missing", b"doomed entry\n", b"doomed entry\n");
     std::fs::remove_file(&hist_path).expect("remove hist");
@@ -732,7 +746,7 @@ fn executor_delete_skips_a_missing_history_file() {
 #[test]
 fn executor_toggle_pins_then_unpins() {
     use flex_rice::exec::clip::ClipOp;
-    let _env = EXEC_ENV_LOCK.lock().expect("env lock");
+    let _env = exec_env_lock();
     let (dir, hist_path, pins_path, path_env) =
         setup_exec_case("toggle", b"flip me\nother\n", b"existing pin\n");
     let _hist_env = set_exec_env(clip::HIST_ENV, &hist_path);
@@ -769,7 +783,7 @@ fn executor_toggle_pins_then_unpins() {
 #[test]
 fn executor_toggle_creates_a_missing_pins_file() {
     use flex_rice::exec::clip::ClipOp;
-    let _env = EXEC_ENV_LOCK.lock().expect("env lock");
+    let _env = exec_env_lock();
     let (dir, hist_path, _pins_path, path_env) =
         setup_exec_case("toggle-new", b"flip me\n", b"existing pin\n");
     let nested = dir.join("nested").join("cliphist.pins");
@@ -792,7 +806,7 @@ fn executor_toggle_creates_a_missing_pins_file() {
 #[test]
 fn executor_noop_short_circuits_before_store_and_tools() {
     use flex_rice::exec::clip::ClipOp;
-    let _env = EXEC_ENV_LOCK.lock().expect("env lock");
+    let _env = exec_env_lock();
     let dir = scratch("exec-noop");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("stub dir");
@@ -821,7 +835,7 @@ fn executor_noop_short_circuits_before_store_and_tools() {
 #[test]
 fn executor_rejects_bad_and_unknown_ids_without_its_own_prefix() {
     use flex_rice::exec::clip::ClipOp;
-    let _env = EXEC_ENV_LOCK.lock().expect("env lock");
+    let _env = exec_env_lock();
     let (dir, hist_path, pins_path, path_env) = setup_exec_case("bad-ids", b"real entry\n", b"");
     let _hist_env = set_exec_env(clip::HIST_ENV, &hist_path);
     let _pins_env = set_exec_env(clip::PINS_ENV, &pins_path);
@@ -868,7 +882,7 @@ fn executor_rejects_bad_and_unknown_ids_without_its_own_prefix() {
 #[test]
 fn executor_tool_failure_is_a_loud_error_not_a_quiet_cancel() {
     use flex_rice::exec::clip::ClipOp;
-    let _env = EXEC_ENV_LOCK.lock().expect("env lock");
+    let _env = exec_env_lock();
     let (dir, hist_path, pins_path, path_env) = setup_exec_case("tool-fail", b"entry one\n", b"");
     write_exe(&dir.join("wl-copy"), "#!/usr/bin/env bash\nexit 3\n");
     let _hist_env = set_exec_env(clip::HIST_ENV, &hist_path);
