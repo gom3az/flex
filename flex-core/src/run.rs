@@ -99,7 +99,7 @@ pub fn run(mut menu: Menu) -> Result<()> {
                 area = frame.area();
                 render::render(frame, &mut menu);
             })
-            .context("flex: failed to draw frame")?;
+            .context("failed to draw frame")?;
         if let (Some(images), Some(tty)) = (images.as_mut(), preview_tty.as_mut()) {
             // Best effort: a preview that cannot be drawn (no kitty graphics,
             // unreadable image, converter missing) leaves the pane blank and
@@ -112,8 +112,8 @@ pub fn run(mut menu: Menu) -> Result<()> {
             let park = render::cursor_position(area, &menu);
             let _ = images.sync(tty, pane, source.as_deref().map(std::path::Path::new), park);
         }
-        if crossterm::event::poll(backend::poll_timeout()).context("flex: event poll failed")? {
-            match crossterm::event::read().context("flex: event read failed")? {
+        if crossterm::event::poll(backend::poll_timeout()).context("event poll failed")? {
+            match crossterm::event::read().context("event read failed")? {
                 Event::Key(key) => {
                     let now = loop_now(base, &mut step, seeded);
                     match keys::handle_key(&mut menu, key, now) {

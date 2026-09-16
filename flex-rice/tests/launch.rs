@@ -624,3 +624,37 @@ fn wrapper_treats_the_noop_placeholder_as_a_noop() {
     assert!(!call_log.exists(), "nothing is launched");
     let _ = std::fs::remove_dir_all(&stub);
 }
+
+// --- Engine error format (B-027) -----------------------------------------------
+
+/// Engine-raised errors carry no `flex:` prefix of their own: `main` adds
+/// `flex: error:` exactly once, so the message must not double it the way
+/// `flex: error: flex: cannot open /dev/tty …` used to.
+///
+/// `setsid(1)` detaches the controlling terminal, so `backend::init` fails
+/// deterministically whether or not `cargo test` itself runs under a tty
+/// (without it, a ctty-inheriting child would open the real TUI and hang).
+/// The trailing `(os error N)` text is environment-dependent, so the test
+/// pins the stable prefix plus the single-`flex:` count instead of the
+/// whole line.
+#[test]
+fn engine_errors_are_reported_with_a_single_prefix() {
+    let output = std::process::Command::new("setsid")
+        .arg(env!("CARGO_BIN_EXE_flex"))
+        .arg("launch")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .output()
+        .expect("run flex launch without a controlling terminal");
+    assert!(!output.status.success(), "tty failure exits non-zero");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr.matches("flex:").count(),
+        1,
+        "exactly one `flex:` prefix: {stderr:?}"
+    );
+    assert!(
+        stderr.starts_with("flex: error: cannot open /dev/tty (needs a controlling terminal): "),
+        "engine message carries no prefix of its own: {stderr:?}"
+    );
+}

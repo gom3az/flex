@@ -45,19 +45,18 @@ pub fn open_tty() -> std::io::Result<std::fs::File> {
 /// terminal) or the terminal cannot be prepared.
 pub fn init() -> Result<Terminal<CrosstermBackend<std::fs::File>>> {
     use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen};
-    let tty = open_tty().context("flex: cannot open /dev/tty (needs a controlling terminal)")?;
+    let tty = open_tty().context("cannot open /dev/tty (needs a controlling terminal)")?;
     let mut tty_out = tty
         .try_clone()
-        .context("flex: cannot clone /dev/tty for rendering")?;
+        .context("cannot clone /dev/tty for rendering")?;
     // Alt-screen first: if raw mode fails below, the shell is never left
     // in raw mode; [`restore`] undoes both.
-    crossterm::execute!(tty_out, EnterAlternateScreen)
-        .context("flex: cannot enter alternate screen")?;
+    crossterm::execute!(tty_out, EnterAlternateScreen).context("cannot enter alternate screen")?;
     if let Err(err) = enable_raw_mode() {
         let _ = disable_raw_mode();
-        return Err(err).context("flex: cannot enable raw mode");
+        return Err(err).context("cannot enable raw mode");
     }
-    Terminal::new(CrosstermBackend::new(tty_out)).context("flex: cannot create terminal")
+    Terminal::new(CrosstermBackend::new(tty_out)).context("cannot create terminal")
 }
 
 /// Leave the alternate screen, restoring the user's terminal.
