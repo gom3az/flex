@@ -180,51 +180,56 @@ fn run_waybar_status(state_path: Option<&Path>) {
     println!("{json}");
 }
 
+fn handle_op(op: NotifyOp, state_path: Option<&Path>) -> anyhow::Result<()> {
+    match op {
+        NotifyOp::Send {
+            summary,
+            body,
+            app,
+            urgency,
+            progress,
+        } => {
+            let urg = Urgency::parse(&urgency);
+            let mut item = notify::NotificationItem::new(0, app, summary, body, urg);
+            item.progress = progress;
+            let id = notify::post_notification(item, state_path)?;
+            println!("Notification {id} posted");
+            Ok(())
+        }
+        NotifyOp::ClearAll => {
+            let mut state = notify::load_state(state_path);
+            for n in &mut state.notifications {
+                if !n.is_pinned && n.urgency != Urgency::Critical {
+                    n.is_dismissed = true;
+                }
+            }
+            notify::save_state(&state, state_path)?;
+            println!("Cleared active notifications");
+            Ok(())
+        }
+        NotifyOp::ToggleDnd => {
+            let mut state = notify::load_state(state_path);
+            let now = now_secs();
+            state.controls.dnd = if state.controls.dnd.is_active(now) {
+                DndState::Off
+            } else {
+                DndState::Indefinite
+            };
+            notify::save_state(&state, state_path)?;
+            println!("DND toggled");
+            Ok(())
+        }
+    }
+}
+
+#[allow(clippy::too_many_lines)]
 fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let state_path = cli.state_file.as_deref();
     let style = cli.style.options();
 
     if let Some(op) = cli.op {
-        return match op {
-            NotifyOp::Send {
-                summary,
-                body,
-                app,
-                urgency,
-                progress,
-            } => {
-                let urg = Urgency::parse(&urgency);
-                let mut item = notify::NotificationItem::new(0, app, summary, body, urg);
-                item.progress = progress;
-                let id = notify::post_notification(item, state_path)?;
-                println!("Notification {id} posted");
-                Ok(())
-            }
-            NotifyOp::ClearAll => {
-                let mut state = notify::load_state(state_path);
-                for n in &mut state.notifications {
-                    if !n.is_pinned && n.urgency != Urgency::Critical {
-                        n.is_dismissed = true;
-                    }
-                }
-                notify::save_state(&state, state_path)?;
-                println!("Cleared active notifications");
-                Ok(())
-            }
-            NotifyOp::ToggleDnd => {
-                let mut state = notify::load_state(state_path);
-                let now = now_secs();
-                state.controls.dnd = if state.controls.dnd.is_active(now) {
-                    DndState::Off
-                } else {
-                    DndState::Indefinite
-                };
-                notify::save_state(&state, state_path)?;
-                println!("DND toggled");
-                Ok(())
-            }
-        };
+        return handle_op(op, state_path);
     }
 
     if cli.clear_all {

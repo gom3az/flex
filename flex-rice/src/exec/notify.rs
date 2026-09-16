@@ -356,8 +356,7 @@ pub fn probe_mic_muted() -> bool {
     std::process::Command::new("wpctl")
         .args(["get-volume", "@DEFAULT_AUDIO_SOURCE@"])
         .output()
-        .ok()
-        .is_some_and(|out| String::from_utf8_lossy(&out.stdout).contains("[MUTED]"))
+        .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).contains("[MUTED]"))
 }
 
 /// Update hardware & MPRIS statuses in `QuickControls` while preserving active DND state.
