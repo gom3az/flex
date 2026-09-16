@@ -93,6 +93,14 @@ enum NotifyOp {
         /// In-flight progress fraction (0.0 - 1.0)
         #[arg(short = 'p', long = "progress")]
         progress: Option<f32>,
+
+        /// Path to attached preview image
+        #[arg(short = 'i', long = "image")]
+        image: Option<String>,
+
+        /// Group / Category identifier
+        #[arg(short = 'g', long = "group")]
+        group: Option<String>,
     },
     /// Clear all non-critical notifications
     ClearAll,
@@ -164,13 +172,37 @@ fn run_waybar_status(state_path: Option<&Path>) {
         }
     } else {
         let mut lines = vec![format!("{unread_count} unread notification(s):")];
-        for item in active.iter().take(5) {
-            let rel = notify::format_relative_time(item.timestamp, now);
-            lines.push(format!("• {} ({rel}): {}", item.app_name, item.summary));
+
+        let mut app_map: std::collections::BTreeMap<&str, Vec<&notify::NotificationItem>> =
+            std::collections::BTreeMap::new();
+        for item in &active {
+            app_map
+                .entry(item.app_name.as_str())
+                .or_default()
+                .push(item);
         }
-        if unread_count > 5 {
-            lines.push(format!("... and {} more", unread_count - 5));
+
+        let mut sorted_apps: Vec<(&str, Vec<&notify::NotificationItem>)> =
+            app_map.into_iter().collect();
+        sorted_apps.sort_by_key(|(_, items)| {
+            std::cmp::Reverse(items.iter().map(|n| n.timestamp).max().unwrap_or(0))
+        });
+
+        for (app, items) in sorted_apps {
+            lines.push(format!("\n󰙯 {app} ({}):", items.len()));
+            for item in items.iter().take(3) {
+                let rel = notify::format_relative_time(item.timestamp, now);
+                if item.body.is_empty() {
+                    lines.push(format!("  • ({rel}) {}", item.summary));
+                } else {
+                    lines.push(format!("  • ({rel}) {}: {}", item.summary, item.body));
+                }
+            }
+            if items.len() > 3 {
+                lines.push(format!("    ... and {} more", items.len() - 3));
+            }
         }
+
         if let Some(mpris) = &state.controls.mpris {
             lines.push(format!(
                 "\n󰝚 Now Playing: {} — {} ({})",
@@ -205,10 +237,14 @@ fn handle_op(op: NotifyOp, state_path: Option<&Path>) -> anyhow::Result<()> {
             app,
             urgency,
             progress,
+            image,
+            group,
         } => {
             let urg = Urgency::parse(&urgency);
             let mut item = notify::NotificationItem::new(0, app, summary, body, urg);
             item.progress = progress;
+            item.image_path = image;
+            item.group = group;
             let id = notify::post_notification(item, state_path)?;
             println!("Notification {id} posted");
             Ok(())

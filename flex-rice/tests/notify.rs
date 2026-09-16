@@ -163,10 +163,89 @@ fn channels_tab_groups_by_app() {
 
     assert_eq!(tab.name, provider::TAB_CHANNELS);
     assert!(!tab.filterable);
-    assert_eq!(tab.rows.len(), 4);
-    assert!(tab.rows.iter().any(|r| r.label.contains("Discord")));
-    assert!(tab.rows.iter().any(|r| r.label.contains("PackageKit")));
-    assert!(tab.rows.iter().any(|r| r.label.contains("System")));
+    // 4 channel headers (Discord, PackageKit, Slack, System) + 3 active child notification rows = 7 rows
+    assert_eq!(tab.rows.len(), 7);
+    assert!(tab
+        .rows
+        .iter()
+        .any(|r| r.label.contains("Discord (1 active)")));
+    assert!(tab
+        .rows
+        .iter()
+        .any(|r| r.label.contains("PackageKit (1 active)")));
+    assert!(tab
+        .rows
+        .iter()
+        .any(|r| r.label.contains("System (1 active)")));
+    assert!(tab.rows.iter().any(|r| r.label.contains("#dev-team")));
+}
+
+#[test]
+fn feed_tab_groups_multi_notification_apps() {
+    let mut state = mock_state();
+    // Add a second Discord notification to trigger group header stack
+    let mut n5 = NotificationItem::new(
+        5,
+        "Discord",
+        "#general",
+        "Lunch time everyone!",
+        Urgency::Normal,
+    );
+    n5.timestamp = 900;
+    state.notifications.push(n5);
+
+    let tab = provider::feed_tab_from(&state, 1000);
+    // Row 0: Quick Controls
+    // Row 1: MPRIS
+    // Row 2: Critical Low Battery
+    // Row 3: Discord Group Header (2 notifications)
+    // Row 4: Discord #general
+    // Row 5: Discord #dev-team
+    // Row 6: PackageKit
+    assert_eq!(tab.rows.len(), 7);
+
+    let group_row = tab
+        .rows
+        .iter()
+        .find(|r| r.id.as_str() == "group:Discord")
+        .expect("group header found");
+    assert!(group_row.label.contains("Discord (2 notifications)"));
+    assert!(group_row
+        .targets
+        .iter()
+        .any(|t| t.title.contains("Dismiss All (2)")));
+}
+
+#[test]
+fn notification_preview_carries_body_and_image() {
+    let mut state = NotifyState::default();
+    let mut notif = NotificationItem::new(
+        10,
+        "Flameshot",
+        "Screenshot Captured",
+        "Saved to /tmp/screenshot.png",
+        Urgency::Normal,
+    );
+    notif.image_path = Some("/tmp/screenshot.png".to_string());
+    state.notifications.push(notif);
+
+    let tab = provider::feed_tab_from(&state, 1000);
+    let notif_row = tab
+        .rows
+        .iter()
+        .find(|r| r.id.as_str() == "notif:10")
+        .expect("row found");
+
+    // Text preview in config (detail line)
+    assert_eq!(
+        notif_row.config.as_deref(),
+        Some("Saved to /tmp/screenshot.png")
+    );
+    // Image preview in preview_image
+    assert_eq!(
+        notif_row.preview_image.as_deref(),
+        Some("/tmp/screenshot.png")
+    );
 }
 
 #[test]

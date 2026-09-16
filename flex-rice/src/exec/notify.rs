@@ -64,6 +64,8 @@ pub struct NotificationItem {
     pub is_snoozed: bool,
     pub snooze_until: Option<u64>,
     pub is_dismissed: bool,
+    #[serde(default)]
+    pub group: Option<String>,
 }
 
 impl NotificationItem {
@@ -94,7 +96,22 @@ impl NotificationItem {
             is_snoozed: false,
             snooze_until: None,
             is_dismissed: false,
+            group: None,
         }
+    }
+
+    /// Set optional group name.
+    #[must_use]
+    pub fn with_group(mut self, group: impl Into<String>) -> Self {
+        self.group = Some(group.into());
+        self
+    }
+
+    /// Set optional preview image path.
+    #[must_use]
+    pub fn with_image(mut self, image_path: impl Into<String>) -> Self {
+        self.image_path = Some(image_path.into());
+        self
     }
 }
 
@@ -623,6 +640,24 @@ impl NotificationServer {
         let image_path = hints
             .get("image-path")
             .or_else(|| hints.get("image_path"))
+            .or_else(|| hints.get("image-data"))
+            .and_then(|v| match v {
+                zbus::zvariant::Value::Str(s) => Some(s.to_string()),
+                _ => None,
+            })
+            .or_else(|| {
+                let icon_str = app_icon.strip_prefix("file://").unwrap_or(&app_icon);
+                if !icon_str.is_empty() && std::path::Path::new(icon_str).exists() {
+                    Some(icon_str.to_string())
+                } else {
+                    None
+                }
+            });
+
+        let group = hints
+            .get("group")
+            .or_else(|| hints.get("category"))
+            .or_else(|| hints.get("desktop-entry"))
             .and_then(|v| match v {
                 zbus::zvariant::Value::Str(s) => Some(s.to_string()),
                 _ => None,
@@ -667,6 +702,9 @@ impl NotificationServer {
             if image_path.is_some() {
                 existing.image_path = image_path;
             }
+            if group.is_some() {
+                existing.group = group;
+            }
             if !parsed_actions.is_empty() {
                 existing.actions = parsed_actions;
             }
@@ -679,6 +717,7 @@ impl NotificationServer {
                 item.app_icon = Some(app_icon);
             }
             item.image_path = image_path;
+            item.group = group;
             item.actions = parsed_actions;
             state.notifications.push(item);
         }

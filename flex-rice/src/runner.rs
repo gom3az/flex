@@ -343,7 +343,11 @@ pub fn build_menu(provider: Provider, style: StyleOptions) -> Result<Menu> {
         Provider::Proc => Ok(style.apply(menu(proc::PROVIDER, vec![proc::proc_tab()]))),
         Provider::Net => Ok(style.apply(net::net_menu())),
         Provider::Bt => Ok(style.apply(bt::bt_menu())),
-        Provider::Notify => Ok(style.apply(notify::menu())),
+        Provider::Notify => {
+            let mut built = style.apply(notify::menu());
+            built.preview = flex_core::preview::enabled();
+            Ok(built)
+        }
     }
 }
 

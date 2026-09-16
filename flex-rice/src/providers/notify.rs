@@ -42,6 +42,115 @@ fn now_secs() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
+/// Helper to construct a notification Row with body text preview, graphic image preview, and actions.
+fn notification_row_from(item: &NotificationItem, now: u64, is_child: bool) -> Row {
+    let rel_time = notify::format_relative_time(item.timestamp, now);
+    let entities = notify::extract_entities(&format!("{} {}", item.summary, item.body));
+
+    let mut targets = Vec::new();
+
+    // 1. Extracted entity targets first
+    for entity in &entities {
+        match entity {
+            ExtractedEntity::OtpCode(code) => {
+                targets.push(Target::new(
+                    RowId::new(format!("copy_otp:{code}")),
+                    format!("Copy OTP Code ({code})"),
+                ));
+            }
+            ExtractedEntity::Url(url) => {
+                targets.push(Target::new(
+                    RowId::new(format!("open_url:{url}")),
+                    format!("Open Link ({url})"),
+                ));
+                targets.push(Target::new(
+                    RowId::new(format!("copy_url:{url}")),
+                    format!("Copy Link ({url})"),
+                ));
+            }
+            ExtractedEntity::HexColor(hex) => {
+                targets.push(Target::new(
+                    RowId::new(format!("copy_hex:{hex}")),
+                    format!("Copy Color ({hex})"),
+                ));
+            }
+        }
+    }
+
+    // 2. Attached D-Bus action buttons
+    for action in &item.actions {
+        targets.push(Target::new(
+            RowId::new(format!("action:{}:{}", item.id, action.id)),
+            format!("Action: {}", action.title),
+        ));
+    }
+
+    // 3. Primary management targets
+    targets.push(Target::new(
+        RowId::new(format!("dismiss:{}", item.id)),
+        "Dismiss Notification",
+    ));
+    targets.push(Target::new(
+        RowId::new(format!("dismiss_app:{}", item.app_name)),
+        format!("Dismiss All from {}", item.app_name),
+    ));
+    if !item.body.is_empty() {
+        targets.push(Target::new(
+            RowId::new(format!("copy_body:{}", item.id)),
+            "Copy Message Text",
+        ));
+    }
+    targets.push(Target::new(
+        RowId::new(format!("snooze_15:{}", item.id)),
+        "Snooze 15 Minutes",
+    ));
+    targets.push(Target::new(
+        RowId::new(format!("snooze_60:{}", item.id)),
+        "Snooze 1 Hour",
+    ));
+    targets.push(Target::new(
+        RowId::new(format!("mute_app:{}", item.app_name)),
+        format!("Silence {} for 1 Hour", item.app_name),
+    ));
+
+    if let Some(target) = targets.first_mut() {
+        target.is_default = true;
+    }
+
+    let label = if is_child {
+        format!("  • {}", item.summary)
+    } else {
+        format!("{} · {}", item.app_name, item.summary)
+    };
+
+    let meta = if item.urgency == Urgency::Critical {
+        format!("{rel_time} · Critical")
+    } else {
+        rel_time
+    };
+
+    let mut row = Row::with_targets(RowId::new(format!("notif:{}", item.id)), label, targets, 0);
+    row.meta = Some(meta);
+    row.is_default = item.is_pinned || item.urgency == Urgency::Critical;
+
+    // Body text preview in detail row
+    if !item.body.is_empty() {
+        row.config = Some(item.body.clone());
+    }
+
+    // Attached image preview in Kitty/Ghostty pane
+    if let Some(img) = &item.image_path {
+        row.preview_image = Some(img.clone());
+    }
+
+    // Progress bar for in-flight tasks
+    if let Some(prog) = item.progress {
+        row.volume = Some(prog.clamp(0.0, 1.0));
+    }
+
+    row
+}
+
 /// Construct the `[Feed]` tab.
 #[must_use]
 #[allow(clippy::too_many_lines)]
@@ -191,82 +300,65 @@ pub fn feed_tab_from(state: &NotifyState, now: u64) -> Tab {
         })
         .collect();
 
-    for item in &active_notifs {
-        let rel_time = notify::format_relative_time(item.timestamp, now);
-        let entities = notify::extract_entities(&format!("{} {}", item.summary, item.body));
+    // 3a. Sticky Critical Alerts at Top
+    let (critical_notifs, normal_notifs): (Vec<&NotificationItem>, Vec<&NotificationItem>) =
+        active_notifs
+            .into_iter()
+            .partition(|n| n.urgency == Urgency::Critical);
 
-        let mut targets = Vec::new();
+    for item in critical_notifs {
+        rows.push(notification_row_from(item, now, false));
+    }
 
-        // Add extracted entity targets first
-        for entity in &entities {
-            match entity {
-                ExtractedEntity::OtpCode(code) => {
-                    targets.push(Target::new(
-                        RowId::new(format!("copy_otp:{code}")),
-                        format!("Copy OTP Code ({code})"),
-                    ));
-                }
-                ExtractedEntity::Url(url) => {
-                    targets.push(Target::new(
-                        RowId::new(format!("open_url:{url}")),
-                        format!("Open Link ({url})"),
-                    ));
-                    targets.push(Target::new(
-                        RowId::new(format!("copy_url:{url}")),
-                        format!("Copy Link ({url})"),
-                    ));
-                }
-                ExtractedEntity::HexColor(hex) => {
-                    targets.push(Target::new(
-                        RowId::new(format!("copy_hex:{hex}")),
-                        format!("Copy Color ({hex})"),
-                    ));
-                }
+    // 3b. Grouped Non-Critical Active Stream by Application
+    let mut app_groups: std::collections::BTreeMap<&str, Vec<&NotificationItem>> =
+        std::collections::BTreeMap::new();
+    for item in normal_notifs {
+        app_groups
+            .entry(item.app_name.as_str())
+            .or_default()
+            .push(item);
+    }
+
+    let mut sorted_apps: Vec<(&str, Vec<&NotificationItem>)> = app_groups.into_iter().collect();
+    sorted_apps.sort_by_key(|(_, items)| {
+        std::cmp::Reverse(items.iter().map(|n| n.timestamp).max().unwrap_or(0))
+    });
+
+    for (app_name, items) in sorted_apps {
+        if items.len() > 1 {
+            let latest_ts = items.iter().map(|n| n.timestamp).max().unwrap_or(now);
+            let latest_rel = notify::format_relative_time(latest_ts, now);
+            let group_targets = vec![
+                Target::new(
+                    RowId::new(format!("dismiss_app:{app_name}")),
+                    format!("Dismiss All ({})", items.len()),
+                ),
+                Target::new(
+                    RowId::new(format!("mute_app:{app_name}")),
+                    format!("Mute {app_name} for 1h"),
+                ),
+                Target::new(
+                    RowId::new(format!("priority_app:{app_name}")),
+                    format!("Toggle Priority for {app_name}"),
+                ),
+            ];
+
+            let mut group_row = Row::with_targets(
+                RowId::new(format!("group:{app_name}")),
+                format!("󰙯 {app_name} ({} notifications)", items.len()),
+                group_targets,
+                0,
+            );
+            group_row.meta = Some(latest_rel);
+            rows.push(group_row);
+
+            for item in items {
+                rows.push(notification_row_from(item, now, true));
             }
+        } else if let Some(item) = items.first() {
+            rows.push(notification_row_from(item, now, false));
         }
-
-        targets.push(Target::new(
-            RowId::new(format!("dismiss:{}", item.id)),
-            "Dismiss Notification",
-        ));
-        targets.push(Target::new(
-            RowId::new(format!("dismiss_app:{}", item.app_name)),
-            format!("Dismiss All from {}", item.app_name),
-        ));
-        targets.push(Target::new(
-            RowId::new(format!("snooze_15:{}", item.id)),
-            "Snooze 15 Minutes",
-        ));
-        targets.push(Target::new(
-            RowId::new(format!("snooze_60:{}", item.id)),
-            "Snooze 1 Hour",
-        ));
-        targets.push(Target::new(
-            RowId::new(format!("mute_app:{}", item.app_name)),
-            format!("Silence {} for 1 Hour", item.app_name),
-        ));
-
-        if let Some(target) = targets.first_mut() {
-            target.is_default = true;
-        }
-
-        let label = format!("{} · {}", item.app_name, item.summary);
-        let meta = if item.urgency == Urgency::Critical {
-            format!("{rel_time} · Critical")
-        } else {
-            rel_time
-        };
-
-        let mut row =
-            Row::with_targets(RowId::new(format!("notif:{}", item.id)), label, targets, 0);
-        row.meta = Some(meta);
-        row.is_default = item.is_pinned || item.urgency == Urgency::Critical;
-
-        if let Some(prog) = item.progress {
-            row.volume = Some(prog.clamp(0.0, 1.0));
-        }
-
-        rows.push(row);
     }
 
     if rows.is_empty() {
@@ -296,16 +388,13 @@ pub fn channels_tab_from(state: &NotifyState, now: u64) -> Tab {
     apps.dedup();
 
     for app in apps {
-        let count = state
+        let active_items: Vec<&NotificationItem> = state
             .notifications
             .iter()
             .filter(|n| n.app_name == app && !n.is_dismissed)
-            .count();
-        let latest = state
-            .notifications
-            .iter()
-            .filter(|n| n.app_name == app && !n.is_dismissed)
-            .max_by_key(|n| n.timestamp);
+            .collect();
+        let count = active_items.len();
+        let latest = active_items.iter().max_by_key(|n| n.timestamp);
 
         let meta = latest.map_or_else(
             || String::from("idle"),
@@ -327,14 +416,18 @@ pub fn channels_tab_from(state: &NotifyState, now: u64) -> Tab {
             ),
         ];
 
-        let mut row = Row::with_targets(
+        let mut header_row = Row::with_targets(
             RowId::new(format!("channel:{app}")),
             format!("{app} ({count} active)"),
             targets,
             0,
         );
-        row.meta = Some(meta);
-        rows.push(row);
+        header_row.meta = Some(meta);
+        rows.push(header_row);
+
+        for item in active_items {
+            rows.push(notification_row_from(item, now, true));
+        }
     }
 
     if rows.is_empty() {
@@ -442,6 +535,12 @@ pub fn history_tab_from(state: &NotifyState, now: u64) -> Tab {
         );
         row.meta = Some(format!("{rel_time} · Dismissed"));
         row.offline = true;
+        if !item.body.is_empty() {
+            row.config = Some(item.body.clone());
+        }
+        if let Some(img) = &item.image_path {
+            row.preview_image = Some(img.clone());
+        }
         rows.push(row);
     }
 
@@ -502,6 +601,7 @@ pub struct ExecuteReport {
 ///
 /// # Errors
 /// Returns error if state file cannot be updated.
+#[allow(clippy::too_many_lines)]
 pub fn execute(
     action_id: &str,
     target_title: &str,
@@ -566,10 +666,66 @@ pub fn execute(
                 n.is_dismissed = true;
             }
         }
-    } else if let Some(app) = action_id.strip_prefix("dismiss_app:") {
+    } else if let Some(app) = action_id
+        .strip_prefix("dismiss_app:")
+        .or_else(|| action_id.strip_prefix("group:"))
+    {
         for n in &mut state.notifications {
             if n.app_name == app {
                 n.is_dismissed = true;
+            }
+        }
+    } else if let Some(app) = action_id.strip_prefix("mute_app:") {
+        if !state.muted_apps.iter().any(|a| a.eq_ignore_ascii_case(app)) {
+            state.muted_apps.push(app.to_string());
+        }
+    } else if let Some(app) = action_id.strip_prefix("priority_app:") {
+        if let Some(pos) = state
+            .priority_apps
+            .iter()
+            .position(|a| a.eq_ignore_ascii_case(app))
+        {
+            state.priority_apps.remove(pos);
+        } else {
+            state.priority_apps.push(app.to_string());
+        }
+    } else if let Some(id_str) = action_id.strip_prefix("restore:") {
+        if let Ok(id) = id_str.parse::<u32>() {
+            if let Some(n) = state.notifications.iter_mut().find(|n| n.id == id) {
+                n.is_dismissed = false;
+            }
+        }
+    } else if let Some(id_str) = action_id.strip_prefix("copy_body:") {
+        if let Ok(id) = id_str.parse::<u32>() {
+            if let Some(n) = state.notifications.iter().find(|n| n.id == id) {
+                let text = if n.body.is_empty() {
+                    n.summary.clone()
+                } else {
+                    format!("{}\n{}", n.summary, n.body)
+                };
+                let _ = std::process::Command::new("wl-copy").arg(text).status();
+            }
+        }
+    } else if let Some(id_str) = action_id.strip_prefix("snooze_15:") {
+        if let Ok(id) = id_str.parse::<u32>() {
+            if let Some(n) = state.notifications.iter_mut().find(|n| n.id == id) {
+                n.is_snoozed = true;
+                n.snooze_until = Some(now + 15 * 60);
+            }
+        }
+    } else if let Some(id_str) = action_id.strip_prefix("snooze_60:") {
+        if let Ok(id) = id_str.parse::<u32>() {
+            if let Some(n) = state.notifications.iter_mut().find(|n| n.id == id) {
+                n.is_snoozed = true;
+                n.snooze_until = Some(now + 60 * 60);
+            }
+        }
+    } else if let Some(rest) = action_id.strip_prefix("action:") {
+        if let Some((id_str, _action_key)) = rest.split_once(':') {
+            if let Ok(id) = id_str.parse::<u32>() {
+                if let Some(n) = state.notifications.iter_mut().find(|n| n.id == id) {
+                    n.is_dismissed = true;
+                }
             }
         }
     } else if let Some(code) = action_id.strip_prefix("copy_otp:") {
@@ -578,6 +734,8 @@ pub fn execute(
         let _ = std::process::Command::new("xdg-open").arg(url).spawn();
     } else if let Some(url) = action_id.strip_prefix("copy_url:") {
         let _ = std::process::Command::new("wl-copy").arg(url).status();
+    } else if let Some(hex) = action_id.strip_prefix("copy_hex:") {
+        let _ = std::process::Command::new("wl-copy").arg(hex).status();
     } else if action_id == "dnd:25m" || target_title.contains("Pomodoro") {
         state.controls.dnd = DndState::Timed {
             until: now + 25 * 60,
@@ -639,19 +797,19 @@ mod tests {
         assert_eq!(tab.rows[0].id.as_str(), ACTION_QUICK_CONTROLS);
         assert_eq!(tab.rows[0].label, "Quick Controls & System Shelf");
 
-        // Row 1: Discord notification with OTP & URL targets
+        // Row 1: Critical Low Battery alert (sticky at top, pinned with marker)
         let r1 = &tab.rows[1];
-        assert_eq!(r1.label, "Discord · #dev-team");
-        assert!(r1.targets.iter().any(|t| t.title.contains("849201")));
-        assert!(r1
+        assert_eq!(r1.label, "System · Low Battery Warning");
+        assert!(r1.is_default); // Pinned marker ◇
+
+        // Row 2: Discord notification with OTP & URL targets
+        let r2 = &tab.rows[2];
+        assert_eq!(r2.label, "Discord · #dev-team");
+        assert!(r2.targets.iter().any(|t| t.title.contains("849201")));
+        assert!(r2
             .targets
             .iter()
             .any(|t| t.title.contains("https://github.com")));
-
-        // Row 2: Critical Low Battery alert (pinned)
-        let r2 = &tab.rows[2];
-        assert_eq!(r2.label, "System · Low Battery Warning");
-        assert!(r2.is_default); // Pinned marker ◇
     }
 
     #[test]
