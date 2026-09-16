@@ -1,7 +1,7 @@
 //! `flex-net` binary: network throughput monitor & process bandwidth manager.
 //!
-//! Provides both headless Waybar reporting (`--json`, `--stream`) and an interactive
-//! Wiremix TUI (`flex-net`) showing Top Bandwidth Consumers and Network Interfaces.
+//! Provides both headless Waybar reporting (default, `--stream`) and an interactive
+//! Wiremix TUI (`flex-net -m` or `flex net`) showing Top Bandwidth Consumers and Network Interfaces.
 
 use std::time::Duration;
 
@@ -23,9 +23,9 @@ struct Cli {
     #[command(flatten)]
     style: GlobalStyle,
 
-    /// Emit single Waybar JSON payload and exit.
-    #[arg(short = 'j', long)]
-    json: bool,
+    /// Open interactive Wiremix TUI popup menu.
+    #[arg(short = 'm', long)]
+    menu: bool,
 
     /// Print top network consuming processes to stdout.
     #[arg(short = 'T', long)]
@@ -79,49 +79,50 @@ fn run() -> anyhow::Result<()> {
         return net::stream(interval);
     }
 
-    if cli.json {
+    if cli.menu || cli.print_action {
+        let style = cli.style.options();
+        runner::popup_guard(Provider::Net)?;
+
+        if cli.print_action {
+            return runner::run_select(Provider::Net, style);
+        }
+
+        let menu = runner::build_menu(Provider::Net, style)?;
+        match flex_core::run::run_capture(menu)? {
+            Outcome::Chosen { action_id, .. } => {
+                if let Some(pid) = action_id.strip_prefix("proc:") {
+                    net::execute(&format!("signal:{pid}:SIGTERM"))?;
+                } else {
+                    net::execute(&action_id)?;
+                }
+                Ok(())
+            }
+            Outcome::Delete { action_id, .. } => {
+                if let Some(pid) = action_id.strip_prefix("proc:") {
+                    net::execute(&format!("signal:{pid}:SIGKILL"))?;
+                }
+                Ok(())
+            }
+            Outcome::Toggle { action_id, .. } => {
+                if let Some(pid) = action_id.strip_prefix("proc:") {
+                    net::execute(&format!("signal:{pid}:SIGSTOP"))?;
+                }
+                Ok(())
+            }
+            Outcome::Target { target, .. } => {
+                net::execute(&target)?;
+                Ok(())
+            }
+            Outcome::Quit { code } => {
+                std::process::exit(code);
+            }
+            Outcome::Cancelled => {
+                std::process::exit(EXIT_CANCELLED);
+            }
+        }
+    } else {
+        // Default (zero arguments / headless): emit single Waybar JSON payload
         println!("{}", net::sample_json());
-        return Ok(());
-    }
-
-    let style = cli.style.options();
-    runner::popup_guard(Provider::Net)?;
-
-    if cli.print_action {
-        return runner::run_select(Provider::Net, style);
-    }
-
-    let menu = runner::build_menu(Provider::Net, style)?;
-    match flex_core::run::run_capture(menu)? {
-        Outcome::Chosen { action_id, .. } => {
-            if let Some(pid) = action_id.strip_prefix("proc:") {
-                net::execute(&format!("signal:{pid}:SIGTERM"))?;
-            } else {
-                net::execute(&action_id)?;
-            }
-            Ok(())
-        }
-        Outcome::Delete { action_id, .. } => {
-            if let Some(pid) = action_id.strip_prefix("proc:") {
-                net::execute(&format!("signal:{pid}:SIGKILL"))?;
-            }
-            Ok(())
-        }
-        Outcome::Toggle { action_id, .. } => {
-            if let Some(pid) = action_id.strip_prefix("proc:") {
-                net::execute(&format!("signal:{pid}:SIGSTOP"))?;
-            }
-            Ok(())
-        }
-        Outcome::Target { target, .. } => {
-            net::execute(&target)?;
-            Ok(())
-        }
-        Outcome::Quit { code } => {
-            std::process::exit(code);
-        }
-        Outcome::Cancelled => {
-            std::process::exit(EXIT_CANCELLED);
-        }
+        Ok(())
     }
 }

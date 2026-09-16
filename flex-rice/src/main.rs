@@ -230,7 +230,9 @@ fn run() -> Result<()> {
         ),
         Command::Wifi { print_action } => reexec(Provider::Wifi, style, *print_action, &[]),
         Command::Proc { print_action } => reexec(Provider::Proc, style, *print_action, &[]),
-        Command::Net { print_action } => reexec(Provider::Net, style, *print_action, &[]),
+        Command::Net { print_action } => {
+            reexec(Provider::Net, style, *print_action, &[String::from("-m")])
+        }
     }
 }
 
