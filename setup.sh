@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# setup.sh — link the thirteen flex release binaries into ~/.local/bin.
+# setup.sh — link the fifteen flex release binaries into ~/.local/bin.
 #
 # Usage:
-#   ./setup.sh          create (or refresh) the thirteen symlinks
-#   ./setup.sh --check  assert all thirteen resolve into the current target/release
+#   ./setup.sh          create (or refresh) the fifteen symlinks
+#   ./setup.sh --check  assert all fifteen resolve into the current target/release
 #
 # The links point at ./target/release/ (build with `cargo build --release`
-# first); `--check` is the CI gate that the dispatcher and the twelve
+# first); `--check` is the CI gate that the dispatcher and the fourteen
 # per-provider/helper binaries are all installed.
 
 set -euo pipefail
@@ -29,6 +29,8 @@ BINS=(
     flex-record
     flex-mixer
     flex-net
+    flex-bt
+    flex-notify
 )
 
 usage() {
