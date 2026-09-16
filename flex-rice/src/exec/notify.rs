@@ -629,12 +629,13 @@ impl NotificationServer {
             });
 
         let mut parsed_actions = Vec::new();
-        let mut chunks = actions.chunks_exact(2);
-        for chunk in &mut chunks {
-            parsed_actions.push(NotificationAction {
-                id: chunk[0].clone(),
-                title: chunk[1].clone(),
-            });
+        for chunk in actions.chunks(2) {
+            if chunk.len() == 2 {
+                parsed_actions.push(NotificationAction {
+                    id: chunk[0].clone(),
+                    title: chunk[1].clone(),
+                });
+            }
         }
 
         let mut state = load_state(self.state_path.as_deref());
