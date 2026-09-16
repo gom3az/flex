@@ -29,7 +29,7 @@ timestamp=$(date +%Y-%m-%d_%H-%M-%S)
 
 # Write capture script to a temp file — setsid bash can't define functions.
 cap_script=$(mktemp /tmp/flex-shot-cap.XXXXXX.sh)
-trap "rm -f '$cap_script'" EXIT
+trap 'rm -f "$cap_script"' EXIT
 
 cat > "$cap_script" <<CAPSCRIPT
 #!/usr/bin/env bash
@@ -87,19 +87,23 @@ setsid --fork bash "$cap_script" "$id" "$filepath" "$rec_start" &
 cap_pid=$!
 
 # Close popup window so slurp/grim get a clean screen.
-popup_pid=$(ps -eo pid,args | grep 'kitty --class kitty-menu' | grep -v grep | awk '{print $1}' | head -1)
+popup_pid=$(pgrep -f 'kitty --class kitty-menu' | head -1)
 [[ -n "$popup_pid" ]] && kill "$popup_pid" 2>/dev/null || true
 
 # Wait for popup window to disappear.
 for _ in {1..20}; do
-    hyprctl clients -j 2>/dev/null | python3 -c "
+    if hyprctl clients -j 2>/dev/null | python3 -c "
 import sys, json
 cls = json.load(sys.stdin)
 for c in cls:
     if 'kitty-menu' in str(c.get('class','')):
         sys.exit(0)
 sys.exit(1)
-" 2>/dev/null && sleep 0.05 || break
+" 2>/dev/null; then
+        sleep 0.05
+    else
+        break
+    fi
 done
 
 wait "$cap_pid" || true

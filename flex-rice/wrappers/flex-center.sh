@@ -109,12 +109,15 @@ do_wifi() { # $1 = SSID — fresh-state port of the bash `wifi)` arm
     local ssid="$1" wif
     wif="$("$nmcli_cmd" -t -f DEVICE,TYPE device 2>/dev/null | awk -F: '$2=="wifi"{print $1; exit}')" || true
     [[ -n "${wif:-}" ]] || exit 0 # interface vanished since the snapshot
-    local line inuse rest sec signal ssid_esc candidate row_sec="" row_status=""
+    local line inuse rest sec ssid_esc candidate row_sec="" row_status=""
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
         inuse="${line%%:*}"; rest="${line#*:}"
         sec="${rest##*:}"; rest="${rest%:*}"
-        signal="${rest##*:}"; ssid_esc="${rest%:*}"
+        # SIGNAL is the second field from the right (never contains a colon)
+        # but connect decisions need only security + IN-USE, so it is
+        # stripped without being kept.
+        ssid_esc="${rest%:*}"
         candidate="$(nmcli_unescape "$ssid_esc")"
         if [[ "$candidate" == "$ssid" ]]; then
             row_sec="$sec"
