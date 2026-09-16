@@ -12,6 +12,7 @@ pub mod clip;
 pub mod launch;
 pub mod power;
 pub mod proc;
+pub mod record;
 pub mod shot;
 pub mod theme;
 pub mod wallpaper;

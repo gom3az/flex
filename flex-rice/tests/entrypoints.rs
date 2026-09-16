@@ -47,6 +47,7 @@ fn every_binary_answers_help_with_exit_0() {
         env!("CARGO_BIN_EXE_flex-wallpaper"),
         env!("CARGO_BIN_EXE_flex-wifi"),
         env!("CARGO_BIN_EXE_flex-proc"),
+        env!("CARGO_BIN_EXE_flex-record"),
     ];
     for bin in bins {
         let output = std::process::Command::new(bin)

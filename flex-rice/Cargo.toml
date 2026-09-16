@@ -50,6 +50,10 @@ path = "src/bin/flex-wifi.rs"
 name = "flex-proc"
 path = "src/bin/flex-proc.rs"
 
+[[bin]]
+name = "flex-record"
+path = "src/bin/flex-record.rs"
+
 [dependencies]
 # The engine, built from the sibling `flex-core` member (see the workspace root).
 flex-core.workspace = true

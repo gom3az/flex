@@ -300,8 +300,9 @@ pub fn save_dir() -> Result<PathBuf> {
     Ok(Path::new(&home).join("Pictures/Screenshots"))
 }
 
-/// Recording helper: `RECORDING_START`, else
-/// `$HOME/.config/waybar/recording-start.sh` (empty values fall back).
+/// Recording helper: `RECORDING_START`, else `$HOME/.local/bin/flex-record`
+/// (empty values fall back). The helper takes `[-a] [-g GEOM] FILE`, which
+/// `flex-record` accepts directly (the drop-in start shape).
 ///
 /// # Errors
 ///
@@ -313,7 +314,7 @@ pub fn rec_start() -> Result<PathBuf> {
         }
     }
     let home = std::env::var("HOME").context("shot: HOME is not set")?;
-    Ok(Path::new(&home).join(".config/waybar/recording-start.sh"))
+    Ok(Path::new(&home).join(".local/bin/flex-record"))
 }
 
 /// How a detached worker run ended.
@@ -925,6 +926,24 @@ mod tests {
         match saved {
             Some(value) => std::env::set_var("RECORDING_START", value),
             None => std::env::remove_var("RECORDING_START"),
+        }
+    }
+
+    #[test]
+    fn rec_start_defaults_to_the_flex_record_binary() {
+        let saved_rec = std::env::var("RECORDING_START").ok();
+        let saved_home = std::env::var("HOME").ok();
+        std::env::remove_var("RECORDING_START");
+        std::env::set_var("HOME", "/tmp/flex-rec-home");
+        let rec = rec_start().expect("default rec");
+        assert_eq!(rec, Path::new("/tmp/flex-rec-home/.local/bin/flex-record"));
+        match saved_rec {
+            Some(value) => std::env::set_var("RECORDING_START", value),
+            None => std::env::remove_var("RECORDING_START"),
+        }
+        match saved_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
         }
     }
 }
