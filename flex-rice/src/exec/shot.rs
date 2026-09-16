@@ -905,8 +905,11 @@ mod tests {
         assert_eq!(active_geometry(""), None);
     }
 
+    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn save_dir_prefers_the_override() {
+        let _guard = ENV_MUTEX.lock().unwrap();
         let saved = std::env::var("SCREENSHOT_DIR").ok();
         std::env::set_var("SCREENSHOT_DIR", "/tmp/shots");
         let dir = save_dir().expect("override dir");
@@ -919,6 +922,7 @@ mod tests {
 
     #[test]
     fn rec_start_prefers_the_override() {
+        let _guard = ENV_MUTEX.lock().unwrap();
         let saved = std::env::var("RECORDING_START").ok();
         std::env::set_var("RECORDING_START", "/tmp/rec.sh");
         let rec = rec_start().expect("override rec");
@@ -931,6 +935,7 @@ mod tests {
 
     #[test]
     fn rec_start_defaults_to_the_flex_record_binary() {
+        let _guard = ENV_MUTEX.lock().unwrap();
         let saved_rec = std::env::var("RECORDING_START").ok();
         let saved_home = std::env::var("HOME").ok();
         std::env::remove_var("RECORDING_START");

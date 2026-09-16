@@ -456,6 +456,283 @@ pub fn format_duration(seconds: u64) -> String {
     let secs = seconds % 60;
     format!("{mins:02}:{secs:02}")
 }
+/// Parse urgency from a D-Bus variant hint.
+#[must_use]
+pub fn parse_hint_urgency(val: &zbus::zvariant::Value) -> Urgency {
+    match val {
+        zbus::zvariant::Value::U8(0)
+        | zbus::zvariant::Value::I16(0)
+        | zbus::zvariant::Value::I32(0)
+        | zbus::zvariant::Value::I64(0) => Urgency::Low,
+        zbus::zvariant::Value::U8(2)
+        | zbus::zvariant::Value::I16(2)
+        | zbus::zvariant::Value::I32(2)
+        | zbus::zvariant::Value::I64(2) => Urgency::Critical,
+        zbus::zvariant::Value::Str(s) => Urgency::parse(s.as_str()),
+        zbus::zvariant::Value::Value(inner) => parse_hint_urgency(inner),
+        _ => Urgency::Normal,
+    }
+}
+
+/// Parse progress fraction (0.0 to 1.0) from a D-Bus variant hint.
+#[must_use]
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+pub fn parse_hint_progress(val: &zbus::zvariant::Value) -> Option<f32> {
+    let num = match val {
+        zbus::zvariant::Value::U8(v) => Some(f64::from(*v)),
+        zbus::zvariant::Value::I16(v) => Some(f64::from(*v)),
+        zbus::zvariant::Value::I32(v) => Some(f64::from(*v)),
+        zbus::zvariant::Value::I64(v) => Some(*v as f64),
+        zbus::zvariant::Value::U32(v) => Some(f64::from(*v)),
+        zbus::zvariant::Value::U64(v) => Some(*v as f64),
+        zbus::zvariant::Value::F64(v) => Some(*v),
+        zbus::zvariant::Value::Value(inner) => return parse_hint_progress(inner),
+        _ => None,
+    };
+    num.map(|n| {
+        if n > 1.0 {
+            ((n / 100.0) as f32).clamp(0.0, 1.0)
+        } else {
+            (n as f32).clamp(0.0, 1.0)
+        }
+    })
+}
+
+/// Play a subtle notification audio cue based on urgency, respecting DND mode.
+pub fn play_notification_sound(urgency: Urgency, dnd_active: bool) {
+    if dnd_active {
+        return;
+    }
+
+    let sound_paths = match urgency {
+        Urgency::Critical => [
+            "/usr/share/sounds/freedesktop/stereo/dialog-warning.oga",
+            "/usr/share/sounds/freedesktop/stereo/bell.oga",
+            "/usr/share/sounds/freedesktop/stereo/dialog-error.oga",
+        ],
+        Urgency::Normal | Urgency::Low => [
+            "/usr/share/sounds/freedesktop/stereo/message.oga",
+            "/usr/share/sounds/freedesktop/stereo/message-new-instant.oga",
+            "/usr/share/sounds/freedesktop/stereo/dialog-information.oga",
+        ],
+    };
+
+    let target_file = sound_paths.iter().find(|p| Path::new(p).exists());
+    let Some(&chosen_sound) = target_file else {
+        return;
+    };
+
+    // Try players in order of preference: pw-play, paplay, canberra-gtk-play, aplay
+    let players: &[(&str, &[&str])] = &[
+        ("pw-play", &[chosen_sound]),
+        ("paplay", &[chosen_sound]),
+        ("canberra-gtk-play", &["-f", chosen_sound]),
+        ("aplay", &[chosen_sound]),
+    ];
+
+    for &(prog, args) in players {
+        if std::process::Command::new(prog)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .is_ok()
+        {
+            break;
+        }
+    }
+}
+
+/// D-Bus Notification Service implementation of `org.freedesktop.Notifications`.
+pub struct NotificationServer {
+    pub state_path: Option<PathBuf>,
+}
+
+impl NotificationServer {
+    #[must_use]
+    pub fn new(state_path: Option<PathBuf>) -> Self {
+        Self { state_path }
+    }
+}
+
+#[zbus::interface(name = "org.freedesktop.Notifications")]
+impl NotificationServer {
+    /// Capabilities supported by the notification server.
+    #[must_use]
+    #[allow(clippy::unused_self)]
+    pub fn get_capabilities(&self) -> Vec<String> {
+        vec![
+            "actions".to_string(),
+            "body".to_string(),
+            "body-markup".to_string(),
+            "persistence".to_string(),
+            "sound".to_string(),
+        ]
+    }
+
+    /// Server information.
+    #[must_use]
+    #[allow(clippy::unused_self)]
+    pub fn get_server_information(
+        &self,
+    ) -> (&'static str, &'static str, &'static str, &'static str) {
+        ("flex-notify", "flex", env!("CARGO_PKG_VERSION"), "1.2")
+    }
+
+    /// Close notification by ID.
+    ///
+    /// # Errors
+    /// Returns error if D-Bus signal emission fails.
+    pub async fn close_notification(
+        &self,
+        id: u32,
+        #[zbus(signal_emitter)] emitter: zbus::object_server::SignalEmitter<'_>,
+    ) -> zbus::fdo::Result<()> {
+        let mut state = load_state(self.state_path.as_deref());
+        if let Some(item) = state.notifications.iter_mut().find(|n| n.id == id) {
+            item.is_dismissed = true;
+            let _ = save_state(&state, self.state_path.as_deref());
+        }
+        let _ = Self::notification_closed(&emitter, id, 3).await;
+        Ok(())
+    }
+
+    /// Process and store incoming notification.
+    #[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
+    pub fn notify(
+        &self,
+        app_name: String,
+        replaces_id: u32,
+        app_icon: String,
+        summary: String,
+        body: String,
+        actions: Vec<String>,
+        hints: std::collections::HashMap<String, zbus::zvariant::Value>,
+        expire_timeout: i32,
+    ) -> u32 {
+        let _ = expire_timeout;
+        let urgency = hints
+            .get("urgency")
+            .map_or(Urgency::Normal, parse_hint_urgency);
+        let progress = hints
+            .get("value")
+            .or_else(|| hints.get("progress"))
+            .and_then(parse_hint_progress);
+
+        let image_path = hints
+            .get("image-path")
+            .or_else(|| hints.get("image_path"))
+            .and_then(|v| match v {
+                zbus::zvariant::Value::Str(s) => Some(s.to_string()),
+                _ => None,
+            });
+
+        let mut parsed_actions = Vec::new();
+        let mut chunks = actions.chunks_exact(2);
+        for chunk in &mut chunks {
+            parsed_actions.push(NotificationAction {
+                id: chunk[0].clone(),
+                title: chunk[1].clone(),
+            });
+        }
+
+        let mut state = load_state(self.state_path.as_deref());
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+
+        let target_id = if replaces_id > 0 {
+            replaces_id
+        } else {
+            state.notifications.iter().map(|n| n.id).max().unwrap_or(0) + 1
+        };
+
+        let is_app_muted = state
+            .muted_apps
+            .iter()
+            .any(|a| a.eq_ignore_ascii_case(&app_name));
+
+        if let Some(existing) = state.notifications.iter_mut().find(|n| n.id == target_id) {
+            existing.app_name = app_name;
+            existing.summary = summary;
+            existing.body = body;
+            existing.urgency = urgency;
+            existing.timestamp = now;
+            existing.progress = progress;
+            if !app_icon.is_empty() {
+                existing.app_icon = Some(app_icon);
+            }
+            if image_path.is_some() {
+                existing.image_path = image_path;
+            }
+            if !parsed_actions.is_empty() {
+                existing.actions = parsed_actions;
+            }
+            existing.is_dismissed = false;
+        } else {
+            let mut item = NotificationItem::new(target_id, app_name, summary, body, urgency);
+            item.timestamp = now;
+            item.progress = progress;
+            if !app_icon.is_empty() {
+                item.app_icon = Some(app_icon);
+            }
+            item.image_path = image_path;
+            item.actions = parsed_actions;
+            state.notifications.push(item);
+        }
+
+        let is_dnd = state.controls.dnd.is_active(now);
+        let _ = save_state(&state, self.state_path.as_deref());
+
+        let suppress_sound = hints
+            .get("suppress-sound")
+            .and_then(|v| match v {
+                zbus::zvariant::Value::Bool(b) => Some(*b),
+                _ => None,
+            })
+            .unwrap_or(false);
+
+        if !is_dnd && !is_app_muted && !suppress_sound {
+            play_notification_sound(urgency, false);
+        }
+
+        target_id
+    }
+
+    /// Emitted when a notification is closed.
+    #[zbus(signal)]
+    async fn notification_closed(
+        emitter: &zbus::object_server::SignalEmitter<'_>,
+        id: u32,
+        reason: u32,
+    ) -> zbus::Result<()>;
+
+    /// Emitted when an action button is clicked on a notification.
+    #[zbus(signal)]
+    async fn action_invoked(
+        emitter: &zbus::object_server::SignalEmitter<'_>,
+        id: u32,
+        action_key: &str,
+    ) -> zbus::Result<()>;
+}
+
+/// Run the D-Bus Notification daemon.
+///
+/// # Errors
+/// Returns error if D-Bus connection or name acquisition fails.
+pub async fn run_daemon(state_path: Option<PathBuf>, _replace: bool) -> anyhow::Result<()> {
+    let server = NotificationServer::new(state_path);
+    let _conn = zbus::connection::Builder::session()?
+        .name("org.freedesktop.Notifications")?
+        .serve_at("/org/freedesktop/Notifications", server)?
+        .build()
+        .await?;
+
+    // Keep daemon running
+    std::future::pending::<()>().await;
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {
@@ -518,6 +795,111 @@ mod tests {
         assert_eq!(loaded.notifications.len(), 1);
         assert_eq!(loaded.notifications[0].app_name, "Discord");
         assert!(loaded.controls.night_light);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_hint_urgency_variants() {
+        assert_eq!(
+            parse_hint_urgency(&zbus::zvariant::Value::U8(0)),
+            Urgency::Low
+        );
+        assert_eq!(
+            parse_hint_urgency(&zbus::zvariant::Value::U8(1)),
+            Urgency::Normal
+        );
+        assert_eq!(
+            parse_hint_urgency(&zbus::zvariant::Value::U8(2)),
+            Urgency::Critical
+        );
+        assert_eq!(
+            parse_hint_urgency(&zbus::zvariant::Value::Str("critical".into())),
+            Urgency::Critical
+        );
+        assert_eq!(
+            parse_hint_urgency(&zbus::zvariant::Value::I32(2)),
+            Urgency::Critical
+        );
+    }
+
+    #[test]
+    fn parse_hint_progress_percentage_and_fraction() {
+        let p1 = parse_hint_progress(&zbus::zvariant::Value::U8(75));
+        assert_eq!(p1, Some(0.75));
+
+        let p2 = parse_hint_progress(&zbus::zvariant::Value::F64(0.42));
+        assert_eq!(p2, Some(0.42));
+
+        let p3 = parse_hint_progress(&zbus::zvariant::Value::I32(150));
+        assert_eq!(p3, Some(1.0));
+    }
+
+    #[test]
+    fn notification_server_capabilities_and_info() {
+        let srv = NotificationServer::new(None);
+        let caps = srv.get_capabilities();
+        assert!(caps.contains(&"actions".to_string()));
+        assert!(caps.contains(&"body".to_string()));
+        assert!(caps.contains(&"sound".to_string()));
+
+        let info = srv.get_server_information();
+        assert_eq!(info.0, "flex-notify");
+        assert_eq!(info.1, "flex");
+    }
+
+    #[test]
+    fn notification_server_ingests_and_replaces_notifications() {
+        let dir = std::env::temp_dir().join(format!("flex-notify-srv-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("srv-state.json");
+
+        let srv = NotificationServer::new(Some(path.clone()));
+
+        // Ingest new notification
+        let mut hints = std::collections::HashMap::new();
+        hints.insert("urgency".to_string(), zbus::zvariant::Value::U8(2));
+        hints.insert("value".to_string(), zbus::zvariant::Value::U8(50));
+
+        let id = srv.notify(
+            "Cargo".to_string(),
+            0,
+            "cargo-icon".to_string(),
+            "Build Finished".to_string(),
+            "Compilation completed in 2.3s".to_string(),
+            vec!["open".to_string(), "Open Artifacts".to_string()],
+            hints,
+            -1,
+        );
+
+        assert_eq!(id, 1);
+        let s1 = load_state(Some(&path));
+        assert_eq!(s1.notifications.len(), 1);
+        assert_eq!(s1.notifications[0].app_name, "Cargo");
+        assert_eq!(s1.notifications[0].urgency, Urgency::Critical);
+        assert_eq!(s1.notifications[0].progress, Some(0.5));
+        assert_eq!(s1.notifications[0].actions.len(), 1);
+        assert_eq!(s1.notifications[0].actions[0].id, "open");
+
+        // Thread update on same ID
+        let mut hints_update = std::collections::HashMap::new();
+        hints_update.insert("value".to_string(), zbus::zvariant::Value::U8(100));
+        let id2 = srv.notify(
+            "Cargo".to_string(),
+            1,
+            "cargo-icon".to_string(),
+            "Build Complete".to_string(),
+            "All targets finished".to_string(),
+            vec![],
+            hints_update,
+            -1,
+        );
+
+        assert_eq!(id2, 1);
+        let s2 = load_state(Some(&path));
+        assert_eq!(s2.notifications.len(), 1);
+        assert_eq!(s2.notifications[0].summary, "Build Complete");
+        assert_eq!(s2.notifications[0].progress, Some(1.0));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

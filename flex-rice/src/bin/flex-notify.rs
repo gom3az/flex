@@ -36,6 +36,10 @@ struct Cli {
     #[arg(short = 'm', long = "menu")]
     menu: bool,
 
+    /// Run the background D-Bus Notification service (org.freedesktop.Notifications)
+    #[arg(short = 'd', long = "daemon")]
+    daemon: bool,
+
     /// Clear all active non-critical notifications
     #[arg(long = "clear-all")]
     clear_all: bool,
@@ -63,6 +67,12 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum NotifyOp {
+    /// Run the background D-Bus notification daemon
+    Daemon {
+        /// Replace existing notification daemon on D-Bus
+        #[arg(long)]
+        replace: bool,
+    },
     /// Post a new notification into the notification feed
     Send {
         /// Notification summary / title
@@ -182,6 +192,13 @@ fn run_waybar_status(state_path: Option<&Path>) {
 
 fn handle_op(op: NotifyOp, state_path: Option<&Path>) -> anyhow::Result<()> {
     match op {
+        NotifyOp::Daemon { replace } => {
+            zbus::block_on(notify::run_daemon(
+                state_path.map(Path::to_path_buf),
+                replace,
+            ))?;
+            Ok(())
+        }
         NotifyOp::Send {
             summary,
             body,
@@ -227,6 +244,10 @@ fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let state_path = cli.state_file.as_deref();
     let style = cli.style.options();
+
+    if cli.daemon {
+        return zbus::block_on(notify::run_daemon(cli.state_file, false));
+    }
 
     if let Some(op) = cli.op {
         return handle_op(op, state_path);

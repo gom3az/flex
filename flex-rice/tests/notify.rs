@@ -308,3 +308,55 @@ fn mpris_parser_handles_twitch_livestreams_and_youtube() {
     assert_eq!(spotify.position_secs, 134);
     assert_eq!(spotify.length_secs, 248);
 }
+
+#[test]
+fn sound_playback_safety_with_dnd_and_urgency() {
+    // Suppressed when DND is active
+    notify::play_notification_sound(Urgency::Critical, true);
+    notify::play_notification_sound(Urgency::Normal, true);
+    notify::play_notification_sound(Urgency::Low, true);
+
+    // Safe execution (non-blocking, tolerates missing sound players or headless test env)
+    notify::play_notification_sound(Urgency::Normal, false);
+    notify::play_notification_sound(Urgency::Critical, false);
+}
+
+#[test]
+fn notify_daemon_dbus_server_contract() {
+    let dir = std::env::temp_dir().join(format!("flex-notify-dbus-test-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("dbus-state.json");
+
+    let server = notify::NotificationServer::new(Some(path.clone()));
+    let caps = server.get_capabilities();
+    assert!(caps.contains(&"actions".to_string()));
+    assert!(caps.contains(&"body".to_string()));
+    assert!(caps.contains(&"sound".to_string()));
+
+    let (name, vendor, ver, spec) = server.get_server_information();
+    assert_eq!(name, "flex-notify");
+    assert_eq!(vendor, "flex");
+    assert_eq!(ver, env!("CARGO_PKG_VERSION"));
+    assert_eq!(spec, "1.2");
+
+    let mut hints = std::collections::HashMap::new();
+    hints.insert("urgency".to_string(), zbus::zvariant::Value::U8(1));
+    let notif_id = server.notify(
+        "Firefox".to_string(),
+        0,
+        "firefox".to_string(),
+        "Download Finished".to_string(),
+        "ISO downloaded".to_string(),
+        vec!["open".to_string(), "Open".to_string()],
+        hints,
+        5000,
+    );
+    assert_eq!(notif_id, 1);
+
+    let state = notify::load_state(Some(&path));
+    assert_eq!(state.notifications.len(), 1);
+    assert_eq!(state.notifications[0].app_name, "Firefox");
+    assert_eq!(state.notifications[0].summary, "Download Finished");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
