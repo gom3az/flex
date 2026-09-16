@@ -13,6 +13,18 @@ longer consumed by anything — each binary selects a row and runs its effect
 directly.
 
 ### Added
+- `flex-notify`: Native right-side Notification Center drawer (`-m` / `flex notify`),
+  Waybar JSON polling module (`--status`), CLI operations (`send`, `clear-all`, `toggle-dnd`),
+  and background D-Bus listener daemon (`daemon`).
+  - Implements `org.freedesktop.Notifications` (`/org/freedesktop/Notifications`)
+    for direct ingestion of `notify-send` and desktop app alerts.
+  - Live MPRIS synchronization with playback controls and twitch/youtube scrubber.
+  - Regex-free actionable entity extractors (OTP 2FA codes, URLs, hex color codes).
+  - Subtle notification audio cues for incoming normal and critical alerts with
+    automatic DND suppression and app-level muting.
+- `flex-mixer`: Interactive PipeWire/WirePlumber audio and microphone mixer popup.
+- `flex-net`: Live network interface and bandwidth telemetry monitor.
+- `flex-bt`: Bluetooth device manager with pairing and battery status probes.
 - `flex-clip add|pin|unpin|current`, `flex-theme list|current|activate|delete`
   and `flex-wallpaper set <path>`: the retired `cliphist.sh` /
   `theme-switcher.sh` / `set-wallpaper.sh` entry points as non-interactive

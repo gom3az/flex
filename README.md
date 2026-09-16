@@ -1,10 +1,10 @@
 # flex — reusable Rust TUI menu library
 
 `flex` powers the dotfiles popup menus (`power`, `launch`, `clip`, `center`,
-`shot`, `theme`, `wallpaper`, `wifi`, `proc`). Every provider is a Rust binary
-that renders its menu and executes the selected row **in-process** — the
-retired shell wrappers and the `ACTION:` wire protocol are no longer on the
-call path.
+`shot`, `theme`, `wallpaper`, `wifi`, `proc`, `mixer`, `net`, `bt`, `notify`).
+Every provider is a Rust binary that renders its menu and executes the selected
+row **in-process** — the retired shell wrappers and the `ACTION:` wire protocol
+are no longer on the call path.
 
 ## Workspace layout
 
@@ -13,13 +13,13 @@ Both halves of flex live in this repo as workspace members:
 | Crate | Where it lives | Publishable |
 |---|---|---|
 | `flex-core` | This repo, `flex-core/`: the engine — menu/list rendering, fuzzy filtering, key handling, the design system, kitty-graphics previews. No machine-specific paths. | Yes |
-| `flex-rice` | This repo, `flex-rice/`: the nine providers, their executors (`exec/`), the `flex` dispatcher and the `flex-<provider>` binaries. Reads `~/.config/themes`, `hyprpaper.conf`, `~/.cache/cliphist`, `/proc` and ML4W's wallpaper cache. | No (`publish = false`) |
+| `flex-rice` | This repo, `flex-rice/`: the 13 providers, their executors (`exec/`), the `flex` dispatcher, the `flex-<provider>` binaries and the `flex-record` helper. Reads `~/.config/themes`, `hyprpaper.conf`, `~/.cache/cliphist`, `/proc`, PipeWire (`wpctl`), NetworkManager (`nmcli`), BlueZ (`bluetoothctl`), MPRIS players, and FreeDesktop D-Bus notifications. | No (`publish = false`) |
 
 Dependencies run one way (`flex-rice` → `flex-core`). The engine's only former
 reach into providers is now a seam: `Menu::on_tick` takes a `TickHook`, and
-`flex-rice` supplies the one that refreshes `center` gauges and picks up a
-finished `wifi` scan — build menus in this repo with `flex_rice::menu(…)`,
-which installs it.
+`flex-rice` supplies the one that refreshes `center` gauges, picks up a finished
+`wifi` scan, polls `proc`/`net`/`bt`/`mixer`, and updates `notify` live items —
+build menus in this repo with `flex_rice::menu(…)`, which installs it.
 
 ```sh
 cargo test                       # the whole workspace
@@ -34,8 +34,8 @@ see `Docs/project_structure.md` → "Working on the engine".
 
 ## Entry points
 
-Eleven binaries are built from `flex-rice`: the `flex` dispatcher, one binary
-per provider, and the `flex-record` helper.
+Fifteen binaries are built from `flex-rice`: the `flex` dispatcher, fourteen
+per-provider binaries, and the `flex-record` helper.
 
 | Binary | Provider | What it does |
 |---|---|---|
@@ -50,6 +50,10 @@ per provider, and the `flex-record` helper.
 | `flex-wifi` | wifi | Wi-Fi picker: radio on/off, disconnect, connect (saved profile or password prompt) |
 | `flex-proc` | proc | Native process manager: filter `/proc`, Enter = SIGTERM, Delete = SIGKILL, `m` = stop/continue |
 | `flex-record` | — | Recording helper: `[-a] [-g GEOM] FILE` (start), `status`, `stop` |
+| `flex-mixer` | mixer | WirePlumber interactive audio/mic mixer popup |
+| `flex-net` | net | Network interface and bandwidth telemetry monitor |
+| `flex-bt` | bt | Bluetooth device manager, pairing, and battery status monitor |
+| `flex-notify` | notify | Notification Center Drawer (`-m`), Waybar JSON polling (`--status`), CLI verbs (`send`/`clear-all`/`toggle-dnd`), and background D-Bus daemon (`daemon`) with audio cues |
 
 Every provider binary runs the same shared flow:
 
@@ -127,7 +131,8 @@ These are direct `Command` spawns of the named tools, not shell invocations.
 ## Popups
 
 Popups use the window classes `flex-menu` (compact variant: power/shot/theme/
-wifi) and `flex-menu-wide` (wide variant: launch/clip/center/wallpaper/proc).
+wifi), `flex-menu-wide` (wide variant: launch/clip/center/wallpaper/proc/mixer/net/bt),
+and `flex-notify-center` (right-side drawer).
 Toggle is keyed on the **variant**, not the provider, so opening `wifi` while
 the `power` popup is up closes it instead of stacking. The hosting terminal
 comes from `$TERMINAL`; an unknown or empty value warns once on stderr and
@@ -136,8 +141,8 @@ falls back to kitty, never exits `1` (`flex-rice/src/popup.rs`,
 
 ## `setup.sh`
 
-`setup.sh` symlinks the eleven release binaries from `target/release/` into
-`~/.local/bin`; `setup.sh --check` is the gate that all eleven resolve to
+`setup.sh` symlinks the fifteen release binaries from `target/release/` into
+`~/.local/bin`; `setup.sh --check` is the gate that all fifteen resolve to
 executables.
 
 ## Image previews (`wallpaper`)
