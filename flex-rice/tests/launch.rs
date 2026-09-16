@@ -191,8 +191,9 @@ fn only_malformed_entries_reach_stderr() {
     ] {
         std::fs::copy(fixtures_dir().join(fixture), apps.join(fixture)).expect("fixture copy");
     }
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_flex"))
-        .arg("launch")
+    let output = std::process::Command::new("setsid")
+        .arg(env!("CARGO_BIN_EXE_flex"))
+        .args(["launch", "--print-action"])
         .env("HOME", &home)
         // In-popup half: the dispatcher re-execs `flex-launch`, which only
         // reaches the menu (and its diagnostics) inside a popup.

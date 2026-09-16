@@ -694,7 +694,9 @@ mod tests {
         let pid = std::process::id().to_string();
         let rows = scan();
         assert!(
-            rows.iter().any(|row| row.id.as_str() == pid),
+            rows.iter().any(|row| {
+                row.id.as_str() == pid || row.targets.iter().any(|t| t.id.as_str() == pid)
+            }),
             "the scanning process appears in /proc"
         );
     }

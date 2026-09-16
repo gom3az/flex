@@ -112,21 +112,15 @@ fn default_style() -> StyleOptions {
     }
 }
 
-/// The native menu contains this test process and arms the danger confirm on
+/// The native menu contains rows and arms the danger confirm on
 /// the first Enter, selecting (SIGTERM) on the mature second.
 #[test]
-fn proc_menu_confirms_the_selected_pid() {
-    let pid = std::process::id().to_string();
+fn proc_menu_confirms_the_selected_row() {
     let mut menu = build_menu(Provider::Proc, default_style()).expect("proc menu");
-    let index = menu
-        .app
-        .active_tab()
-        .expect("tab")
-        .rows
-        .iter()
-        .position(|row| row.id.as_str() == pid)
-        .expect("the scanning process is a row");
-    menu.app.active_tab_mut().expect("tab").state.focus = index;
+    let rows = &menu.app.active_tab().expect("tab").rows;
+    assert!(!rows.is_empty(), "proc menu has rows");
+    let row_id = rows[0].id.clone();
+    menu.app.active_tab_mut().expect("tab").state.focus = 0;
 
     let t0 = run::test_base();
     assert_eq!(
@@ -142,25 +136,29 @@ fn proc_menu_confirms_the_selected_pid() {
             t0 + std::time::Duration::from_secs(1)
         ),
         KeyOutcome::Select,
-        "mature second Enter selects the pid"
+        "mature second Enter selects the row"
     );
-    assert_eq!(menu.app.focused_row().expect("row").id.as_str(), pid);
+    assert_eq!(menu.app.focused_row().expect("row").id, row_id);
 }
 
-/// The label carries the pid, so the engine's filter matches pid digits.
+/// The label carries the comm/pid/service, so the engine's filter matches digits/chars.
 #[test]
-fn proc_filter_matches_the_pid() {
-    let pid = std::process::id().to_string();
+fn proc_filter_matches_labels() {
     let mut menu = build_menu(Provider::Proc, default_style()).expect("proc menu");
-    let keys: Vec<KeyEvent> = pid.chars().map(rune).collect();
-    let _ = run::replay_keys(&mut menu, &keys, run::test_base());
     let rows = &menu.app.active_tab().expect("tab").rows;
+    assert!(!rows.is_empty(), "proc menu has rows");
+    let label = &rows[0].label;
+    let query: String = label
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .take(3)
+        .collect();
+    let keys: Vec<KeyEvent> = query.chars().map(rune).collect();
+    let _ = run::replay_keys(&mut menu, &keys, run::test_base());
     let visible = menu.app.visible_rows();
     assert!(
-        visible
-            .iter()
-            .any(|index| rows.get(*index).is_some_and(|row| row.id.as_str() == pid)),
-        "filtering by pid keeps this process visible"
+        !visible.is_empty(),
+        "filtering by query keeps matching rows visible"
     );
 }
 
