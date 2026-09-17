@@ -306,13 +306,30 @@ pub fn open_dir(path_str: &str) {
         .spawn();
 }
 
+/// Persistent trace logger for debugging notify focus and application launch execution steps.
+pub fn log_notify_trace(msg: &str) {
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/flex-notify-exec.log")
+    {
+        use std::io::Write as _;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let _ = writeln!(file, "[{now}] {msg}");
+    }
+}
+
 /// Dynamically match a notification target to an open Hyprland client window.
 ///
-/// Uses a 4-tier matching algorithm:
+/// Uses a 3-tier matching algorithm:
 /// 1. Exact match on class or initialClass (case-insensitive).
-/// 2. Bidirectional substring match on class, initialClass, or title.
-/// 3. Token / stem word match across clean query terms.
-/// 4. Dynamic focus history fallback (`focusHistoryID` lowest non-drawer window).
+/// 2. Substring & normalized (alphanumeric-only) match on class, initialClass, or title.
+/// 3. Explicit terminal / system app target rules.
+///
+/// Returns `None` if no matching client is open, allowing `open_application` to trigger
+/// the detached launcher (`setsid -f`).
 fn find_matching_client<'a>(
     clients: &'a [serde_json::Value],
     clean: &str,
@@ -321,6 +338,11 @@ fn find_matching_client<'a>(
     if clean.is_empty() {
         return None;
     }
+    let norm_clean: String = clean.chars().filter(|c| c.is_alphanumeric()).collect();
+
+    log_notify_trace(&format!(
+        "find_matching_client: searching for clean='{clean}', norm='{norm_clean}'"
+    ));
 
     // Pass 1: Exact match on class or initialClass
     for client in clients {
@@ -328,20 +350,37 @@ fn find_matching_client<'a>(
         let initial_class = client["initialClass"].as_str().unwrap_or("").to_lowercase();
         if class == clean || initial_class == clean {
             if let Some(addr) = client["address"].as_str() {
-                return Some((addr, client["workspace"]["id"].as_i64()));
+                let ws = client["workspace"]["id"].as_i64();
+                log_notify_trace(&format!(
+                    "[MATCH Pass 1 Exact] class='{class}', address='{addr}', ws={ws:?}"
+                ));
+                return Some((addr, ws));
             }
         }
     }
 
-    // Pass 2: Substring / acronym match on class, initialClass, or title
+    // Pass 2: Substring & Normalized matching (e.g. google-chrome vs google chrome)
     for client in clients {
         let class = client["class"].as_str().unwrap_or("").to_lowercase();
         let initial_class = client["initialClass"].as_str().unwrap_or("").to_lowercase();
         let title = client["title"].as_str().unwrap_or("").to_lowercase();
 
-        let match_class = !class.is_empty() && (class.contains(&clean) || clean.contains(&class));
+        let norm_class: String = class.chars().filter(|c| c.is_alphanumeric()).collect();
+        let norm_init: String = initial_class
+            .chars()
+            .filter(|c| c.is_alphanumeric())
+            .collect();
+
+        let match_class = !class.is_empty()
+            && (class.contains(&clean)
+                || clean.contains(&class)
+                || (!norm_clean.is_empty()
+                    && (norm_class == norm_clean || norm_class.contains(&norm_clean))));
         let match_init = !initial_class.is_empty()
-            && (initial_class.contains(&clean) || clean.contains(&initial_class));
+            && (initial_class.contains(&clean)
+                || clean.contains(&initial_class)
+                || (!norm_clean.is_empty()
+                    && (norm_init == norm_clean || norm_init.contains(&norm_clean))));
         let match_title = !title.is_empty()
             && (title.contains(&clean)
                 || clean.contains(&title)
@@ -349,12 +388,16 @@ fn find_matching_client<'a>(
 
         if match_class || match_init || match_title {
             if let Some(addr) = client["address"].as_str() {
-                return Some((addr, client["workspace"]["id"].as_i64()));
+                let ws = client["workspace"]["id"].as_i64();
+                log_notify_trace(&format!(
+                    "[MATCH Pass 2 Substring/Norm] class='{class}', title='{title}', address='{addr}', ws={ws:?}"
+                ));
+                return Some((addr, ws));
             }
         }
     }
 
-    // Pass 3: CLI / Terminal / Agent / System Fallback -> Target Kitty terminal window
+    // Pass 3: Explicit Terminal / System app targets
     let is_terminal_or_agent = clean == "system"
         || clean == "packagekit"
         || clean == "terminal"
@@ -376,83 +419,69 @@ fn find_matching_client<'a>(
             let initial_class = client["initialClass"].as_str().unwrap_or("").to_lowercase();
             if class == "kitty" || initial_class == "kitty" {
                 if let Some(addr) = client["address"].as_str() {
-                    return Some((addr, client["workspace"]["id"].as_i64()));
+                    let ws = client["workspace"]["id"].as_i64();
+                    log_notify_trace(&format!(
+                        "[MATCH Pass 3 Terminal/System] class='{class}', address='{addr}', ws={ws:?}"
+                    ));
+                    return Some((addr, ws));
                 }
             }
         }
     }
 
-    // Pass 4: Fallback to Kitty terminal window
-    for client in clients {
-        let class = client["class"].as_str().unwrap_or("").to_lowercase();
-        let initial_class = client["initialClass"].as_str().unwrap_or("").to_lowercase();
-        if class == "kitty" || initial_class == "kitty" {
-            if let Some(addr) = client["address"].as_str() {
-                return Some((addr, client["workspace"]["id"].as_i64()));
-            }
-        }
+    log_notify_trace(&format!(
+        "[MATCH None] No matching client window found for '{clean}'"
+    ));
+    None
+}
+
+/// Open or focus a desktop application and switch workspace.
+pub fn open_application(app_name: &str) {
+    let clean = app_name.trim().to_lowercase();
+    log_notify_trace(&format!(
+        "[OPEN_APP] app_name='{app_name}', clean='{clean}'"
+    ));
+    if clean.is_empty() || clean == "wiremix" {
+        return;
     }
 
-    // Pass 5: Fallback to most recently focused non-drawer application window
-    let mut best_client: Option<(&'a str, Option<i64>, i64)> = None;
-    for client in clients {
-        let class = client["class"].as_str().unwrap_or("").to_lowercase();
-        let title = client["title"].as_str().unwrap_or("").to_lowercase();
-
-        if title.contains("flex-notify") || class.contains("flex-notify") {
-            continue;
-        }
-
-        if let Some(addr) = client["address"].as_str() {
-            let history_id = client["focusHistoryID"].as_i64().unwrap_or(999);
-            let ws_id = client["workspace"]["id"].as_i64();
-            match best_client {
-                None => best_client = Some((addr, ws_id, history_id)),
-                Some((_, _, best_hist)) => {
-                    if history_id < best_hist {
-                        best_client = Some((addr, ws_id, history_id));
+    // 0. Unset any active or global fullscreen lock across clients so window focus/launch is visible
+    if let Ok(output) = Command::new("hyprctl")
+        .args(["clients", "-j"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+    {
+        if output.status.success() {
+            if let Ok(json_str) = String::from_utf8(output.stdout) {
+                if let Ok(clients) = serde_json::from_str::<Vec<serde_json::Value>>(&json_str) {
+                    for client in &clients {
+                        let fs = client["fullscreen"].as_i64().unwrap_or(0);
+                        let fs_client = client["fullscreenClient"].as_i64().unwrap_or(0);
+                        if fs != 0 || fs_client != 0 {
+                            if let Some(addr) = client["address"].as_str() {
+                                log_notify_trace(&format!(
+                                    "[FULLSCREEN] Unsetting fullscreen for client address='{addr}'"
+                                ));
+                                let lua_cmd = format!(
+                                    "hl.dsp.window.fullscreen({{ action = \"unset\", window = \"address:{addr}\" }})"
+                                );
+                                let _ = Command::new("hyprctl")
+                                    .args(["dispatch", &lua_cmd])
+                                    .stdin(Stdio::null())
+                                    .stdout(Stdio::null())
+                                    .stderr(Stdio::null())
+                                    .status();
+                            }
+                        }
                     }
                 }
             }
         }
     }
 
-    best_client.map(|(addr, ws, _)| (addr, ws))
-}
-
-/// Open or focus a desktop application and switch workspace.
-pub fn open_application(app_name: &str) {
-    let clean = app_name.trim().to_lowercase();
-    if clean.is_empty() || clean == "wiremix" {
-        return;
-    }
-
-    // Unset fullscreen lock on active workspace if currently active
-    let active_ws_has_fullscreen = Command::new("hyprctl")
-        .args(["activeworkspace", "-j"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .ok()
-        .and_then(|out| String::from_utf8(out.stdout).ok())
-        .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
-        .and_then(|val| val["hasfullscreen"].as_bool())
-        .unwrap_or(false);
-
-    if active_ws_has_fullscreen {
-        let _ = Command::new("hyprctl")
-            .args([
-                "dispatch",
-                "hl.dsp.window.fullscreen({ action = \"unset\" })",
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-    }
-
-    // 1. Query hyprctl clients -j to locate matching window and workspace
+    // 1. Query hyprctl clients -j to locate matching window and switch focus
     if let Ok(output) = Command::new("hyprctl")
         .args(["clients", "-j"])
         .stdin(Stdio::null())
@@ -465,21 +494,20 @@ pub fn open_application(app_name: &str) {
                 if let Ok(clients) = serde_json::from_str::<Vec<serde_json::Value>>(&json_str) {
                     if let Some((address, ws_id)) = find_matching_client(&clients, &clean) {
                         let address_owned = address.to_string();
-                        let ws_arg = ws_id.map_or_else(String::new, |ws| {
-                            format!("hyprctl dispatch 'hl.dsp.focus({{ workspace = {ws} }})' && ")
-                        });
+                        log_notify_trace(&format!(
+                            "[FOCUS_DISPATCH_SYNC] Dispatching window focus for address='{address_owned}', ws={ws_id:?}"
+                        ));
 
-                        let shell_cmd = format!(
-                            "sleep 0.05 && {ws_arg}hyprctl dispatch 'hl.dsp.focus({{ window = \"address:{address_owned}\" }})'"
-                        );
-
-                        let _ = Command::new("setsid")
-                            .args(["-f", "bash", "-c", &shell_cmd])
+                        let lua_win =
+                            format!("hl.dsp.focus({{ window = \"address:{address_owned}\" }})");
+                        let _ = Command::new("hyprctl")
+                            .args(["dispatch", &lua_win])
                             .stdin(Stdio::null())
                             .stdout(Stdio::null())
                             .stderr(Stdio::null())
-                            .spawn();
+                            .status();
 
+                        std::thread::sleep(std::time::Duration::from_millis(50));
                         return;
                     }
                 }
@@ -488,6 +516,9 @@ pub fn open_application(app_name: &str) {
     }
 
     // 2. Fallback: try Lua class focus dispatch
+    log_notify_trace(&format!(
+        "[CLASS_FOCUS] Trying fallback Lua class focus dispatch for '{clean}'"
+    ));
     let lua_class_cmd = format!("hl.dsp.focus({{ window = \"class:{clean}\" }})");
     let _ = Command::new("hyprctl")
         .args(["dispatch", &lua_class_cmd])
@@ -503,6 +534,9 @@ pub fn open_application(app_name: &str) {
         &clean
     };
 
+    log_notify_trace(&format!(
+        "[LAUNCH_SPAWN] Spawning detached setsid -f '{launch_target}'"
+    ));
     let _ = Command::new("setsid")
         .args(["-f", launch_target])
         .stdin(Stdio::null())
@@ -1423,12 +1457,16 @@ mod tests {
         let res2 = find_matching_client(clients_arr, "path of exile");
         assert_eq!(res2, Some(("0x1111", Some(1))));
 
-        // 3. Token match on title/class
-        let res3 = find_matching_client(clients_arr, "Antigravity Ready");
-        assert_eq!(res3, Some(("0x3333", Some(3))));
+        // 3. Normalized matching (spaces/hyphens e.g. "brave browser" -> "brave-browser")
+        let res3 = find_matching_client(clients_arr, "brave browser");
+        assert_eq!(res3, Some(("0x2222", Some(2))));
 
-        // 4. Kitty terminal fallback for unknown app notifications
-        let res4 = find_matching_client(clients_arr, "UnknownApp");
+        // 4. Token match for agent / terminal target
+        let res4 = find_matching_client(clients_arr, "Antigravity Ready");
         assert_eq!(res4, Some(("0x3333", Some(3))));
+
+        // 5. Unknown app returns None so open_application can trigger detached launch (setsid -f)
+        let res5 = find_matching_client(clients_arr, "UnknownApp");
+        assert_eq!(res5, None);
     }
 }

@@ -684,6 +684,9 @@ pub fn execute(
     target_title: &str,
     state_path: Option<&std::path::Path>,
 ) -> anyhow::Result<ExecuteReport> {
+    notify::log_notify_trace(&format!(
+        "[EXECUTE] action_id='{action_id}', title='{target_title}'"
+    ));
     let mut state = notify::load_state(state_path);
     let now = now_secs();
     let mut should_close = false;
