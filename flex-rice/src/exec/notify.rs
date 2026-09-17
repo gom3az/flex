@@ -1210,7 +1210,7 @@ pub fn format_toast_card(
 
     let (border_ansi, icon, icon_ansi) = match item.urgency {
         Urgency::Critical => ("\x1b[1;31m", "󰀦", "\x1b[1;31m"),
-        Urgency::Normal => ("\x1b[90m", "󰂚", "\x1b[1;36m"),
+        Urgency::Normal => ("\x1b[90m", "󰂚", "\x1b[37m"),
         Urgency::Low => ("\x1b[2;37m", "󰂞", "\x1b[2;37m"),
     };
 
