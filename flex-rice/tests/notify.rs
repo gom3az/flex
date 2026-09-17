@@ -476,3 +476,17 @@ fn notify_daemon_dbus_server_contract() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn toast_header_alignment_and_truncation() {
+    // Standard header formatting with 2-space left margin and right-aligned timestamp
+    let header = notify::format_toast_header("󰂚", "Discord", "#dev-team", "10s", 48);
+    assert!(header.starts_with("  󰂚  \x1b[1mDiscord\x1b[0m · #dev-team"));
+    assert!(header.ends_with("\x1b[2m10s\x1b[0m"));
+
+    // Long summary truncation
+    let long_summary = "A".repeat(100);
+    let header_truncated = notify::format_toast_header("󰂚", "System", &long_summary, "2m", 48);
+    assert!(header_truncated.contains('…'));
+    assert!(header_truncated.ends_with("\x1b[2m2m\x1b[0m"));
+}

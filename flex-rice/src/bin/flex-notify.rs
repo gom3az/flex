@@ -121,11 +121,11 @@ fn now_secs() -> u64 {
 
 /// Render a 2-line toast card and auto-dismiss after a timeout.
 ///
-/// - Normal/Low: 5 s auto-dismiss; any keypress opens the notification center.
-/// - Critical:   stays until any key is pressed.
+/// - Normal/Low: 5 s auto-dismiss; [SUPER+N] opens the notification center.
+/// - Critical:   stays until dismiss or timeout; [SUPER+N] opens the notification center.
 ///
 /// The window is rendered directly to stdout without ratatui so the kitty
-/// instance stays tiny.  Hyprland positions it via the `flex-notify-toast`
+/// instance stays tiny. Hyprland positions it via the `flex-notify-toast`
 /// window rule.
 fn run_toast(id: u32, state_path: Option<&std::path::Path>) {
     use std::io::Write as _;
@@ -149,13 +149,13 @@ fn run_toast(id: u32, state_path: Option<&std::path::Path>) {
         Urgency::Low => "󰂞",
     };
 
-    // ── Truncate body to 72 chars ────────────────────────────────────────────
+    // ── Truncate body to 43 chars (fits 50 col canvas with 5-space indent) ────
     let body_preview = if item.body.is_empty() {
         String::new()
     } else {
         let trimmed = item.body.replace('\n', " ");
-        if trimmed.len() > 72 {
-            format!("{}…", &trimmed[..71])
+        if trimmed.len() > 43 {
+            format!("{}…", &trimmed[..42])
         } else {
             trimmed
         }
@@ -167,25 +167,29 @@ fn run_toast(id: u32, state_path: Option<&std::path::Path>) {
     // Clear screen + hide cursor
     print!("\x1b[2J\x1b[H\x1b[?25l");
 
-    // Line 1: icon + app · summary  +  rel time right-aligned (approx)
-    println!(
-        "{icon}  \x1b[1m{}\x1b[0m · {}  \x1b[2m{rel}\x1b[0m",
-        item.app_name, item.summary
-    );
+    // Row 1: Top padding line
+    println!();
 
-    // Line 2: body preview (dim) or blank
+    // Row 2: Header line (icon + app · summary + right-aligned timestamp)
+    let header = notify::format_toast_header(icon, &item.app_name, &item.summary, &rel, 48);
+    println!("{header}");
+
+    // Row 3: Body preview (dim) or blank line (5-space indent aligned under app name)
     if body_preview.is_empty() {
         println!();
     } else {
-        println!("   \x1b[2m{body_preview}\x1b[0m");
+        println!("     \x1b[2m{body_preview}\x1b[0m");
     }
 
-    // Line 3: hint
+    // Row 4: Hint line (5-space indent aligned under body)
     if is_critical {
-        println!("\x1b[2m   [any key] open • [q] dismiss\x1b[0m");
+        println!("     \x1b[2m[SUPER+N] open drawer • critical alert\x1b[0m");
     } else {
-        println!("\x1b[2m   auto-dismiss in {timeout_secs}s  •  [any key] open\x1b[0m");
+        println!("     \x1b[2mauto-dismiss in {timeout_secs}s • [SUPER+N] open\x1b[0m");
     }
+
+    // Row 5: Bottom padding line
+    println!();
 
     let _ = std::io::stdout().flush();
 
@@ -229,8 +233,8 @@ fn run_toast(id: u32, state_path: Option<&std::path::Path>) {
 
     if open_center {
         // Detach so this process can exit while the drawer opens
-        let _ = std::process::Command::new("flex-notify")
-            .args(["--menu"])
+        let _ = std::process::Command::new("flex")
+            .args(["popup", "flex-notify-center", "flex-notify"])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())

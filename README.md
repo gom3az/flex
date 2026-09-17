@@ -145,6 +145,18 @@ falls back to kitty, never exits `1` (`flex-rice/src/popup.rs`,
 `~/.local/bin`; `setup.sh --check` is the gate that all fifteen resolve to
 executables.
 
+## Notification Daemon (`flex-notify`)
+
+`flex-notify` includes a full `zbus` D-Bus notification server (`flex-notify --daemon`) handling `org.freedesktop.Notifications`. To run it as a systemd user daemon:
+
+```bash
+# 1. Systemd service (~/.config/systemd/user/flex-notify.service)
+# 2. D-Bus activation (~/.local/share/dbus-1/services/org.freedesktop.Notifications.service)
+
+systemctl --user daemon-reload
+systemctl --user enable --now flex-notify.service
+```
+
 ## Image previews (`wallpaper`)
 
 `flex wallpaper` is the only provider with a preview pane. `render` reserves

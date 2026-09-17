@@ -213,6 +213,9 @@ fn toggle_impl(
         Some(path) => path.to_string(),
         None => ambient_path(),
     };
+    if class == DRAWER_CLASS {
+        let _ = pkill_class("flex-notify-toast", &path_env);
+    }
     if pgrep_open(class, &path_env)? {
         return pkill_class(class, &path_env);
     }

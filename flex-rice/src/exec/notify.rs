@@ -769,6 +769,79 @@ impl NotificationServer {
     ) -> zbus::Result<()>;
 }
 
+/// Format the header line of a notification toast card.
+/// Total target width: target_right_col display columns (excluding right margin).
+/// Left margin: 2 spaces. Icon width: 1 cell. Spacing: 2 spaces.
+/// App name & summary separated by " · ".
+/// Relative timestamp right-aligned to target_right_col.
+pub fn format_toast_header(
+    icon: &str,
+    app_name: &str,
+    summary: &str,
+    rel: &str,
+    target_right_col: usize,
+) -> String {
+    use unicode_width::UnicodeWidthStr as _;
+
+    let prefix = format!("  {icon}  ");
+    let prefix_width = prefix.width();
+    let rel_width = rel.width();
+    let sep = " · ";
+    let sep_width = sep.width();
+    let app_width = app_name.width();
+
+    let max_text_width = if target_right_col > prefix_width + rel_width + 1 {
+        target_right_col - prefix_width - rel_width - 1
+    } else {
+        10
+    };
+
+    let summary_avail = if max_text_width > app_width + sep_width {
+        max_text_width - app_width - sep_width
+    } else {
+        0
+    };
+
+    let truncated_summary = if summary_avail == 0 {
+        String::new()
+    } else if summary.width() > summary_avail {
+        let mut s = String::new();
+        let mut w = 0;
+        for c in summary.chars() {
+            let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+            if w + cw + 1 > summary_avail {
+                s.push('…');
+                break;
+            }
+            s.push(c);
+            w += cw;
+        }
+        s
+    } else {
+        summary.to_string()
+    };
+
+    let left_combined_width = if truncated_summary.is_empty() {
+        app_width
+    } else {
+        app_width + sep_width + truncated_summary.width()
+    };
+
+    let fill_spaces = if target_right_col > prefix_width + left_combined_width + rel_width {
+        target_right_col - prefix_width - left_combined_width - rel_width
+    } else {
+        1
+    };
+
+    let spaces_str = " ".repeat(fill_spaces);
+
+    if truncated_summary.is_empty() {
+        format!("{prefix}\x1b[1m{app_name}\x1b[0m{spaces_str}\x1b[2m{rel}\x1b[0m")
+    } else {
+        format!("{prefix}\x1b[1m{app_name}\x1b[0m · {truncated_summary}{spaces_str}\x1b[2m{rel}\x1b[0m")
+    }
+}
+
 /// Spawn a transient toast overlay for a newly-arrived notification.
 ///
 /// Launches `kitty --class flex-notify-toast -o font_size=10 -e flex-notify
