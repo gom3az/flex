@@ -333,7 +333,7 @@ fn find_matching_client<'a>(
         }
     }
 
-    // Pass 2: Substring match on class, initialClass, or title
+    // Pass 2: Substring / acronym match on class, initialClass, or title
     for client in clients {
         let class = client["class"].as_str().unwrap_or("").to_lowercase();
         let initial_class = client["initialClass"].as_str().unwrap_or("").to_lowercase();
@@ -342,7 +342,10 @@ fn find_matching_client<'a>(
         let match_class = !class.is_empty() && (class.contains(&clean) || clean.contains(&class));
         let match_init = !initial_class.is_empty()
             && (initial_class.contains(&clean) || clean.contains(&initial_class));
-        let match_title = !title.is_empty() && (title.contains(&clean) || clean.contains(&title));
+        let match_title = !title.is_empty()
+            && (title.contains(&clean)
+                || clean.contains(&title)
+                || (clean.contains("antigrav") && (title.contains("agy") || class == "kitty")));
 
         if match_class || match_init || match_title {
             if let Some(addr) = client["address"].as_str() {
@@ -351,35 +354,51 @@ fn find_matching_client<'a>(
         }
     }
 
-    // Pass 3: Tokenized word/stem matching for multi-word or compound queries
-    let tokens: Vec<&str> = clean
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|t| t.len() >= 3)
-        .collect();
+    // Pass 3: CLI / Terminal / Agent / System Fallback -> Target Kitty terminal window
+    let is_terminal_or_agent = clean == "system"
+        || clean == "packagekit"
+        || clean == "terminal"
+        || clean == "notify"
+        || clean == "notify-send"
+        || clean == "cargo"
+        || clean == "bash"
+        || clean == "zsh"
+        || clean == "fish"
+        || clean == "flex"
+        || clean.contains("antigrav")
+        || clean.contains("agy")
+        || clean.contains("agent")
+        || clean.contains("term");
 
-    if !tokens.is_empty() {
+    if is_terminal_or_agent {
         for client in clients {
             let class = client["class"].as_str().unwrap_or("").to_lowercase();
             let initial_class = client["initialClass"].as_str().unwrap_or("").to_lowercase();
-            let title = client["title"].as_str().unwrap_or("").to_lowercase();
-
-            for token in &tokens {
-                if class.contains(token) || initial_class.contains(token) || title.contains(token) {
-                    if let Some(addr) = client["address"].as_str() {
-                        return Some((addr, client["workspace"]["id"].as_i64()));
-                    }
+            if class == "kitty" || initial_class == "kitty" {
+                if let Some(addr) = client["address"].as_str() {
+                    return Some((addr, client["workspace"]["id"].as_i64()));
                 }
             }
         }
     }
 
-    // Pass 4: Fallback to the most recently focused non-drawer application window
+    // Pass 4: Fallback to Kitty terminal window
+    for client in clients {
+        let class = client["class"].as_str().unwrap_or("").to_lowercase();
+        let initial_class = client["initialClass"].as_str().unwrap_or("").to_lowercase();
+        if class == "kitty" || initial_class == "kitty" {
+            if let Some(addr) = client["address"].as_str() {
+                return Some((addr, client["workspace"]["id"].as_i64()));
+            }
+        }
+    }
+
+    // Pass 5: Fallback to most recently focused non-drawer application window
     let mut best_client: Option<(&'a str, Option<i64>, i64)> = None;
     for client in clients {
         let class = client["class"].as_str().unwrap_or("").to_lowercase();
         let title = client["title"].as_str().unwrap_or("").to_lowercase();
 
-        // Skip notification center drawer windows
         if title.contains("flex-notify") || class.contains("flex-notify") {
             continue;
         }
@@ -469,39 +488,23 @@ pub fn open_application(app_name: &str) {
 
                     if let Some((address, ws_id)) = match_res {
                         let address_owned = address.to_string();
-                        log_debug(&format!("scheduling deferred focus for address={address_owned}, ws={ws_id:?}"));
+                        log_debug(&format!("spawning detached setsid focus worker for address={address_owned}, ws={ws_id:?}"));
 
-                        std::thread::spawn(move || {
-                            std::thread::sleep(std::time::Duration::from_millis(50));
+                        let ws_arg = ws_id.map_or_else(
+                            String::new,
+                            |ws| format!("hyprctl dispatch 'hl.dsp.focus({{ workspace = {ws} }})' && "),
+                        );
 
-                            if let Some(ws) = ws_id {
-                                let lua_ws = format!("hl.dsp.focus({{ workspace = {ws} }})");
-                                let ws_res = Command::new("hyprctl")
-                                    .args(["dispatch", &lua_ws])
-                                    .stdin(Stdio::null())
-                                    .stdout(Stdio::piped())
-                                    .stderr(Stdio::piped())
-                                    .output();
-                                if let Ok(out) = &ws_res {
-                                    let stdout = String::from_utf8_lossy(&out.stdout);
-                                    let stderr = String::from_utf8_lossy(&out.stderr);
-                                    log_debug(&format!("deferred workspace switch to {ws} result status={:?}, stdout='{}', stderr='{}'", out.status, stdout.trim(), stderr.trim()));
-                                }
-                            }
+                        let shell_cmd = format!(
+                            "sleep 0.05 && {ws_arg}hyprctl dispatch 'hl.dsp.focus({{ window = \"address:{address_owned}\" }})'"
+                        );
 
-                            let lua_win = format!("hl.dsp.focus({{ window = \"address:{address_owned}\" }})");
-                            let win_res = Command::new("hyprctl")
-                                .args(["dispatch", &lua_win])
-                                .stdin(Stdio::null())
-                                .stdout(Stdio::piped())
-                                .stderr(Stdio::piped())
-                                .output();
-                            if let Ok(out) = &win_res {
-                                let stdout = String::from_utf8_lossy(&out.stdout);
-                                let stderr = String::from_utf8_lossy(&out.stderr);
-                                log_debug(&format!("deferred window focus to {address_owned} result status={:?}, stdout='{}', stderr='{}'", out.status, stdout.trim(), stderr.trim()));
-                            }
-                        });
+                        let _ = Command::new("setsid")
+                            .args(["-f", "bash", "-c", &shell_cmd])
+                            .stdin(Stdio::null())
+                            .stdout(Stdio::null())
+                            .stderr(Stdio::null())
+                            .spawn();
 
                         return;
                     }
