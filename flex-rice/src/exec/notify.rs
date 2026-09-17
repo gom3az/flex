@@ -401,10 +401,27 @@ fn find_matching_client<'a>(
     best_client.map(|(addr, ws, _)| (addr, ws))
 }
 
+fn log_debug(msg: &str) {
+    use std::io::Write as _;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/flex-notify-debug.log")
+    {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let _ = writeln!(f, "[{ts}] {msg}");
+    }
+}
+
 /// Open or focus a desktop application and switch workspace.
 pub fn open_application(app_name: &str) {
     let clean = app_name.trim().to_lowercase();
+    log_debug(&format!("open_application requested for app_name='{app_name}', clean='{clean}'"));
+
     if clean.is_empty() || clean == "wiremix" {
+        log_debug("open_application skipped: empty or wiremix");
         return;
     }
 
@@ -421,16 +438,19 @@ pub fn open_application(app_name: &str) {
         .and_then(|val| val["hasfullscreen"].as_bool())
         .unwrap_or(false);
 
+    log_debug(&format!("active_ws_has_fullscreen: {active_ws_has_fullscreen}"));
+
     if active_ws_has_fullscreen {
-        let _ = Command::new("hyprctl")
+        let unset_res = Command::new("hyprctl")
             .args([
                 "dispatch",
                 "hl.dsp.window.fullscreen({ action = \"unset\" })",
             ])
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output();
+        log_debug(&format!("fullscreen unset result: {unset_res:?}"));
     }
 
     // 1. Query hyprctl clients -j to locate matching window and workspace
@@ -444,26 +464,44 @@ pub fn open_application(app_name: &str) {
         if output.status.success() {
             if let Ok(json_str) = String::from_utf8(output.stdout) {
                 if let Ok(clients) = serde_json::from_str::<Vec<serde_json::Value>>(&json_str) {
-                    if let Some((address, ws_id)) = find_matching_client(&clients, &clean) {
-                        // Switch to the target workspace if known
-                        if let Some(ws) = ws_id {
-                            let lua_ws = format!("hl.dsp.focus({{ workspace = {ws} }})");
-                            let _ = Command::new("hyprctl")
-                                .args(["dispatch", &lua_ws])
-                                .stdin(Stdio::null())
-                                .stdout(Stdio::null())
-                                .stderr(Stdio::null())
-                                .status();
-                        }
+                    let match_res = find_matching_client(&clients, &clean);
+                    log_debug(&format!("find_matching_client returned: {match_res:?}"));
 
-                        // Focus the target window by address
-                        let lua_win = format!("hl.dsp.focus({{ window = \"address:{address}\" }})");
-                        let _ = Command::new("hyprctl")
-                            .args(["dispatch", &lua_win])
-                            .stdin(Stdio::null())
-                            .stdout(Stdio::null())
-                            .stderr(Stdio::null())
-                            .status();
+                    if let Some((address, ws_id)) = match_res {
+                        let address_owned = address.to_string();
+                        log_debug(&format!("scheduling deferred focus for address={address_owned}, ws={ws_id:?}"));
+
+                        std::thread::spawn(move || {
+                            std::thread::sleep(std::time::Duration::from_millis(50));
+
+                            if let Some(ws) = ws_id {
+                                let lua_ws = format!("hl.dsp.focus({{ workspace = {ws} }})");
+                                let ws_res = Command::new("hyprctl")
+                                    .args(["dispatch", &lua_ws])
+                                    .stdin(Stdio::null())
+                                    .stdout(Stdio::piped())
+                                    .stderr(Stdio::piped())
+                                    .output();
+                                if let Ok(out) = &ws_res {
+                                    let stdout = String::from_utf8_lossy(&out.stdout);
+                                    let stderr = String::from_utf8_lossy(&out.stderr);
+                                    log_debug(&format!("deferred workspace switch to {ws} result status={:?}, stdout='{}', stderr='{}'", out.status, stdout.trim(), stderr.trim()));
+                                }
+                            }
+
+                            let lua_win = format!("hl.dsp.focus({{ window = \"address:{address_owned}\" }})");
+                            let win_res = Command::new("hyprctl")
+                                .args(["dispatch", &lua_win])
+                                .stdin(Stdio::null())
+                                .stdout(Stdio::piped())
+                                .stderr(Stdio::piped())
+                                .output();
+                            if let Ok(out) = &win_res {
+                                let stdout = String::from_utf8_lossy(&out.stdout);
+                                let stderr = String::from_utf8_lossy(&out.stderr);
+                                log_debug(&format!("deferred window focus to {address_owned} result status={:?}, stdout='{}', stderr='{}'", out.status, stdout.trim(), stderr.trim()));
+                            }
+                        });
 
                         return;
                     }
@@ -1415,5 +1453,10 @@ mod tests {
         // 4. Focus history fallback (picks focusHistoryID 1 over 2, ignoring drawer)
         let res4 = find_matching_client(clients_arr, "UnknownApp");
         assert_eq!(res4, Some(("0x1111", Some(1))));
+    }
+
+    #[test]
+    fn live_open_app_test() {
+        open_application("Antigravity");
     }
 }
