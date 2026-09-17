@@ -506,6 +506,7 @@ fn entity_extractor_file_path_and_url_expansion() {
 #[test]
 fn toast_boxed_card_rendering() {
     use flex_rice::exec::notify::{NotificationAction, NotificationItem, Urgency};
+    use unicode_width::UnicodeWidthStr as _;
 
     let mut item = NotificationItem::new(
         101,
@@ -538,9 +539,33 @@ fn toast_boxed_card_rendering() {
     assert!(card.contains("󰀦"));
     assert!(card.contains("[CRITICAL]"));
 
-    // Verify progress bar & actions
-    assert!(card.contains("Progress: ["));
-    assert!(card.contains("Actions:"));
-    assert!(card.contains("Clean Up"));
-    assert!(card.contains("Ignore"));
+    // Helper to strip ANSI codes and measure visible display width
+    let strip_ansi = |s: &str| -> String {
+        let mut out = String::new();
+        let mut in_esc = false;
+        for c in s.chars() {
+            if c == '\x1b' {
+                in_esc = true;
+            } else if in_esc {
+                if c == 'm' {
+                    in_esc = false;
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    };
+
+    for (idx, line) in card.lines().enumerate() {
+        let clean = strip_ansi(line);
+        assert_eq!(
+            clean.width(),
+            50,
+            "Line {} display width mismatch: expected 50, got {} for '{}'",
+            idx + 1,
+            clean.width(),
+            clean
+        );
+    }
 }

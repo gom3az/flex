@@ -1243,7 +1243,7 @@ pub fn format_toast_card(
     let make_content_row = |content_spans: &str, content_len: usize| -> String {
         let pad_len = inner_width.saturating_sub(content_len);
         let pad = " ".repeat(pad_len);
-        format!("{border_ansi}│{reset}  {content_spans}{pad}  {border_ansi}│{reset}")
+        format!("{border_ansi}│{reset} {content_spans}{pad} {border_ansi}│{reset}")
     };
 
     let mut lines = Vec::new();
@@ -1286,7 +1286,7 @@ pub fn format_toast_card(
     // ── Progress Bar Line ───────────────────────────────────────────────────
     if let Some(p) = item.progress {
         let pct = (p.clamp(0.0, 1.0) * 100.0) as usize;
-        let bar_max = inner_width.saturating_sub(16);
+        let bar_max = inner_width.saturating_sub(17);
         let fill = (bar_max * pct) / 100;
         let empty = bar_max.saturating_sub(fill);
         let filled_bar = "█".repeat(fill);
@@ -1294,25 +1294,28 @@ pub fn format_toast_card(
 
         let prog_str =
             format!("Progress: [{cyan}{filled_bar}{reset}{dim}{empty_bar}{reset}] {pct:>3}%");
-        let prog_w = 10 + bar_max + 2 + 4;
-        lines.push(make_content_row(&prog_str, prog_w.min(inner_width)));
+        let raw_prog = format!("Progress: [{filled_bar}{empty_bar}] {pct:>3}%");
+        lines.push(make_content_row(&prog_str, raw_prog.width()));
     }
 
     // ── Action Buttons ──────────────────────────────────────────────────────
     if !item.actions.is_empty() {
         let mut action_spans = format!("{bold}Actions:{reset}");
+        let mut raw_actions = String::from("Actions:");
         let mut act_w = 8;
         for (idx, action) in item.actions.iter().enumerate().take(3) {
             let num = idx + 1;
             let act_text = format!(" {yellow_bold}[{num}]{reset} {} ", action.title);
-            let act_len = 4 + action.title.width();
+            let raw_text = format!(" [{num}] {} ", action.title);
+            let act_len = raw_text.width();
             if act_w + act_len > inner_width {
                 break;
             }
             action_spans.push_str(&act_text);
+            raw_actions.push_str(&raw_text);
             act_w += act_len;
         }
-        lines.push(make_content_row(&action_spans, act_w.min(inner_width)));
+        lines.push(make_content_row(&action_spans, raw_actions.width()));
     }
 
     // ── Bottom Border Line ─────────────────────────────────────────────────
