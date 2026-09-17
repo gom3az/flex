@@ -490,3 +490,15 @@ fn toast_header_alignment_and_truncation() {
     assert!(header_truncated.contains('…'));
     assert!(header_truncated.ends_with("\x1b[2m2m\x1b[0m"));
 }
+
+#[test]
+fn entity_extractor_file_path_and_url_expansion() {
+    let text = "Check file /tmp/build.log and visit www.github.com/gom3az/flex";
+    let entities = notify::extract_entities(text);
+    assert!(entities
+        .iter()
+        .any(|e| matches!(e, ExtractedEntity::FilePath(p) if p == "/tmp/build.log")));
+    assert!(entities.iter().any(
+        |e| matches!(e, ExtractedEntity::Url(u) if u == "https://www.github.com/gom3az/flex")
+    ));
+}

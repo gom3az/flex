@@ -8,6 +8,7 @@
 //! - Persistent runtime store at `$XDG_RUNTIME_DIR/flex-notify.json`
 
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -120,15 +121,17 @@ impl NotificationItem {
 pub enum ExtractedEntity {
     OtpCode(String),
     Url(String),
+    FilePath(String),
     HexColor(String),
 }
 
-/// Extract actionable entities (OTP 2FA codes, URLs, hex color codes) from text.
+/// Extract actionable entities (OTP 2FA codes, URLs, file paths, hex color codes) from text.
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn extract_entities(text: &str) -> Vec<ExtractedEntity> {
     let mut entities = Vec::new();
 
-    // 1. Scan for URLs (https:// or http://)
+    // 1. Scan for URLs (https://, http://, mailto:, ftp://, www., or bare domain with path)
     for word in text.split_whitespace() {
         let trimmed = word.trim_matches(|c: char| {
             c == '('
@@ -139,13 +142,75 @@ pub fn extract_entities(text: &str) -> Vec<ExtractedEntity> {
                 || c == '\''
                 || c == ','
                 || c == '.'
+                || c == '`'
         });
-        if trimmed.starts_with("https://") || trimmed.starts_with("http://") {
+        if trimmed.starts_with("https://")
+            || trimmed.starts_with("http://")
+            || trimmed.starts_with("mailto:")
+            || trimmed.starts_with("ftp://")
+            || trimmed.starts_with("ssh://")
+        {
             entities.push(ExtractedEntity::Url(trimmed.to_string()));
+        } else if trimmed.starts_with("www.")
+            || (trimmed.contains('/')
+                && (trimmed.contains(".com/")
+                    || trimmed.contains(".org/")
+                    || trimmed.contains(".net/")
+                    || trimmed.contains(".io/")
+                    || trimmed.contains(".dev/")
+                    || trimmed.contains(".app/")
+                    || trimmed.contains(".ai/")))
+        {
+            entities.push(ExtractedEntity::Url(format!("https://{trimmed}")));
         }
     }
 
-    // 2. Scan for Hex color codes (#RRGGBB)
+    // 2. Scan for File Paths (/..., ~/..., or known file extensions)
+    let known_exts = [
+        ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".pdf", ".txt", ".md", ".rs", ".py",
+        ".js", ".ts", ".json", ".yaml", ".toml", ".sh", ".csv", ".log", ".zip", ".tar.gz",
+    ];
+    for word in text.split_whitespace() {
+        let trimmed = word.trim_matches(|c: char| {
+            c == '('
+                || c == ')'
+                || c == '<'
+                || c == '>'
+                || c == '"'
+                || c == '\''
+                || c == ','
+                || c == '`'
+                || c == ':'
+        });
+        if trimmed.is_empty() {
+            continue;
+        }
+        let is_abs_or_home = trimmed.starts_with('/') || trimmed.starts_with("~/");
+        let has_known_ext = known_exts.iter().any(|ext| trimmed.ends_with(ext));
+
+        if is_abs_or_home || has_known_ext {
+            let expanded = if let Some(rest) = trimmed.strip_prefix("~/") {
+                if let Ok(home) = std::env::var("HOME") {
+                    format!("{home}/{rest}")
+                } else {
+                    trimmed.to_string()
+                }
+            } else {
+                trimmed.to_string()
+            };
+
+            if !expanded.starts_with("http://")
+                && !expanded.starts_with("https://")
+                && !entities
+                    .iter()
+                    .any(|e| matches!(e, ExtractedEntity::FilePath(p) if p == &expanded))
+            {
+                entities.push(ExtractedEntity::FilePath(expanded));
+            }
+        }
+    }
+
+    // 3. Scan for Hex color codes (#RRGGBB)
     for word in text.split_whitespace() {
         let trimmed = word.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '#');
         if trimmed.starts_with('#') && (trimmed.len() == 7 || trimmed.len() == 4) {
@@ -156,12 +221,11 @@ pub fn extract_entities(text: &str) -> Vec<ExtractedEntity> {
         }
     }
 
-    // 3. Scan for OTP / 2FA verification codes (4 to 8 consecutive digits)
+    // 4. Scan for OTP / 2FA verification codes (4 to 8 consecutive digits)
     let words: Vec<&str> = text.split_whitespace().collect();
     for (i, &word) in words.iter().enumerate() {
         let clean = word.trim_matches(|c: char| !c.is_ascii_digit());
         if (4..=8).contains(&clean.len()) && clean.chars().all(|c| c.is_ascii_digit()) {
-            // Check context if available or if standalone
             let is_contextual = if i > 0 {
                 let prev = words[i - 1].to_lowercase();
                 prev.contains("code")
@@ -183,6 +247,77 @@ pub fn extract_entities(text: &str) -> Vec<ExtractedEntity> {
     }
 
     entities
+}
+
+/// Open a file path using `xdg-open` detached.
+pub fn open_file(path_str: &str) {
+    let expanded = if let Some(rest) = path_str.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            format!("{home}/{rest}")
+        } else {
+            path_str.to_string()
+        }
+    } else {
+        path_str.to_string()
+    };
+    let _ = std::process::Command::new("xdg-open")
+        .arg(&expanded)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+}
+
+/// Open containing folder of `path_str` using `xdg-open` detached.
+pub fn open_dir(path_str: &str) {
+    let expanded = if let Some(rest) = path_str.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            format!("{home}/{rest}")
+        } else {
+            path_str.to_string()
+        }
+    } else {
+        path_str.to_string()
+    };
+    let path = Path::new(&expanded);
+    let target_dir = if path.is_dir() {
+        path
+    } else if let Some(parent) = path.parent() {
+        parent
+    } else {
+        path
+    };
+    let _ = std::process::Command::new("xdg-open")
+        .arg(target_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+}
+
+/// Open or focus a desktop application.
+pub fn open_application(app_name: &str) {
+    let clean = app_name.trim().to_lowercase();
+    if clean.is_empty() || clean == "system" || clean == "packagekit" || clean == "wiremix" {
+        return;
+    }
+    let focus_status = Command::new("hyprctl")
+        .args(["dispatch", "focuswindow", &format!("class:{clean}")])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+
+    if focus_status.is_ok_and(|s| s.success()) {
+        return;
+    }
+
+    let _ = Command::new("setsid")
+        .args(["-f", &clean])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
 }
 
 /// Do Not Disturb state machine.

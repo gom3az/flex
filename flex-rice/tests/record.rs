@@ -178,3 +178,15 @@ fn stop_without_a_registry_kills_all_recorders() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn stop_without_a_registry_and_idle_does_nothing() {
+    let dir = scratch("stop-idle");
+    install_stubs(&dir, 1); // pgrep exits 1 -> no recorder running
+    let info = dir.join("recording.info");
+    let output = run(&dir, &info, &["stop"]);
+    assert!(output.status.success());
+    assert!(!dir.join("kill.log").exists(), "no kill attempted");
+    assert!(!dir.join("notify.log").exists(), "no notification sent");
+    let _ = std::fs::remove_dir_all(&dir);
+}

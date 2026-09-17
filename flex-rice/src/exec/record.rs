@@ -225,6 +225,9 @@ pub fn stop(path_env: Option<&str>) -> Result<()> {
         notify(&path_env, &[String::from("Recording saved"), body]);
         return Ok(());
     }
+    if !recorder_running(&path_env) {
+        return Ok(());
+    }
     if let Some(bin) = resolve_tool("killall", &path_env) {
         let _ = Command::new(bin)
             .args(["-INT", RECORDER])

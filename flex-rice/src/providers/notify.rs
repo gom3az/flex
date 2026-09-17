@@ -43,6 +43,7 @@ fn now_secs() -> u64 {
 }
 
 /// Helper to construct a notification Row with body text preview, graphic image preview, and actions.
+#[allow(clippy::too_many_lines)]
 fn notification_row_from(item: &NotificationItem, now: u64, _is_child: bool) -> Row {
     let rel_time = notify::format_relative_time(item.timestamp, now);
     let entities = notify::extract_entities(&format!("{} {}", item.summary, item.body));
@@ -68,6 +69,24 @@ fn notification_row_from(item: &NotificationItem, now: u64, _is_child: bool) -> 
                     format!("Copy Link ({url})"),
                 ));
             }
+            ExtractedEntity::FilePath(path) => {
+                let file_name = std::path::Path::new(path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(path);
+                targets.push(Target::new(
+                    RowId::new(format!("open_file:{path}")),
+                    format!("Open File ({file_name})"),
+                ));
+                targets.push(Target::new(
+                    RowId::new(format!("open_dir:{path}")),
+                    "Open Containing Folder".to_string(),
+                ));
+                targets.push(Target::new(
+                    RowId::new(format!("copy_path:{path}")),
+                    format!("Copy Path ({file_name})"),
+                ));
+            }
             ExtractedEntity::HexColor(hex) => {
                 targets.push(Target::new(
                     RowId::new(format!("copy_hex:{hex}")),
@@ -77,7 +96,21 @@ fn notification_row_from(item: &NotificationItem, now: u64, _is_child: bool) -> 
         }
     }
 
-    // 2. Attached D-Bus action buttons
+    // 2. Open desktop application if non-system app
+    let clean_app = item.app_name.trim();
+    let lower_app = clean_app.to_lowercase();
+    if !clean_app.is_empty()
+        && lower_app != "system"
+        && lower_app != "packagekit"
+        && lower_app != "wiremix"
+    {
+        targets.push(Target::new(
+            RowId::new(format!("open_app:{clean_app}")),
+            format!("Open App ({clean_app})"),
+        ));
+    }
+
+    // 3. Attached D-Bus action buttons
     for action in &item.actions {
         targets.push(Target::new(
             RowId::new(format!("action:{}:{}", item.id, action.id)),
@@ -774,6 +807,14 @@ pub fn execute(
         let _ = std::process::Command::new("xdg-open").arg(url).spawn();
     } else if let Some(url) = action_id.strip_prefix("copy_url:") {
         copy_to_clipboard(url);
+    } else if let Some(path) = action_id.strip_prefix("open_file:") {
+        notify::open_file(path);
+    } else if let Some(path) = action_id.strip_prefix("open_dir:") {
+        notify::open_dir(path);
+    } else if let Some(path) = action_id.strip_prefix("copy_path:") {
+        copy_to_clipboard(path);
+    } else if let Some(app) = action_id.strip_prefix("open_app:") {
+        notify::open_application(app);
     } else if let Some(hex) = action_id.strip_prefix("copy_hex:") {
         copy_to_clipboard(hex);
     } else if action_id == "dnd:25m" || target_title.contains("Pomodoro") {
