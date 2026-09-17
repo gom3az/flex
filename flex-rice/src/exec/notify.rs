@@ -770,10 +770,11 @@ impl NotificationServer {
 }
 
 /// Format the header line of a notification toast card.
-/// Total target width: target_right_col display columns (excluding right margin).
+/// Total target width: `target_right_col` display columns (excluding right margin).
 /// Left margin: 2 spaces. Icon width: 1 cell. Spacing: 2 spaces.
 /// App name & summary separated by " · ".
-/// Relative timestamp right-aligned to target_right_col.
+/// Relative timestamp right-aligned to `target_right_col`.
+#[must_use]
 pub fn format_toast_header(
     icon: &str,
     app_name: &str,
@@ -838,7 +839,9 @@ pub fn format_toast_header(
     if truncated_summary.is_empty() {
         format!("{prefix}\x1b[1m{app_name}\x1b[0m{spaces_str}\x1b[2m{rel}\x1b[0m")
     } else {
-        format!("{prefix}\x1b[1m{app_name}\x1b[0m · {truncated_summary}{spaces_str}\x1b[2m{rel}\x1b[0m")
+        format!(
+            "{prefix}\x1b[1m{app_name}\x1b[0m · {truncated_summary}{spaces_str}\x1b[2m{rel}\x1b[0m"
+        )
     }
 }
 
