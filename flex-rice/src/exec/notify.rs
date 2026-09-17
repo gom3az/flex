@@ -1328,12 +1328,12 @@ pub fn format_toast_card(
 /// Spawn a transient toast overlay for a newly-arrived notification.
 ///
 /// Launches `kitty --class flex-notify-toast -o font_size=11 -o remember_window_size=no
-/// -o initial_window_width=54c -o initial_window_height=14c -e flex-notify toast <id>` detached.
+/// -o initial_window_width=50c -o initial_window_height=6c -o window_padding_width=0 -o window_padding_height=0 -e flex-notify toast <id>` detached.
 pub fn spawn_toast(id: u32, state_path: Option<&Path>) {
     let state_arg =
         state_path.map_or_else(String::new, |p| format!(" --state-file '{}'", p.display()));
     let cmd = format!(
-        "kitty --class flex-notify-toast -o font_size=11 -o remember_window_size=no -o initial_window_width=54c -o initial_window_height=14c -o window_padding_width=1 -o window_padding_height=1 -e flex-notify{state_arg} toast {id}"
+        "kitty --class flex-notify-toast -o font_size=11 -o remember_window_size=no -o initial_window_width=50c -o initial_window_height=6c -o window_padding_width=0 -o window_padding_height=0 -e flex-notify{state_arg} toast {id}"
     );
     // Double-fork via `sh -c '… &'`: the grandchild is reparented to init so
     // no daemon FDs (including the zbus socket) are inherited.

@@ -144,10 +144,10 @@ fn run_toast(id: u32, state_path: Option<&std::path::Path>) {
     let rel = notify::format_relative_time(item.timestamp, now);
 
     // ── Render Boxed Toast Card ─────────────────────────────────────────────
-    // Clear screen + hide cursor
-    print!("\x1b[2J\x1b[H\x1b[?25l");
+    // Detect terminal column width dynamically (default to 50 if query fails)
+    let width = crossterm::terminal::size().map_or(50, |(cols, _)| (cols as usize).clamp(36, 120));
 
-    let card = notify::format_toast_card(item, &rel, 50, timeout_secs);
+    let card = notify::format_toast_card(item, &rel, width, timeout_secs);
     for (idx, line) in card.lines().enumerate() {
         print!("\x1b[{};1H{line}\x1b[K", idx + 1);
     }
