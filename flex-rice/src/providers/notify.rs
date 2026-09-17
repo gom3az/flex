@@ -205,6 +205,10 @@ pub fn feed_tab_from(state: &NotifyState, now: u64) -> Tab {
         .count();
 
     let quick_targets = vec![
+        Target::new(
+            RowId::new("open_app:Antigravity"),
+            "Switch to Workspace 3 (AGY Terminal)",
+        ),
         Target::new(RowId::new("toggle_dnd"), format!("Toggle {dnd_label}")),
         Target::new(
             RowId::new("clear_all"),
