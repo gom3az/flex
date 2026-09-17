@@ -94,7 +94,7 @@ pub struct Snapshot<'a> {
 ///
 /// The binary runs exactly one menu per process, so a process-global slot is
 /// the mailbox between the worker thread and the 1 s tick.
-static PENDING_SCAN: Mutex<Option<Vec<Row>>> = Mutex::new(None);
+static PENDING_SCAN: Mutex<Option<crate::spawn::BgTask<Vec<Row>>>> = Mutex::new(None);
 
 /// Whether `nmcli radio wifi` reports the radio on. Anything that is not
 /// `enabled` (including `disabled` and unparseable output) is treated as
@@ -462,7 +462,7 @@ fn scanning_row() -> Row {
 /// [`refresh_scan`].
 pub fn store_scan(rows: Vec<Row>) {
     if let Ok(mut slot) = PENDING_SCAN.lock() {
-        *slot = Some(rows);
+        *slot = Some(crate::spawn::BgTask::ready(rows));
     }
 }
 
@@ -474,7 +474,12 @@ pub fn store_scan(rows: Vec<Row>) {
 /// Filter, marks and scroll are untouched — ticks must never steal state,
 /// and a half-typed SSID survives the swap.
 pub fn refresh_scan(menu: &mut Menu) {
-    let Some(fresh) = PENDING_SCAN.lock().ok().and_then(|mut slot| slot.take()) else {
+    let Some(fresh) = PENDING_SCAN.lock().ok().and_then(|mut slot| {
+        let task = slot.as_ref()?;
+        let res = task.take()?;
+        *slot = None;
+        Some(res)
+    }) else {
         return;
     };
     // Identity of the row under the cursor, read *through the filter*
@@ -536,15 +541,18 @@ fn spawn_rescan(snapshot: &OwnedSnapshot) {
     let radio = snapshot.radio.clone();
     let devices = snapshot.devices.clone();
     let profiles = snapshot.profiles.clone();
-    std::thread::spawn(move || {
+    let task = crate::spawn::BgTask::spawn(move || {
         let fresh = center::snapshot(NMCLI_WIFI_FILE_ENV, "nmcli", &list_args(&iface, true));
-        store_scan(rows(Snapshot {
+        rows(Snapshot {
             radio: radio.as_deref(),
             devices: devices.as_deref(),
             wifi: fresh.as_deref(),
             profiles: profiles.as_deref(),
-        }));
+        })
     });
+    if let Ok(mut slot) = PENDING_SCAN.lock() {
+        *slot = Some(task);
+    }
 }
 
 #[cfg(test)]

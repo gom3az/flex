@@ -257,13 +257,7 @@ fn current_uid(path_env: &str) -> Result<u32> {
 /// or `hyprpaper`, or a failed spawn, is ignored.
 fn spawn_hyprpaper(path_env: &str) {
     if let Some(setsid) = resolve_tool("setsid", path_env) {
-        let _ = Command::new(setsid)
-            .arg("-f")
-            .arg("hyprpaper")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn_retrying();
+        let _ = crate::spawn::spawn_detached(&setsid, Path::new("hyprpaper"), &[]);
         return;
     }
     if let Some(hyprpaper) = resolve_tool("hyprpaper", path_env) {

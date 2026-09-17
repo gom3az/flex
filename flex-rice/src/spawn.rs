@@ -111,3 +111,89 @@ impl RetryExec for Command {
         spawn(self)
     }
 }
+
+/// Non-blocking background worker thread helper with a lock-free result mailbox.
+///
+/// Spawns `f` on a background worker thread and deposits the result into a shared mailbox.
+/// The main thread can non-blockingly check or take the result (e.g. during `Menu::tick`).
+#[derive(Debug)]
+pub(crate) struct BgTask<T> {
+    result: std::sync::Arc<std::sync::Mutex<Option<T>>>,
+}
+
+impl<T: Send + 'static> BgTask<T> {
+    /// Create a completed `BgTask` holding `val` immediately.
+    pub(crate) fn ready(val: T) -> Self {
+        Self {
+            result: std::sync::Arc::new(std::sync::Mutex::new(Some(val))),
+        }
+    }
+
+    /// Spawn a background worker thread executing `f`.
+    pub(crate) fn spawn<F>(f: F) -> Self
+    where
+        F: FnOnce() -> T + Send + 'static,
+    {
+        let result = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let slot = std::sync::Arc::clone(&result);
+        std::thread::spawn(move || {
+            let val = f();
+            if let Ok(mut guard) = slot.lock() {
+                *guard = Some(val);
+            }
+        });
+        Self { result }
+    }
+
+    /// Non-blockingly take the completed result if available.
+    pub(crate) fn take(&self) -> Option<T> {
+        self.result.lock().ok()?.take()
+    }
+
+    /// Returns `true` if the background task has finished and populated the mailbox.
+    #[allow(dead_code)]
+    pub(crate) fn is_ready(&self) -> bool {
+        self.result.lock().is_ok_and(|guard| guard.is_some())
+    }
+}
+
+/// Helper to configure and run a command detached via `setsid -f` with nulled stdio.
+///
+/// Redirects stdin, stdout, and stderr to `/dev/null` and retries on transient `ETXTBSY`.
+///
+/// # Errors
+///
+/// Returns an error if `setsid` execution fails.
+pub(crate) fn spawn_detached(
+    setsid_bin: &std::path::Path,
+    tool_bin: &std::path::Path,
+    args: &[&str],
+) -> io::Result<ExitStatus> {
+    let mut cmd = Command::new(setsid_bin);
+    cmd.arg("-f")
+        .arg(tool_bin)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    status(&mut cmd)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bg_task_spawns_and_yields_result() {
+        let task = BgTask::spawn(|| 42);
+        for _ in 0..100 {
+            if let Some(val) = task.take() {
+                assert_eq!(val, 42);
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        panic!("BgTask timed out");
+    }
+}
+

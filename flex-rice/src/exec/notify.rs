@@ -251,12 +251,7 @@ pub fn extract_entities(text: &str) -> Vec<ExtractedEntity> {
 
 /// Open a URL using `xdg-open` detached via `setsid -f`.
 pub fn open_url(url: &str) {
-    let _ = Command::new("setsid")
-        .args(["-f", "xdg-open", url])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
+    let _ = crate::spawn::spawn_detached(Path::new("setsid"), Path::new("xdg-open"), &[url]);
 }
 
 /// Open a file path using `xdg-open` detached via `setsid -f`.
@@ -270,12 +265,7 @@ pub fn open_file(path_str: &str) {
     } else {
         path_str.to_string()
     };
-    let _ = Command::new("setsid")
-        .args(["-f", "xdg-open", &expanded])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
+    let _ = crate::spawn::spawn_detached(Path::new("setsid"), Path::new("xdg-open"), &[&expanded]);
 }
 
 /// Open containing folder of `path_str` using `xdg-open` detached via `setsid -f`.
@@ -298,12 +288,11 @@ pub fn open_dir(path_str: &str) {
         path
     };
     let target_str = target_dir.to_string_lossy();
-    let _ = Command::new("setsid")
-        .args(["-f", "xdg-open", target_str.as_ref()])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
+    let _ = crate::spawn::spawn_detached(
+        Path::new("setsid"),
+        Path::new("xdg-open"),
+        &[target_str.as_ref()],
+    );
 }
 
 /// Persistent trace logger for debugging notify focus and application launch execution steps.
@@ -537,12 +526,7 @@ pub fn open_application(app_name: &str) {
     log_notify_trace(&format!(
         "[LAUNCH_SPAWN] Spawning detached setsid -f '{launch_target}'"
     ));
-    let _ = Command::new("setsid")
-        .args(["-f", launch_target])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
+    let _ = crate::spawn::spawn_detached(Path::new("setsid"), Path::new(launch_target), &[]);
 }
 
 /// Do Not Disturb state machine.

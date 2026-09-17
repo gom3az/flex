@@ -640,18 +640,17 @@ fn spawn_detached_worker(id: ShotId, filepath: &Path, rec: &Path, path_env: &str
     let Some(setsid) = resolve_tool("setsid", path_env) else {
         anyhow::bail!("shot: setsid not found on PATH");
     };
-    Command::new(setsid)
-        .arg("-f")
-        .arg(exe)
-        .arg("--capture")
-        .arg(id.as_str())
-        .arg(filepath)
-        .arg(rec)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn_retrying()
-        .context("shot: failed to detach the capture worker")?;
+    let filepath_str = filepath.to_string_lossy();
+    let rec_str = rec.to_string_lossy();
+    let status = crate::spawn::spawn_detached(
+        &setsid,
+        &exe,
+        &["--capture", id.as_str(), &filepath_str, &rec_str],
+    )
+    .context("shot: failed to detach the capture worker")?;
+    if !status.success() {
+        anyhow::bail!("shot: failed to detach the capture worker");
+    }
     Ok(())
 }
 

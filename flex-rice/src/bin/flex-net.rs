@@ -98,37 +98,51 @@ fn run() -> anyhow::Result<()> {
             return runner::run_select(Provider::Net, style);
         }
 
-        let menu = runner::build_menu(Provider::Net, style)?;
-        match flex_core::run::run_capture(menu)? {
-            Outcome::Chosen { action_id, .. } => {
-                if let Some(pid) = action_id.strip_prefix("proc:") {
-                    net::execute(&format!("signal:{pid}:SIGTERM"))?;
-                } else {
+        let mut active_tab = 0;
+        loop {
+            let mut menu = runner::build_menu(Provider::Net, style)?;
+            if active_tab < menu.app.tabs.len() {
+                menu.app.switch_tab(active_tab);
+            }
+            match flex_core::run::run_capture(menu)? {
+                Outcome::Chosen { action_id, .. } => {
+                    if let Some(pid) = action_id.strip_prefix("proc:") {
+                        net::execute(&format!("signal:{pid}:SIGTERM"))?;
+                        return Ok(());
+                    }
                     net::execute(&action_id)?;
+                    if action_id == "speedtest:run" || action_id.starts_with("speedtest") {
+                        active_tab = 2;
+                        continue;
+                    }
+                    return Ok(());
                 }
-                Ok(())
-            }
-            Outcome::Delete { action_id, .. } => {
-                if let Some(pid) = action_id.strip_prefix("proc:") {
-                    net::execute(&format!("signal:{pid}:SIGKILL"))?;
+                Outcome::Delete { action_id, .. } => {
+                    if let Some(pid) = action_id.strip_prefix("proc:") {
+                        net::execute(&format!("signal:{pid}:SIGKILL"))?;
+                    }
+                    return Ok(());
                 }
-                Ok(())
-            }
-            Outcome::Toggle { action_id, .. } => {
-                if let Some(pid) = action_id.strip_prefix("proc:") {
-                    net::execute(&format!("signal:{pid}:SIGSTOP"))?;
+                Outcome::Toggle { action_id, .. } => {
+                    if let Some(pid) = action_id.strip_prefix("proc:") {
+                        net::execute(&format!("signal:{pid}:SIGSTOP"))?;
+                    }
+                    return Ok(());
                 }
-                Ok(())
-            }
-            Outcome::Target { target, .. } => {
-                net::execute(&target)?;
-                Ok(())
-            }
-            Outcome::Quit { code } => {
-                std::process::exit(code);
-            }
-            Outcome::Cancelled => {
-                std::process::exit(EXIT_CANCELLED);
+                Outcome::Target { target, .. } => {
+                    net::execute(&target)?;
+                    if target.starts_with("speedtest") {
+                        active_tab = 2;
+                        continue;
+                    }
+                    return Ok(());
+                }
+                Outcome::Quit { code } => {
+                    std::process::exit(code);
+                }
+                Outcome::Cancelled => {
+                    std::process::exit(EXIT_CANCELLED);
+                }
             }
         }
     } else {

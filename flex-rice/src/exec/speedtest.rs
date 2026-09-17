@@ -31,20 +31,20 @@ pub const DEFAULT_PING_HOST: &str = "speed.cloudflare.com";
 /// Default ping target port.
 pub const DEFAULT_PING_PORT: u16 = 80;
 
-/// Default download endpoint (10 MB payload).
-pub const DEFAULT_DOWNLOAD_URL: &str = "https://speed.cloudflare.com/__down?bytes=10000000";
+/// Number of TCP handshake probes for latency & jitter.
+pub const PING_PROBES: usize = 10;
+
+/// Number of bytes to download during benchmark (50 MB).
+pub const DOWNLOAD_TARGET_BYTES: u64 = 50_000_000;
+
+/// Default download endpoint (50 MB payload).
+pub const DEFAULT_DOWNLOAD_URL: &str = "https://speed.cloudflare.com/__down?bytes=50000000";
 
 /// Default upload endpoint.
 pub const DEFAULT_UPLOAD_URL: &str = "https://speed.cloudflare.com/__up";
 
-/// Number of TCP handshake probes for latency & jitter.
-pub const PING_PROBES: usize = 5;
-
-/// Number of bytes to download during benchmark (10 MB).
-pub const DOWNLOAD_TARGET_BYTES: u64 = 10_000_000;
-
-/// Number of bytes to upload during benchmark (4 MB).
-pub const UPLOAD_TARGET_BYTES: u64 = 4_000_000;
+/// Number of bytes to upload during benchmark (20 MB).
+pub const UPLOAD_TARGET_BYTES: u64 = 20_000_000;
 
 /// Reference speed used to normalize volume bars (100 MB/s).
 pub const REFERENCE_MAX_SPEED_BPS: f64 = 100.0 * MB;
@@ -191,10 +191,14 @@ impl SpeedtestSnapshot {
     pub fn download_display(&self) -> String {
         if self.phase == SpeedtestPhase::TestingDownload && self.download_bytes > 0 {
             let rate = self.download_bps.unwrap_or(0.0);
+            #[allow(clippy::cast_precision_loss)]
+            let pct = (self.download_bytes as f64 / DOWNLOAD_TARGET_BYTES as f64 * 100.0)
+                .clamp(0.0, 100.0);
             format!(
-                "{} ({})",
+                "{} ({} / {} • {pct:.0}%)",
                 format_speed(rate),
-                format_bytes(self.download_bytes)
+                format_bytes(self.download_bytes),
+                format_bytes(DOWNLOAD_TARGET_BYTES)
             )
         } else if let Some(rate) = self.download_bps {
             let mbps = (rate * 8.0) / 1_000_000.0;
@@ -209,10 +213,14 @@ impl SpeedtestSnapshot {
     pub fn upload_display(&self) -> String {
         if self.phase == SpeedtestPhase::TestingUpload && self.upload_bytes > 0 {
             let rate = self.upload_bps.unwrap_or(0.0);
+            #[allow(clippy::cast_precision_loss)]
+            let pct =
+                (self.upload_bytes as f64 / UPLOAD_TARGET_BYTES as f64 * 100.0).clamp(0.0, 100.0);
             format!(
-                "{} ({})",
+                "{} ({} / {} • {pct:.0}%)",
                 format_speed(rate),
-                format_bytes(self.upload_bytes)
+                format_bytes(self.upload_bytes),
+                format_bytes(UPLOAD_TARGET_BYTES)
             )
         } else if let Some(rate) = self.upload_bps {
             let mbps = (rate * 8.0) / 1_000_000.0;
@@ -423,7 +431,7 @@ where
     F: Fn(u64, f64, f64),
 {
     let mut cmd = Command::new("curl");
-    cmd.args(["-s", "-N", "--max-time", "15", url])
+    cmd.args(["-s", "-N", "--max-time", "30", url])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -473,7 +481,7 @@ where
         "--data-binary",
         "@-",
         "--max-time",
-        "15",
+        "30",
         url,
     ])
     .stdin(Stdio::piped())
@@ -608,9 +616,7 @@ pub fn trigger_background() {
         return;
     }
 
-    std::thread::spawn(move || {
-        let _ = run_benchmark();
-    });
+    let _ = crate::spawn::BgTask::spawn(run_benchmark);
 }
 
 /// Run terminal CLI benchmark (`flex-net -B` / `flex-net --speedtest`) and print summary.

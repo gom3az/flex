@@ -45,12 +45,10 @@
 //!   launch never touches it.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 use anyhow::{Context as _, Result};
 
 use crate::providers::launch;
-use crate::spawn::RetryExec as _;
 use crate::terminal::{self, TerminalKind};
 
 /// A validated launch action id.
@@ -182,12 +180,13 @@ fn tool(path_env: &str, args: &[String]) -> Result<bool> {
     let Some(bin) = resolve_tool("setsid", path_env) else {
         anyhow::bail!("launch: setsid not found on PATH");
     };
-    let status = Command::new(&bin)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status_retrying()
+    let ref_args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let (tool_bin, tool_args) = if ref_args.first() == Some(&"-f") && ref_args.len() > 1 {
+        (Path::new(ref_args[1]), &ref_args[2..])
+    } else {
+        (Path::new(ref_args[0]), &ref_args[1..])
+    };
+    let status = crate::spawn::spawn_detached(&bin, tool_bin, tool_args)
         .with_context(|| String::from("launch: failed to run setsid"))?;
     Ok(status.success())
 }

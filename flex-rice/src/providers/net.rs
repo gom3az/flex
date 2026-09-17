@@ -152,19 +152,17 @@ pub fn build_speedtest_rows(snapshot: &SpeedtestSnapshot) -> Vec<Row> {
         snapshot.ping_display(),
     );
 
-    let mut download_row = Row::with_meta(
+    let download_row = Row::with_meta(
         RowId::new("speedtest:download"),
         "Download Speed",
         snapshot.download_display(),
     );
-    download_row.volume = Some(snapshot.download_volume());
 
-    let mut upload_row = Row::with_meta(
+    let upload_row = Row::with_meta(
         RowId::new("speedtest:upload"),
         "Upload Speed",
         snapshot.upload_display(),
     );
-    upload_row.volume = Some(snapshot.upload_volume());
 
     let server_row = Row::with_meta(
         RowId::new("speedtest:server"),
