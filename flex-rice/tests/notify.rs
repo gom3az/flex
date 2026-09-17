@@ -502,3 +502,53 @@ fn entity_extractor_file_path_and_url_expansion() {
         |e| matches!(e, ExtractedEntity::Url(u) if u == "https://www.github.com/gom3az/flex")
     ));
 }
+
+#[test]
+fn toast_boxed_card_rendering() {
+    use flex_rice::exec::notify::{NotificationAction, NotificationItem, Urgency};
+
+    let mut item = NotificationItem::new(
+        101,
+        "System Alert",
+        "Disk Space Warning",
+        "Root partition capacity reached 98%",
+        Urgency::Critical,
+    );
+    item.progress = Some(0.98);
+    item.actions = vec![
+        NotificationAction {
+            id: "clean".into(),
+            title: "Clean Up".into(),
+        },
+        NotificationAction {
+            id: "ignore".into(),
+            title: "Ignore".into(),
+        },
+    ];
+
+    let card = notify::format_toast_card(&item, "now", 50, 0);
+
+    // Verify Wiremix box borders
+    assert!(card.contains("╭─"));
+    assert!(card.contains("─╮"));
+    assert!(card.contains("├"));
+    assert!(card.contains("┤"));
+    assert!(card.contains("╰"));
+    assert!(card.contains("╯"));
+
+    // Verify Critical badge & icon
+    assert!(card.contains("󰀦"));
+    assert!(card.contains("[CRITICAL]"));
+
+    // Verify progress bar & actions
+    assert!(card.contains("Progress: ["));
+    assert!(card.contains("Actions:"));
+    assert!(card.contains("[1]"));
+    assert!(card.contains("Clean Up"));
+    assert!(card.contains("[2]"));
+    assert!(card.contains("Ignore"));
+
+    // Verify footer hints
+    assert!(card.contains("[Enter] Open"));
+    assert!(card.contains("[Esc] Dismiss"));
+}

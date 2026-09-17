@@ -1189,17 +1189,176 @@ pub fn format_toast_header(
     }
 }
 
+/// Format a modern boxed Wiremix notification toast card with rounded borders.
+/// Total width: `width` columns (default 50).
+#[must_use]
+#[allow(
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
+pub fn format_toast_card(
+    item: &NotificationItem,
+    rel_time: &str,
+    width: usize,
+    timeout_secs: u64,
+) -> String {
+    use unicode_width::UnicodeWidthStr as _;
+
+    let target_width = width.max(36);
+    let inner_width = target_width.saturating_sub(4); // 2 spaces padding + 2 border chars
+
+    let (border_ansi, icon, icon_ansi) = match item.urgency {
+        Urgency::Critical => ("\x1b[1;31m", "󰀦", "\x1b[1;31m"),
+        Urgency::Normal => ("\x1b[1;36m", "󰂚", "\x1b[1;36m"),
+        Urgency::Low => ("\x1b[2;37m", "󰂞", "\x1b[2;37m"),
+    };
+
+    let reset = "\x1b[0m";
+    let bold = "\x1b[1m";
+    let dim = "\x1b[2m";
+    let yellow_bold = "\x1b[1;33m";
+    let cyan = "\x1b[36m";
+
+    // ── Top Header Line ─────────────────────────────────────────────────────
+    // ╭─ icon app_name ──────── [CRITICAL] rel_time ─╮
+    let left_width = 3 + 1 + 1 + item.app_name.width() + 1; // "╭─ " + icon(1) + " " + app + " "
+    let crit_badge = if item.urgency == Urgency::Critical {
+        " [CRITICAL]"
+    } else {
+        ""
+    };
+
+    let right_head_raw = format!("{crit_badge} {rel_time} ─╮");
+    let right_width = right_head_raw.width();
+
+    let fill_len = target_width.saturating_sub(left_width + right_width);
+    let fill_dashes = "─".repeat(fill_len);
+
+    let top_line = format!(
+        "{border_ansi}╭─ {reset}{icon_ansi}{icon}{reset} {bold}{}{reset} {border_ansi}{fill_dashes}{reset}{yellow_bold}{crit_badge}{reset} {dim}{rel_time}{reset} {border_ansi}─╮{reset}",
+        item.app_name
+    );
+
+    let make_content_row = |content_spans: &str, content_len: usize| -> String {
+        let pad_len = inner_width.saturating_sub(content_len);
+        let pad = " ".repeat(pad_len);
+        format!("{border_ansi}│{reset}  {content_spans}{pad}  {border_ansi}│{reset}")
+    };
+
+    let mut lines = Vec::new();
+    lines.push(top_line);
+
+    // ── Summary Line ───────────────────────────────────────────────────────
+    let summary_text = item.summary.replace('\n', " ");
+    let mut sum_truncated = String::new();
+    let mut sum_w = 0;
+    for c in summary_text.chars() {
+        let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if sum_w + cw > inner_width {
+            break;
+        }
+        sum_truncated.push(c);
+        sum_w += cw;
+    }
+    let summary_formatted = format!("{bold}{sum_truncated}{reset}");
+    lines.push(make_content_row(&summary_formatted, sum_w));
+
+    // ── Body Text Line ─────────────────────────────────────────────────────
+    if !item.body.is_empty() {
+        let body_clean = item.body.replace('\n', " ");
+        let mut body_truncated = String::new();
+        let mut body_w = 0;
+        for c in body_clean.chars() {
+            let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+            if body_w + cw + 1 > inner_width {
+                body_truncated.push('…');
+                body_w += 1;
+                break;
+            }
+            body_truncated.push(c);
+            body_w += cw;
+        }
+        let body_formatted = format!("{dim}{body_truncated}{reset}");
+        lines.push(make_content_row(&body_formatted, body_w));
+    }
+
+    // ── Progress Bar Line ───────────────────────────────────────────────────
+    if let Some(p) = item.progress {
+        let pct = (p.clamp(0.0, 1.0) * 100.0) as usize;
+        let bar_max = inner_width.saturating_sub(16);
+        let fill = (bar_max * pct) / 100;
+        let empty = bar_max.saturating_sub(fill);
+        let filled_bar = "█".repeat(fill);
+        let empty_bar = "░".repeat(empty);
+
+        let prog_str =
+            format!("Progress: [{cyan}{filled_bar}{reset}{dim}{empty_bar}{reset}] {pct:>3}%");
+        let prog_w = 10 + bar_max + 2 + 4;
+        lines.push(make_content_row(&prog_str, prog_w.min(inner_width)));
+    }
+
+    // ── Action Buttons ──────────────────────────────────────────────────────
+    if !item.actions.is_empty() {
+        let mut action_spans = format!("{bold}Actions:{reset}");
+        let mut act_w = 8;
+        for (idx, action) in item.actions.iter().enumerate().take(3) {
+            let num = idx + 1;
+            let act_text = format!(" {yellow_bold}[{num}]{reset} {} ", action.title);
+            let act_len = 4 + action.title.width();
+            if act_w + act_len > inner_width {
+                break;
+            }
+            action_spans.push_str(&act_text);
+            act_w += act_len;
+        }
+        lines.push(make_content_row(&action_spans, act_w.min(inner_width)));
+    }
+
+    // ── Divider Line ───────────────────────────────────────────────────────
+    let mid_dash = "─".repeat(target_width.saturating_sub(2));
+    lines.push(format!("{border_ansi}├{mid_dash}┤{reset}"));
+
+    // ── Footer Hint Line ───────────────────────────────────────────────────
+    let (hint_text, hint_len) = if !item.actions.is_empty() {
+        (
+            format!("{dim}[Enter] Open  [1-9] Action  [Esc] Dismiss{reset}"),
+            41,
+        )
+    } else if item.urgency == Urgency::Critical {
+        (
+            format!("{dim}[Enter] Open Drawer  [Esc] Dismiss (critical){reset}"),
+            43,
+        )
+    } else if timeout_secs > 0 {
+        (
+            format!("{dim}[Enter] Open Drawer  [Esc] Dismiss ({timeout_secs}s){reset}"),
+            41,
+        )
+    } else {
+        (
+            format!("{dim}[Enter] Open Drawer  [Esc] Dismiss{reset}"),
+            35,
+        )
+    };
+    lines.push(make_content_row(&hint_text, hint_len.min(inner_width)));
+
+    // ── Bottom Border Line ─────────────────────────────────────────────────
+    let bot_dash = "─".repeat(target_width.saturating_sub(2));
+    lines.push(format!("{border_ansi}╰{bot_dash}╯{reset}"));
+
+    lines.join("\n")
+}
+
 /// Spawn a transient toast overlay for a newly-arrived notification.
 ///
-/// Launches `kitty --class flex-notify-toast -o font_size=10 -e flex-notify
-/// toast <id>` detached (stdio nulled).  The toast binary renders a 2-line
-/// card and auto-dismisses after a timeout.  Errors are silently ignored so
-/// a missing binary never kills the daemon.
+/// Launches `kitty --class flex-notify-toast -o font_size=11 -o remember_window_size=no
+/// -o initial_window_width=54c -o initial_window_height=10c -e flex-notify toast <id>` detached.
 pub fn spawn_toast(id: u32, state_path: Option<&Path>) {
     let state_arg =
         state_path.map_or_else(String::new, |p| format!(" --state-file '{}'", p.display()));
     let cmd = format!(
-        "kitty --class flex-notify-toast -o font_size=11 -e flex-notify{state_arg} toast {id}"
+        "kitty --class flex-notify-toast -o font_size=11 -o remember_window_size=no -o initial_window_width=54c -o initial_window_height=10c -e flex-notify{state_arg} toast {id}"
     );
     // Double-fork via `sh -c '… &'`: the grandchild is reparented to init so
     // no daemon FDs (including the zbus socket) are inherited.

@@ -196,4 +196,3 @@ mod tests {
         panic!("BgTask timed out");
     }
 }
-

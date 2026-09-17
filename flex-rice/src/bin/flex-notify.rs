@@ -142,59 +142,17 @@ fn run_toast(id: u32, state_path: Option<&std::path::Path>) {
     let is_critical = urgency == Urgency::Critical;
     let timeout_secs: u64 = if is_critical { 0 } else { 5 };
 
-    // ── Badge icon ───────────────────────────────────────────────────────────
-    let icon = match urgency {
-        Urgency::Critical => "󰀦",
-        Urgency::Normal => "󰂚",
-        Urgency::Low => "󰂞",
-    };
-
-    // ── Truncate body to 43 chars (fits 50 col canvas with 5-space indent) ────
-    let body_preview = if item.body.is_empty() {
-        String::new()
-    } else {
-        let trimmed = item.body.replace('\n', " ");
-        if trimmed.len() > 43 {
-            format!("{}…", &trimmed[..42])
-        } else {
-            trimmed
-        }
-    };
-
     let rel = notify::format_relative_time(item.timestamp, now);
 
-    // ── Render ───────────────────────────────────────────────────────────────
+    // ── Render Boxed Toast Card ─────────────────────────────────────────────
     // Clear screen + hide cursor
     print!("\x1b[2J\x1b[H\x1b[?25l");
 
-    // Row 1: Top padding line
-    println!();
-
-    // Row 2: Header line (icon + app · summary + right-aligned timestamp)
-    let header = notify::format_toast_header(icon, &item.app_name, &item.summary, &rel, 48);
-    println!("{header}");
-
-    // Row 3: Body preview (dim) or blank line (5-space indent aligned under app name)
-    if body_preview.is_empty() {
-        println!();
-    } else {
-        println!("     \x1b[2m{body_preview}\x1b[0m");
-    }
-
-    // Row 4: Hint line (5-space indent aligned under body)
-    if is_critical {
-        println!("     \x1b[2m[SUPER+N] open drawer • critical alert\x1b[0m");
-    } else {
-        println!("     \x1b[2mauto-dismiss in {timeout_secs}s • [SUPER+N] open\x1b[0m");
-    }
-
-    // Row 5: Bottom padding line
-    println!();
-
+    let card = notify::format_toast_card(item, &rel, 50, timeout_secs);
+    println!("{card}");
     let _ = std::io::stdout().flush();
 
-    // ── Input / timeout ──────────────────────────────────────────────────────
-    // Put terminal in raw mode so we get single keystrokes.
+    // ── Input / timeout loop ────────────────────────────────────────────────
     let _ = std::process::Command::new("stty")
         .args(["-echo", "raw", "-icanon", "min", "0", "time", "1"])
         .status();
@@ -207,14 +165,26 @@ fn run_toast(id: u32, state_path: Option<&std::path::Path>) {
 
     let mut buf = [0u8; 1];
     let mut open_center = false;
+    let mut chosen_action_id: Option<String> = None;
+
     loop {
         use std::io::Read as _;
         let n = std::io::stdin().read(&mut buf).unwrap_or(0);
         if n > 0 {
-            // 'q' or ESC = quiet dismiss; anything else = open center
-            if buf[0] != b'q' && buf[0] != 0x1b {
-                open_center = true;
+            let b = buf[0];
+            if b == b'q' || b == 0x1b || b == b'd' {
+                // Quiet dismiss
+                break;
             }
+            if (b'1'..=b'9').contains(&b) {
+                let idx = (b - b'1') as usize;
+                if idx < item.actions.len() {
+                    chosen_action_id = Some(item.actions[idx].id.clone());
+                }
+                break;
+            }
+            // Enter / Space / 'n' -> open drawer
+            open_center = true;
             break;
         }
         if let Some(dl) = deadline {
@@ -224,15 +194,17 @@ fn run_toast(id: u32, state_path: Option<&std::path::Path>) {
         }
     }
 
-    // Restore terminal
+    // Restore terminal & show cursor
     let _ = std::process::Command::new("stty").arg("sane").status();
-
-    // Show cursor again
     print!("\x1b[?25h");
     let _ = std::io::stdout().flush();
 
+    if let Some(act_id) = chosen_action_id {
+        // Output action choice (for logging or daemon signal listener)
+        println!("Action: {act_id}");
+    }
+
     if open_center {
-        // Detach so this process can exit while the drawer opens
         let _ = std::process::Command::new("flex")
             .args(["popup", "flex-notify-center", "flex-notify"])
             .stdin(std::process::Stdio::null())
