@@ -306,12 +306,23 @@ pub fn open_dir(path_str: &str) {
         .spawn();
 }
 
-/// Open or focus a desktop application.
+/// Dynamically match a notification target to an open Hyprland client window.
+///
+/// Uses a 4-tier matching algorithm:
+/// 1. Exact match on class or initialClass (case-insensitive).
+/// 2. Bidirectional substring match on class, initialClass, or title.
+/// 3. Token / stem word match across clean query terms.
+/// 4. Dynamic focus history fallback (`focusHistoryID` lowest non-drawer window).
 fn find_matching_client<'a>(
     clients: &'a [serde_json::Value],
     clean: &str,
 ) -> Option<(&'a str, Option<i64>)> {
-    // First pass: exact match on class or initialClass
+    let clean = clean.trim().to_lowercase();
+    if clean.is_empty() {
+        return None;
+    }
+
+    // Pass 1: Exact match on class or initialClass
     for client in clients {
         let class = client["class"].as_str().unwrap_or("").to_lowercase();
         let initial_class = client["initialClass"].as_str().unwrap_or("").to_lowercase();
@@ -322,44 +333,72 @@ fn find_matching_client<'a>(
         }
     }
 
-    // Second pass: substring match on class, initialClass, or title
+    // Pass 2: Substring match on class, initialClass, or title
     for client in clients {
         let class = client["class"].as_str().unwrap_or("").to_lowercase();
         let initial_class = client["initialClass"].as_str().unwrap_or("").to_lowercase();
         let title = client["title"].as_str().unwrap_or("").to_lowercase();
-        if class.contains(clean)
-            || initial_class.contains(clean)
-            || title.contains(clean)
-            || clean.contains(&class)
-        {
+
+        let match_class = !class.is_empty() && (class.contains(&clean) || clean.contains(&class));
+        let match_init = !initial_class.is_empty()
+            && (initial_class.contains(&clean) || clean.contains(&initial_class));
+        let match_title = !title.is_empty() && (title.contains(&clean) || clean.contains(&title));
+
+        if match_class || match_init || match_title {
             if let Some(addr) = client["address"].as_str() {
                 return Some((addr, client["workspace"]["id"].as_i64()));
             }
         }
     }
 
-    // Third pass: for system/CLI/terminal/agy notifications, fallback to main terminal/kitty
-    if clean == "system"
-        || clean == "packagekit"
-        || clean == "terminal"
-        || clean == "notify"
-        || clean == "notify-send"
-        || clean == "cargo"
-        || clean == "bash"
-        || clean == "flex"
-    {
+    // Pass 3: Tokenized word/stem matching for multi-word or compound queries
+    let tokens: Vec<&str> = clean
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| t.len() >= 3)
+        .collect();
+
+    if !tokens.is_empty() {
         for client in clients {
             let class = client["class"].as_str().unwrap_or("").to_lowercase();
             let initial_class = client["initialClass"].as_str().unwrap_or("").to_lowercase();
-            if class == "kitty" || initial_class == "kitty" {
-                if let Some(addr) = client["address"].as_str() {
-                    return Some((addr, client["workspace"]["id"].as_i64()));
+            let title = client["title"].as_str().unwrap_or("").to_lowercase();
+
+            for token in &tokens {
+                if class.contains(token) || initial_class.contains(token) || title.contains(token) {
+                    if let Some(addr) = client["address"].as_str() {
+                        return Some((addr, client["workspace"]["id"].as_i64()));
+                    }
                 }
             }
         }
     }
 
-    None
+    // Pass 4: Fallback to the most recently focused non-drawer application window
+    let mut best_client: Option<(&'a str, Option<i64>, i64)> = None;
+    for client in clients {
+        let class = client["class"].as_str().unwrap_or("").to_lowercase();
+        let title = client["title"].as_str().unwrap_or("").to_lowercase();
+
+        // Skip notification center drawer windows
+        if title.contains("flex-notify") || class.contains("flex-notify") {
+            continue;
+        }
+
+        if let Some(addr) = client["address"].as_str() {
+            let history_id = client["focusHistoryID"].as_i64().unwrap_or(999);
+            let ws_id = client["workspace"]["id"].as_i64();
+            match best_client {
+                None => best_client = Some((addr, ws_id, history_id)),
+                Some((_, _, best_hist)) => {
+                    if history_id < best_hist {
+                        best_client = Some((addr, ws_id, history_id));
+                    }
+                }
+            }
+        }
+    }
+
+    best_client.map(|(addr, ws, _)| (addr, ws))
 }
 
 /// Open or focus a desktop application and switch workspace.
@@ -1329,5 +1368,52 @@ mod tests {
         assert_eq!(s2.notifications[0].progress, Some(1.0));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn find_matching_client_dynamic_passes_work_as_expected() {
+        let clients = serde_json::json!([
+            {
+                "address": "0x1111",
+                "class": "steam_app_2694490",
+                "initialClass": "steam_app_2694490",
+                "title": "Path of Exile 2",
+                "focusHistoryID": 0,
+                "workspace": { "id": 1 }
+            },
+            {
+                "address": "0x2222",
+                "class": "brave-browser",
+                "initialClass": "brave-browser",
+                "title": "GitHub - gom3az/flex",
+                "focusHistoryID": 2,
+                "workspace": { "id": 2 }
+            },
+            {
+                "address": "0x3333",
+                "class": "kitty",
+                "initialClass": "kitty",
+                "title": "agy - Antigravity Assistant",
+                "focusHistoryID": 1,
+                "workspace": { "id": 3 }
+            }
+        ]);
+        let clients_arr = clients.as_array().unwrap();
+
+        // 1. Exact match on class
+        let res1 = find_matching_client(clients_arr, "brave-browser");
+        assert_eq!(res1, Some(("0x2222", Some(2))));
+
+        // 2. Substring match on title
+        let res2 = find_matching_client(clients_arr, "path of exile");
+        assert_eq!(res2, Some(("0x1111", Some(1))));
+
+        // 3. Token match on title/class
+        let res3 = find_matching_client(clients_arr, "Antigravity Ready");
+        assert_eq!(res3, Some(("0x3333", Some(3))));
+
+        // 4. Focus history fallback (picks focusHistoryID 1 over 2, ignoring drawer)
+        let res4 = find_matching_client(clients_arr, "UnknownApp");
+        assert_eq!(res4, Some(("0x1111", Some(1))));
     }
 }
