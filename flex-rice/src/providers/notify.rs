@@ -804,7 +804,7 @@ pub fn execute(
     } else if let Some(code) = action_id.strip_prefix("copy_otp:") {
         copy_to_clipboard(code);
     } else if let Some(url) = action_id.strip_prefix("open_url:") {
-        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+        notify::open_url(url);
     } else if let Some(url) = action_id.strip_prefix("copy_url:") {
         copy_to_clipboard(url);
     } else if let Some(path) = action_id.strip_prefix("open_file:") {

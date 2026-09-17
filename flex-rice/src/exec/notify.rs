@@ -249,7 +249,17 @@ pub fn extract_entities(text: &str) -> Vec<ExtractedEntity> {
     entities
 }
 
-/// Open a file path using `xdg-open` detached.
+/// Open a URL using `xdg-open` detached via `setsid -f`.
+pub fn open_url(url: &str) {
+    let _ = Command::new("setsid")
+        .args(["-f", "xdg-open", url])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+}
+
+/// Open a file path using `xdg-open` detached via `setsid -f`.
 pub fn open_file(path_str: &str) {
     let expanded = if let Some(rest) = path_str.strip_prefix("~/") {
         if let Ok(home) = std::env::var("HOME") {
@@ -260,15 +270,15 @@ pub fn open_file(path_str: &str) {
     } else {
         path_str.to_string()
     };
-    let _ = std::process::Command::new("xdg-open")
-        .arg(&expanded)
+    let _ = Command::new("setsid")
+        .args(["-f", "xdg-open", &expanded])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn();
 }
 
-/// Open containing folder of `path_str` using `xdg-open` detached.
+/// Open containing folder of `path_str` using `xdg-open` detached via `setsid -f`.
 pub fn open_dir(path_str: &str) {
     let expanded = if let Some(rest) = path_str.strip_prefix("~/") {
         if let Ok(home) = std::env::var("HOME") {
@@ -287,8 +297,9 @@ pub fn open_dir(path_str: &str) {
     } else {
         path
     };
-    let _ = std::process::Command::new("xdg-open")
-        .arg(target_dir)
+    let target_str = target_dir.to_string_lossy();
+    let _ = Command::new("setsid")
+        .args(["-f", "xdg-open", target_str.as_ref()])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
