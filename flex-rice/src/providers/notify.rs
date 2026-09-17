@@ -187,14 +187,6 @@ fn notification_row_from(item: &NotificationItem, now: u64, _is_child: bool) -> 
 pub fn feed_tab_from(state: &NotifyState, now: u64) -> Tab {
     let mut rows = Vec::new();
 
-    // 0. Direct 1-Click Bare Enter Row for WS 3 Test
-    let mut direct_row = Row::new(
-        RowId::new("open_app:Antigravity"),
-        "󰂚 Direct 1-Click [ENTER]: Switch to Workspace 3",
-    );
-    direct_row.meta = Some(String::from("WS 3"));
-    rows.push(direct_row);
-
     // 1. Top Quick Controls Shelf
     let dnd_label = if state.controls.dnd.is_active(now) {
         if let Some(rem) = state.controls.dnd.remaining_secs(now) {

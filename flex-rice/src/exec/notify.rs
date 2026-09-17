@@ -420,27 +420,10 @@ fn find_matching_client<'a>(
     best_client.map(|(addr, ws, _)| (addr, ws))
 }
 
-fn log_debug(msg: &str) {
-    use std::io::Write as _;
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/tmp/flex-notify-debug.log")
-    {
-        let ts = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs());
-        let _ = writeln!(f, "[{ts}] {msg}");
-    }
-}
-
 /// Open or focus a desktop application and switch workspace.
 pub fn open_application(app_name: &str) {
     let clean = app_name.trim().to_lowercase();
-    log_debug(&format!("open_application requested for app_name='{app_name}', clean='{clean}'"));
-
     if clean.is_empty() || clean == "wiremix" {
-        log_debug("open_application skipped: empty or wiremix");
         return;
     }
 
@@ -457,19 +440,16 @@ pub fn open_application(app_name: &str) {
         .and_then(|val| val["hasfullscreen"].as_bool())
         .unwrap_or(false);
 
-    log_debug(&format!("active_ws_has_fullscreen: {active_ws_has_fullscreen}"));
-
     if active_ws_has_fullscreen {
-        let unset_res = Command::new("hyprctl")
+        let _ = Command::new("hyprctl")
             .args([
                 "dispatch",
                 "hl.dsp.window.fullscreen({ action = \"unset\" })",
             ])
             .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output();
-        log_debug(&format!("fullscreen unset result: {unset_res:?}"));
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
     }
 
     // 1. Query hyprctl clients -j to locate matching window and workspace
@@ -483,17 +463,11 @@ pub fn open_application(app_name: &str) {
         if output.status.success() {
             if let Ok(json_str) = String::from_utf8(output.stdout) {
                 if let Ok(clients) = serde_json::from_str::<Vec<serde_json::Value>>(&json_str) {
-                    let match_res = find_matching_client(&clients, &clean);
-                    log_debug(&format!("find_matching_client returned: {match_res:?}"));
-
-                    if let Some((address, ws_id)) = match_res {
+                    if let Some((address, ws_id)) = find_matching_client(&clients, &clean) {
                         let address_owned = address.to_string();
-                        log_debug(&format!("spawning detached setsid focus worker for address={address_owned}, ws={ws_id:?}"));
-
-                        let ws_arg = ws_id.map_or_else(
-                            String::new,
-                            |ws| format!("hyprctl dispatch 'hl.dsp.focus({{ workspace = {ws} }})' && "),
-                        );
+                        let ws_arg = ws_id.map_or_else(String::new, |ws| {
+                            format!("hyprctl dispatch 'hl.dsp.focus({{ workspace = {ws} }})' && ")
+                        });
 
                         let shell_cmd = format!(
                             "sleep 0.05 && {ws_arg}hyprctl dispatch 'hl.dsp.focus({{ window = \"address:{address_owned}\" }})'"
@@ -1453,13 +1427,8 @@ mod tests {
         let res3 = find_matching_client(clients_arr, "Antigravity Ready");
         assert_eq!(res3, Some(("0x3333", Some(3))));
 
-        // 4. Focus history fallback (picks focusHistoryID 1 over 2, ignoring drawer)
+        // 4. Kitty terminal fallback for unknown app notifications
         let res4 = find_matching_client(clients_arr, "UnknownApp");
-        assert_eq!(res4, Some(("0x1111", Some(1))));
-    }
-
-    #[test]
-    fn live_open_app_test() {
-        open_application("Antigravity");
+        assert_eq!(res4, Some(("0x3333", Some(3))));
     }
 }
