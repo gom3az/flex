@@ -558,14 +558,16 @@ impl Preview {
             return;
         }
         self.warned = true;
-        crate::diag::warn(&format!(
-            "flex: preview: cannot show {} (no preview cache at {} or no working image converter; \
-             see {CONVERTER_ENV}/{CACHE_ENV})",
-            src.display(),
-            self.cache_dir
-                .as_deref()
-                .map_or_else(|| "-".to_string(), |dir| dir.display().to_string()),
-        ));
+        if std::env::var("FLEX_DIAG").is_ok() {
+            crate::diag::warn(&format!(
+                "flex: preview: cannot show {} (no preview cache at {} or no working image converter; \
+                 see {CONVERTER_ENV}/{CACHE_ENV})",
+                src.display(),
+                self.cache_dir
+                    .as_deref()
+                    .map_or_else(|| "-".to_string(), |dir| dir.display().to_string()),
+            ));
+        }
     }
 
     /// Paint (or clear) the pane for `source` and re-park the cursor.

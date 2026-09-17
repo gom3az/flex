@@ -616,7 +616,11 @@ impl NotificationServer {
     }
 
     /// Process and store incoming notification.
-    #[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::needless_pass_by_value,
+        clippy::too_many_lines
+    )]
     pub fn notify(
         &self,
         app_name: String,
@@ -642,12 +646,19 @@ impl NotificationServer {
             .or_else(|| hints.get("image_path"))
             .or_else(|| hints.get("image-data"))
             .and_then(|v| match v {
-                zbus::zvariant::Value::Str(s) => Some(s.to_string()),
+                zbus::zvariant::Value::Str(s) => {
+                    let path_str = s.as_str().strip_prefix("file://").unwrap_or(s.as_str());
+                    if !path_str.is_empty() && std::path::Path::new(path_str).is_file() {
+                        Some(path_str.to_string())
+                    } else {
+                        None
+                    }
+                }
                 _ => None,
             })
             .or_else(|| {
                 let icon_str = app_icon.strip_prefix("file://").unwrap_or(&app_icon);
-                if !icon_str.is_empty() && std::path::Path::new(icon_str).exists() {
+                if !icon_str.is_empty() && std::path::Path::new(icon_str).is_file() {
                     Some(icon_str.to_string())
                 } else {
                     None
@@ -765,20 +776,20 @@ impl NotificationServer {
 /// card and auto-dismisses after a timeout.  Errors are silently ignored so
 /// a missing binary never kills the daemon.
 pub fn spawn_toast(id: u32, state_path: Option<&Path>) {
-    let mut cmd = std::process::Command::new("kitty");
-    cmd.args([
-        "--class",
-        "flex-notify-toast",
-        "-o",
-        "font_size=11",
-        "-e",
-        "flex-notify",
-    ]);
-    if let Some(p) = state_path {
-        cmd.args(["--state-file", &p.display().to_string()]);
-    }
-    cmd.args(["toast", &id.to_string()]);
-    let _ = cmd
+    let state_arg =
+        state_path.map_or_else(String::new, |p| format!(" --state-file '{}'", p.display()));
+    let cmd = format!(
+        "kitty --class flex-notify-toast -o font_size=11 -e flex-notify{state_arg} toast {id}"
+    );
+    // Double-fork via `sh -c '… &'`: the grandchild is reparented to init so
+    // no daemon FDs (including the zbus socket) are inherited.
+    // Do NOT redirect kitty's stdio: kitty opens its own PTY for the child
+    // (`-e flex-notify toast <id>`), so stdin/stdout of that child are the
+    // PTY — not /dev/null.  Redirecting them here would break the ANSI render
+    // (stdout→null = blank window) and the keypress poll (stdin→null = stty
+    // fails + instant-exit for Normal or spin-forever for Critical).
+    let _ = std::process::Command::new("sh")
+        .args(["-c", &format!("{cmd} &")])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

@@ -102,6 +102,8 @@ impl NodeMetrics {
         let has_detail = rows.iter().any(|row| {
             row.volume.is_some()
                 || row.config.is_some()
+                || row.detail.is_some()
+                || row.sublabel.is_some()
                 || (row.peaks.is_some() && peaks != Peaks::Off)
         });
         if has_detail {
@@ -215,7 +217,11 @@ pub fn render(frame: &mut Frame, menu: &mut Menu) {
     // chrome below stays full width). `None` on frames too small for it, and
     // whenever the provider did not ask for one — then the list keeps the
     // whole width, exactly as before.
-    let pane = preview::pane(area, list_h, menu.preview);
+    let has_image = menu
+        .app
+        .focused_row()
+        .is_some_and(|r| r.preview_image.is_some());
+    let pane = preview::pane(area, list_h, menu.preview && has_image);
     let list_w = match pane {
         // One gutter column between the rows and the image.
         Some(pane) => pane.x.saturating_sub(area.x).saturating_sub(1),
@@ -466,6 +472,27 @@ fn draw_node(
         );
     }
 
+    // Middle line (sublabel) on the node's second line.
+    if metrics.height >= NODE_HEIGHT && node_area.height >= 2 {
+        if let Some(sublabel) = &row.sublabel {
+            let sublabel_area = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Min(0), Constraint::Length(1)])
+                .horizontal_margin(1)
+                .split(Rect::new(node_area.x, node_area.y + 1, node_area.width, 1))[0];
+            let style = if row.offline {
+                menu.theme.offline
+            } else {
+                menu.theme.node_title
+            };
+            Line::from(vec![
+                Span::from("  "),
+                Span::styled(width::sanitize(sublabel), style),
+            ])
+            .render(sublabel_area, buf);
+        }
+    }
+
     // Detail line on the node's third line: a compact node (flex extension)
     // is header-only, and a partially rendered node shows whatever fits.
     if metrics.height >= NODE_HEIGHT && node_area.height >= NODE_HEIGHT {
@@ -531,7 +558,8 @@ fn draw_header(buf: &mut Buffer, area: Rect, menu: &Menu, row: &Row, armed_confi
     // `node_widget.rs:258-279`), else flex's generic meta.
     let target_line = if bare {
         Line::default()
-    } else if let Some(target) = row.current_target() {
+    } else if !row.hide_target_in_header && row.current_target().is_some() {
+        let target = row.current_target().unwrap();
         let title = width::sanitize(&target.title);
         if target.is_default {
             Line::from(vec![
@@ -542,11 +570,10 @@ fn draw_header(buf: &mut Buffer, area: Rect, menu: &Menu, row: &Row, armed_confi
         } else {
             Line::from(Span::styled(title, theme.node_target))
         }
+    } else if let Some(meta) = &row.meta {
+        Line::from(Span::styled(width::sanitize(meta), theme.node_target))
     } else {
-        match &row.meta {
-            Some(meta) => Line::from(Span::styled(width::sanitize(meta), theme.node_target)),
-            None => Line::default(),
-        }
+        Line::default()
     };
     let target_width = u16::try_from(target_line.width()).unwrap_or(u16::MAX);
 
@@ -664,6 +691,17 @@ fn draw_detail(buf: &mut Buffer, area: Rect, menu: &Menu, row: &Row) {
             Span::styled(width::sanitize(config), menu.theme.config_profile),
         ])
         .render(area, buf);
+    } else if let Some(detail) = &row.detail {
+        let detail_area = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(0), Constraint::Length(1)])
+            .horizontal_margin(1)
+            .split(area)[0];
+        Line::from(vec![
+            Span::from("  "),
+            Span::styled(width::sanitize(detail), menu.theme.config_profile),
+        ])
+        .render(detail_area, buf);
     }
 }
 

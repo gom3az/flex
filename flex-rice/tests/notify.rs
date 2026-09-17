@@ -125,7 +125,7 @@ fn feed_tab_contract_and_wiremix_rows() {
 
     // Row 0: Quick Controls Shelf
     assert_eq!(tab.rows[0].id.as_str(), provider::ACTION_QUICK_CONTROLS);
-    assert_eq!(tab.rows[0].label, "Quick Controls & System Shelf");
+    assert_eq!(tab.rows[0].label, "Quick Controls");
 
     // Row 1: MPRIS Track Card with volume bar
     assert_eq!(tab.rows[1].id.as_str(), provider::ACTION_MPRIS_TRACK);
@@ -139,7 +139,8 @@ fn feed_tab_contract_and_wiremix_rows() {
         r2.is_default,
         "Critical alerts must have the default marker ◇"
     );
-    assert_eq!(r2.label, "System · Low Battery Warning (8%)");
+    assert_eq!(r2.label, "System");
+    assert_eq!(r2.sublabel.as_deref(), Some("Low Battery Warning (8%)"));
 
     // Row 3: In-flight progress notification with volume bar
     let r3 = &tab.rows[3];
@@ -177,7 +178,10 @@ fn channels_tab_groups_by_app() {
         .rows
         .iter()
         .any(|r| r.label.contains("System (1 active)")));
-    assert!(tab.rows.iter().any(|r| r.label.contains("#dev-team")));
+    assert!(tab
+        .rows
+        .iter()
+        .any(|r| r.sublabel.as_deref() == Some("#dev-team")));
 }
 
 #[test]
@@ -209,7 +213,7 @@ fn feed_tab_groups_multi_notification_apps() {
         .iter()
         .find(|r| r.id.as_str() == "group:Discord")
         .expect("group header found");
-    assert!(group_row.label.contains("Discord (2 notifications)"));
+    assert!(group_row.label.contains("Discord (2)"));
     assert!(group_row
         .targets
         .iter()
@@ -218,6 +222,11 @@ fn feed_tab_groups_multi_notification_apps() {
 
 #[test]
 fn notification_preview_carries_body_and_image() {
+    let dir = std::env::temp_dir().join(format!("flex-notify-img-test-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let img_path = dir.join("screenshot.png");
+    let _ = std::fs::write(&img_path, "dummy image content");
+
     let mut state = NotifyState::default();
     let mut notif = NotificationItem::new(
         10,
@@ -226,7 +235,7 @@ fn notification_preview_carries_body_and_image() {
         "Saved to /tmp/screenshot.png",
         Urgency::Normal,
     );
-    notif.image_path = Some("/tmp/screenshot.png".to_string());
+    notif.image_path = Some(img_path.to_str().unwrap().to_string());
     state.notifications.push(notif);
 
     let tab = provider::feed_tab_from(&state, 1000);
@@ -236,16 +245,18 @@ fn notification_preview_carries_body_and_image() {
         .find(|r| r.id.as_str() == "notif:10")
         .expect("row found");
 
-    // Text preview in config (detail line)
+    // Text preview in detail line
     assert_eq!(
-        notif_row.config.as_deref(),
+        notif_row.detail.as_deref(),
         Some("Saved to /tmp/screenshot.png")
     );
     // Image preview in preview_image
     assert_eq!(
         notif_row.preview_image.as_deref(),
-        Some("/tmp/screenshot.png")
+        Some(img_path.to_str().unwrap())
     );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -269,7 +280,8 @@ fn history_tab_renders_dismissed_archive() {
     assert_eq!(tab.name, provider::TAB_HISTORY);
     assert!(!tab.filterable);
     assert_eq!(tab.rows.len(), 1);
-    assert_eq!(tab.rows[0].label, "Slack · #general");
+    assert_eq!(tab.rows[0].label, "Slack");
+    assert_eq!(tab.rows[0].sublabel.as_deref(), Some("#general"));
     assert!(tab.rows[0].offline);
 }
 
@@ -290,7 +302,7 @@ fn golden_80x24_rendering_drawer_wiremix_detail() {
     // Entry 0 header (y = 1): Quick Controls Shelf
     let e0_header = buffer_line(&buf, 1, 80);
     assert!(e0_header.contains("░"));
-    assert!(e0_header.contains("Quick Controls & System Shelf"));
+    assert!(e0_header.contains("Quick Controls"));
 
     // Entry 1 header (y = 6): MPRIS Media Card
     let e1_header = buffer_line(&buf, 6, 80);
@@ -303,7 +315,10 @@ fn golden_80x24_rendering_drawer_wiremix_detail() {
     // Entry 2 header (y = 11): Critical Alert with marker ◇
     let e2_header = buffer_line(&buf, 11, 80);
     assert!(e2_header.contains("◇"));
-    assert!(e2_header.contains("Low Battery Warning"));
+    assert!(e2_header.contains("System"));
+
+    let e2_sub = buffer_line(&buf, 12, 80);
+    assert!(e2_sub.contains("Low Battery Warning"));
 }
 
 #[test]
@@ -342,6 +357,28 @@ fn executor_dismiss_and_dnd_dispatch() {
         !s2.notifications
             .iter()
             .find(|n| n.id == 1)
+            .unwrap()
+            .is_dismissed
+    );
+
+    // Clear all via quick controls action
+    let _ = provider::execute("dismiss:quick:controls", "Dismiss", Some(&path)).expect("exec");
+    let s3 = notify::load_state(Some(&path));
+    assert!(
+        s3.notifications
+            .iter()
+            .find(|n| n.id == 2)
+            .unwrap()
+            .is_dismissed
+    );
+
+    // Group dismiss
+    let _ = provider::execute("dismiss:group:Discord", "Dismiss", Some(&path)).expect("exec");
+    let s4 = notify::load_state(Some(&path));
+    assert!(
+        s4.notifications
+            .iter()
+            .find(|n| n.id == 3)
             .unwrap()
             .is_dismissed
     );

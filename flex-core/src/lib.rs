@@ -154,6 +154,10 @@ pub struct Row {
     /// Device-style config line (`▼ profile`) drawn on the detail line
     /// (upstream `DeviceWidget`, `device_widget.rs:141-153`).
     pub config: Option<String>,
+    /// Plain text detail line (e.g. notification body) drawn on line 3 without `▼`.
+    pub detail: Option<String>,
+    /// Middle line text (e.g. notification summary) drawn on line 2 of a 3-line node.
+    pub sublabel: Option<String>,
     /// Dropdown targets, in display order (upstream `node_targets`). Empty
     /// means the row has no dropdown and the header shows [`Row::meta`].
     pub targets: Vec<Target>,
@@ -166,6 +170,9 @@ pub struct Row {
     /// ([`preview`](crate::preview)) reads it, while ids, labels, filtering
     /// and the `ACTION:` contract are unaffected.
     pub preview_image: Option<String>,
+    /// When true, the row's targets are not drawn in the header right column,
+    /// leaving space for [`Row::meta`] (e.g. notification timestamps).
+    pub hide_target_in_header: bool,
 }
 
 impl Row {
@@ -183,9 +190,12 @@ impl Row {
             muted: false,
             peaks: None,
             config: None,
+            detail: None,
+            sublabel: None,
             targets: Vec::new(),
             target_index: 0,
             preview_image: None,
+            hide_target_in_header: false,
         }
     }
 
@@ -241,6 +251,20 @@ impl Row {
         }
     }
 
+    /// Build a row with a plain text detail line (no `▼` icon).
+    #[must_use]
+    pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = Some(detail.into());
+        self
+    }
+
+    /// Build a row with middle line text (sublabel).
+    #[must_use]
+    pub fn with_sublabel(mut self, sublabel: impl Into<String>) -> Self {
+        self.sublabel = Some(sublabel.into());
+        self
+    }
+
     /// Build a device-style row whose detail line is `▼ config`.
     #[must_use]
     pub fn with_config(id: RowId, label: impl Into<String>, config: impl Into<String>) -> Self {
@@ -285,6 +309,13 @@ impl Row {
     #[must_use]
     pub fn with_preview_image(mut self, path: impl Into<String>) -> Self {
         self.preview_image = Some(path.into());
+        self
+    }
+
+    /// Hide targets from the header's right column so [`Row::meta`] is shown.
+    #[must_use]
+    pub fn hide_target_in_header(mut self) -> Self {
+        self.hide_target_in_header = true;
         self
     }
 }

@@ -450,35 +450,43 @@ fn run() -> anyhow::Result<()> {
             return runner::run_select(Provider::Notify, style);
         }
 
-        let menu = runner::build_menu(Provider::Notify, style)?;
-        match flex_core::run::run_capture(menu)? {
-            Outcome::Chosen {
-                action_id, label, ..
-            }
-            | Outcome::Toggle {
-                action_id, label, ..
-            } => {
-                provider::execute(&action_id, &label, state_path)?;
-                Ok(())
-            }
-            Outcome::Target { target, title, .. } => {
-                provider::execute(&target, &title, state_path)?;
-                Ok(())
-            }
-            Outcome::Delete { action_id, .. } => {
-                let action = if action_id.starts_with("notif:") {
-                    format!("dismiss:{}", action_id.trim_start_matches("notif:"))
-                } else {
-                    format!("dismiss:{action_id}")
-                };
-                provider::execute(&action, "Dismiss", state_path)?;
-                Ok(())
-            }
-            Outcome::Quit { code } => {
-                std::process::exit(code);
-            }
-            Outcome::Cancelled => {
-                std::process::exit(EXIT_CANCELLED);
+        loop {
+            let menu = runner::build_menu(Provider::Notify, style)?;
+            match flex_core::run::run_capture(menu)? {
+                Outcome::Chosen {
+                    action_id, label, ..
+                }
+                | Outcome::Toggle {
+                    action_id, label, ..
+                } => {
+                    let _ = provider::execute(&action_id, &label, state_path);
+                }
+                Outcome::Target { target, title, .. } => {
+                    let _ = provider::execute(&target, &title, state_path);
+                }
+                Outcome::Delete { action_id, .. } => {
+                    let action = if action_id.starts_with("notif:") {
+                        format!("dismiss:{}", action_id.trim_start_matches("notif:"))
+                    } else if action_id == provider::ACTION_QUICK_CONTROLS
+                        || action_id == "quick:controls"
+                        || action_id == "quick_controls"
+                        || action_id == "clear_all"
+                        || action_id == provider::ACTION_CLEAR_ALL
+                    {
+                        provider::ACTION_CLEAR_ALL.to_string()
+                    } else if action_id.starts_with("group:") {
+                        format!("dismiss:{action_id}")
+                    } else {
+                        format!("dismiss:{action_id}")
+                    };
+                    let _ = provider::execute(&action, "Dismiss", state_path);
+                }
+                Outcome::Quit { code } => {
+                    std::process::exit(code);
+                }
+                Outcome::Cancelled => {
+                    std::process::exit(EXIT_CANCELLED);
+                }
             }
         }
     } else {

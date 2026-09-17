@@ -332,11 +332,13 @@ fn handle_special(menu: &mut Menu, key: &KeyEvent, now: Instant) -> Option<KeyOu
     match key.code {
         KeyCode::Enter if key.modifiers == KeyModifiers::NONE => Some(enter_select(app, now)),
         KeyCode::Delete if key.modifiers == KeyModifiers::NONE => {
-            // Only deletable tabs (e.g. `clip`) arm the confirm flow;
-            // launch/power rows are never deletable.
-            let armed = app.active_tab().is_some_and(|tab| tab.deletable)
+            let is_deletable = app.active_tab().is_some_and(|tab| tab.deletable)
                 && app.focused_original_index().is_some();
-            if armed {
+            let is_non_filterable = app.active_tab().is_some_and(|tab| !tab.filterable);
+            if is_deletable {
+                if is_non_filterable {
+                    return Some(KeyOutcome::Delete);
+                }
                 if let Some(tab) = app.active_tab_mut() {
                     tab.state.confirm_pending = true;
                 }
@@ -486,6 +488,13 @@ fn handle_rune(app: &mut crate::App, c: char) -> KeyOutcome {
             return KeyOutcome::Consumed;
         }
         // Else (NORMAL + text): falls through to filter insert below.
+    } else if c == 'x' || c == 'X' || c == 'd' || c == 'D' {
+        let is_deletable = app.active_tab().is_some_and(|tab| tab.deletable)
+            && app.focused_original_index().is_some();
+        let is_non_filterable = app.active_tab().is_some_and(|tab| !tab.filterable);
+        if is_deletable && (is_non_filterable || app.mode == Mode::Navigate) {
+            return KeyOutcome::Delete;
+        }
     } else if app.mode == Mode::Navigate {
         return handle_navigate_rune(app, c);
     }

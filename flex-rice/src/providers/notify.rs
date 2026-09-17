@@ -43,7 +43,7 @@ fn now_secs() -> u64 {
 }
 
 /// Helper to construct a notification Row with body text preview, graphic image preview, and actions.
-fn notification_row_from(item: &NotificationItem, now: u64, is_child: bool) -> Row {
+fn notification_row_from(item: &NotificationItem, now: u64, _is_child: bool) -> Row {
     let rel_time = notify::format_relative_time(item.timestamp, now);
     let entities = notify::extract_entities(&format!("{} {}", item.summary, item.body));
 
@@ -113,15 +113,7 @@ fn notification_row_from(item: &NotificationItem, now: u64, is_child: bool) -> R
         format!("Silence {} for 1 Hour", item.app_name),
     ));
 
-    if let Some(target) = targets.first_mut() {
-        target.is_default = true;
-    }
-
-    let label = if is_child {
-        format!("  • {}", item.summary)
-    } else {
-        format!("{} · {}", item.app_name, item.summary)
-    };
+    let (label, sublabel) = (item.app_name.clone(), Some(item.summary.clone()));
 
     let meta = if item.urgency == Urgency::Critical {
         format!("{rel_time} · Critical")
@@ -130,17 +122,22 @@ fn notification_row_from(item: &NotificationItem, now: u64, is_child: bool) -> R
     };
 
     let mut row = Row::with_targets(RowId::new(format!("notif:{}", item.id)), label, targets, 0);
+    row.sublabel = sublabel;
     row.meta = Some(meta);
     row.is_default = item.is_pinned || item.urgency == Urgency::Critical;
+    row.hide_target_in_header = true;
 
     // Body text preview in detail row
     if !item.body.is_empty() {
-        row.config = Some(item.body.clone());
+        let clean_body = item.body.replace('\n', " ");
+        row.detail = Some(clean_body);
     }
 
     // Attached image preview in Kitty/Ghostty pane
     if let Some(img) = &item.image_path {
-        row.preview_image = Some(img.clone());
+        if std::path::Path::new(img).is_file() {
+            row.preview_image = Some(img.clone());
+        }
     }
 
     // Progress bar for in-flight tasks
@@ -174,7 +171,7 @@ pub fn feed_tab_from(state: &NotifyState, now: u64) -> Tab {
         .filter(|n| !n.is_dismissed && !n.is_snoozed)
         .count();
 
-    let mut quick_targets = vec![
+    let quick_targets = vec![
         Target::new(RowId::new("toggle_dnd"), format!("Toggle {dnd_label}")),
         Target::new(
             RowId::new("clear_all"),
@@ -210,26 +207,26 @@ pub fn feed_tab_from(state: &NotifyState, now: u64) -> Tab {
             ),
         ),
     ];
-    if let Some(target) = quick_targets.first_mut() {
-        target.is_default = true;
-    }
-
-    let quick_meta = format!("[󰂛 {dnd_label}]  [󰅖 Clear ({active_count})]  [󰖔 Night]  [󰤄 Caffe]");
     let mut quick_row = Row::with_targets(
         RowId::new(ACTION_QUICK_CONTROLS),
-        "Quick Controls & System Shelf",
+        "Quick Controls",
         quick_targets,
         0,
     );
-    quick_row.meta = Some(quick_meta);
+    quick_row.sublabel = Some(format!(
+        "󰂛 {dnd_label}  •  󰅖 Clear ({active_count})  •  󰖔 Night  •  󰤄 Caffe"
+    ));
+    quick_row.meta = Some(format!("{active_count} Active"));
+    quick_row.hide_target_in_header = true;
     rows.push(quick_row);
 
     // 2. MPRIS Media Player Card (if present)
     if let Some(mpris) = &state.controls.mpris {
-        let title_label = if mpris.artist.is_empty() || mpris.artist == "Unknown Artist" {
-            format!("󰝚 {}", mpris.title)
+        let title_label = format!("󰝚 {}", mpris.title);
+        let sublabel = if mpris.artist.is_empty() || mpris.artist == "Unknown Artist" {
+            None
         } else {
-            format!("󰝚 {} — {}", mpris.title, mpris.artist)
+            Some(mpris.artist.clone())
         };
 
         let time_meta = if mpris.is_live || mpris.length_secs == 0 {
@@ -254,7 +251,7 @@ pub fn feed_tab_from(state: &NotifyState, now: u64) -> Tab {
             None
         };
 
-        let mut mpris_targets = vec![
+        let mpris_targets = vec![
             Target::new(
                 RowId::new("play_pause"),
                 if mpris.is_playing {
@@ -276,9 +273,6 @@ pub fn feed_tab_from(state: &NotifyState, now: u64) -> Tab {
                 "Copy Media Info",
             ),
         ];
-        if let Some(target) = mpris_targets.first_mut() {
-            target.is_default = true;
-        }
 
         let mut mpris_row = Row::with_targets(
             RowId::new(ACTION_MPRIS_TRACK),
@@ -286,8 +280,10 @@ pub fn feed_tab_from(state: &NotifyState, now: u64) -> Tab {
             mpris_targets,
             0,
         );
+        mpris_row.sublabel = sublabel;
         mpris_row.meta = Some(time_meta);
         mpris_row.volume = volume_frac;
+        mpris_row.hide_target_in_header = true;
         rows.push(mpris_row);
     }
 
@@ -346,11 +342,12 @@ pub fn feed_tab_from(state: &NotifyState, now: u64) -> Tab {
 
             let mut group_row = Row::with_targets(
                 RowId::new(format!("group:{app_name}")),
-                format!("󰙯 {app_name} ({} notifications)", items.len()),
+                format!("󰙯 {app_name} ({})", items.len()),
                 group_targets,
                 0,
             );
             group_row.meta = Some(latest_rel);
+            group_row.hide_target_in_header = true;
             rows.push(group_row);
 
             for item in items {
@@ -371,6 +368,7 @@ pub fn feed_tab_from(state: &NotifyState, now: u64) -> Tab {
     let mut tab = Tab::with_rows(TAB_FEED, rows);
     tab.bare_rows = false;
     tab.filterable = false; // Search does not belong in notification center
+    tab.deletable = true;
     tab
 }
 
@@ -437,6 +435,7 @@ pub fn channels_tab_from(state: &NotifyState, now: u64) -> Tab {
     let mut tab = Tab::with_rows(TAB_CHANNELS, rows);
     tab.bare_rows = false;
     tab.filterable = false;
+    tab.deletable = true;
     tab
 }
 
@@ -500,6 +499,7 @@ pub fn focus_tab_from(state: &NotifyState, now: u64) -> Tab {
     let mut tab = Tab::with_rows(TAB_FOCUS, rows);
     tab.bare_rows = false;
     tab.filterable = false;
+    tab.deletable = true;
     tab
 }
 
@@ -529,17 +529,22 @@ pub fn history_tab_from(state: &NotifyState, now: u64) -> Tab {
 
         let mut row = Row::with_targets(
             RowId::new(format!("hist:{}", item.id)),
-            format!("{} · {}", item.app_name, item.summary),
+            item.app_name.clone(),
             targets,
             0,
         );
+        row.sublabel = Some(item.summary.clone());
         row.meta = Some(format!("{rel_time} · Dismissed"));
         row.offline = true;
+        row.hide_target_in_header = true;
         if !item.body.is_empty() {
-            row.config = Some(item.body.clone());
+            let clean_body = item.body.replace('\n', " ");
+            row.detail = Some(clean_body);
         }
         if let Some(img) = &item.image_path {
-            row.preview_image = Some(img.clone());
+            if std::path::Path::new(img).is_file() {
+                row.preview_image = Some(img.clone());
+            }
         }
         rows.push(row);
     }
@@ -551,6 +556,7 @@ pub fn history_tab_from(state: &NotifyState, now: u64) -> Tab {
     let mut tab = Tab::with_rows(TAB_HISTORY, rows);
     tab.bare_rows = false;
     tab.filterable = false;
+    tab.deletable = true;
     tab
 }
 
@@ -597,6 +603,31 @@ pub struct ExecuteReport {
     pub detail: Option<String>,
 }
 
+/// Helper to copy text to system clipboard via `wl-copy` or `xclip` detached.
+pub fn copy_to_clipboard(text: &str) {
+    let wl_res = std::process::Command::new("wl-copy")
+        .arg(text)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+
+    if wl_res.is_err() {
+        if let Ok(mut child) = std::process::Command::new("xclip")
+            .args(["-selection", "clipboard"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            if let Some(mut stdin) = child.stdin.take() {
+                use std::io::Write as _;
+                let _ = stdin.write_all(text.as_bytes());
+            }
+        }
+    }
+}
+
 /// Execute a selected action or target.
 ///
 /// # Errors
@@ -610,7 +641,15 @@ pub fn execute(
     let mut state = notify::load_state(state_path);
     let now = now_secs();
 
-    if action_id == ACTION_CLEAR_ALL || target_title.contains("Clear All") {
+    if action_id == ACTION_CLEAR_ALL
+        || action_id == "clear_all"
+        || action_id == "dismiss:clear_all"
+        || action_id == ACTION_QUICK_CONTROLS
+        || action_id == "quick_controls"
+        || action_id == "dismiss:quick_controls"
+        || action_id == "dismiss:quick:controls"
+        || target_title.contains("Clear All")
+    {
         for n in &mut state.notifications {
             if !n.is_pinned && n.urgency != Urgency::Critical {
                 n.is_dismissed = true;
@@ -651,7 +690,7 @@ pub fn execute(
             ])
             .status();
     } else if let Some(info) = action_id.strip_prefix("copy_media:") {
-        let _ = std::process::Command::new("wl-copy").arg(info).status();
+        copy_to_clipboard(info);
     } else if action_id == "toggle_mic" || action_id == ACTION_TOGGLE_MIC {
         let _ = std::process::Command::new("wpctl")
             .args(["set-mute", "@DEFAULT_AUDIO_SOURCE@", "toggle"])
@@ -668,6 +707,7 @@ pub fn execute(
         }
     } else if let Some(app) = action_id
         .strip_prefix("dismiss_app:")
+        .or_else(|| action_id.strip_prefix("dismiss:group:"))
         .or_else(|| action_id.strip_prefix("group:"))
     {
         for n in &mut state.notifications {
@@ -703,7 +743,7 @@ pub fn execute(
                 } else {
                     format!("{}\n{}", n.summary, n.body)
                 };
-                let _ = std::process::Command::new("wl-copy").arg(text).status();
+                copy_to_clipboard(&text);
             }
         }
     } else if let Some(id_str) = action_id.strip_prefix("snooze_15:") {
@@ -729,13 +769,13 @@ pub fn execute(
             }
         }
     } else if let Some(code) = action_id.strip_prefix("copy_otp:") {
-        let _ = std::process::Command::new("wl-copy").arg(code).status();
+        copy_to_clipboard(code);
     } else if let Some(url) = action_id.strip_prefix("open_url:") {
         let _ = std::process::Command::new("xdg-open").arg(url).spawn();
     } else if let Some(url) = action_id.strip_prefix("copy_url:") {
-        let _ = std::process::Command::new("wl-copy").arg(url).status();
+        copy_to_clipboard(url);
     } else if let Some(hex) = action_id.strip_prefix("copy_hex:") {
-        let _ = std::process::Command::new("wl-copy").arg(hex).status();
+        copy_to_clipboard(hex);
     } else if action_id == "dnd:25m" || target_title.contains("Pomodoro") {
         state.controls.dnd = DndState::Timed {
             until: now + 25 * 60,
@@ -795,16 +835,18 @@ mod tests {
 
         // Row 0: Quick Controls Shelf
         assert_eq!(tab.rows[0].id.as_str(), ACTION_QUICK_CONTROLS);
-        assert_eq!(tab.rows[0].label, "Quick Controls & System Shelf");
+        assert_eq!(tab.rows[0].label, "Quick Controls");
 
         // Row 1: Critical Low Battery alert (sticky at top, pinned with marker)
         let r1 = &tab.rows[1];
-        assert_eq!(r1.label, "System · Low Battery Warning");
+        assert_eq!(r1.label, "System");
+        assert_eq!(r1.sublabel.as_deref(), Some("Low Battery Warning"));
         assert!(r1.is_default); // Pinned marker ◇
 
         // Row 2: Discord notification with OTP & URL targets
         let r2 = &tab.rows[2];
-        assert_eq!(r2.label, "Discord · #dev-team");
+        assert_eq!(r2.label, "Discord");
+        assert_eq!(r2.sublabel.as_deref(), Some("#dev-team"));
         assert!(r2.targets.iter().any(|t| t.title.contains("849201")));
         assert!(r2
             .targets
