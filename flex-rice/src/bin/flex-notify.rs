@@ -474,8 +474,6 @@ fn run() -> anyhow::Result<()> {
                         || action_id == provider::ACTION_CLEAR_ALL
                     {
                         provider::ACTION_CLEAR_ALL.to_string()
-                    } else if action_id.starts_with("group:") {
-                        format!("dismiss:{action_id}")
                     } else {
                         format!("dismiss:{action_id}")
                     };
