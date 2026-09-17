@@ -312,17 +312,79 @@ pub fn open_application(app_name: &str) {
     if clean.is_empty() || clean == "system" || clean == "packagekit" || clean == "wiremix" {
         return;
     }
-    let focus_status = Command::new("hyprctl")
-        .args(["dispatch", "focuswindow", &format!("class:{clean}")])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
 
-    if focus_status.is_ok_and(|s| s.success()) {
-        return;
+    // 1. Query hyprctl clients -j to match class, initialClass, or title
+    if let Ok(output) = Command::new("hyprctl")
+        .args(["clients", "-j"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+    {
+        if output.status.success() {
+            if let Ok(json_str) = String::from_utf8(output.stdout) {
+                if let Ok(clients) = serde_json::from_str::<Vec<serde_json::Value>>(&json_str) {
+                    for client in clients {
+                        let class = client["class"].as_str().unwrap_or("").to_lowercase();
+                        let initial_class =
+                            client["initialClass"].as_str().unwrap_or("").to_lowercase();
+                        let title = client["title"].as_str().unwrap_or("").to_lowercase();
+
+                        if class == clean
+                            || initial_class == clean
+                            || class.contains(&clean)
+                            || initial_class.contains(&clean)
+                            || title.contains(&clean)
+                            || clean.contains(&class)
+                        {
+                            if let Some(address) = client["address"].as_str() {
+                                let lua_cmd =
+                                    format!("hl.dsp.focus({{ window = \"address:{address}\" }})");
+                                let focus_out = Command::new("hyprctl")
+                                    .args(["dispatch", &lua_cmd])
+                                    .stdin(Stdio::null())
+                                    .stdout(Stdio::piped())
+                                    .stderr(Stdio::piped())
+                                    .output();
+                                if let Ok(out) = focus_out {
+                                    let stdout = String::from_utf8_lossy(&out.stdout);
+                                    let stderr = String::from_utf8_lossy(&out.stderr);
+                                    if out.status.success()
+                                        && !stdout.contains("window not found")
+                                        && !stderr.contains("window not found")
+                                    {
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
+    // 2. Fallback: try Lua class focus dispatch
+    let lua_class_cmd = format!("hl.dsp.focus({{ window = \"class:{clean}\" }})");
+    let focus_out = Command::new("hyprctl")
+        .args(["dispatch", &lua_class_cmd])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output();
+
+    if let Ok(out) = focus_out {
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if out.status.success()
+            && !stdout.contains("window not found")
+            && !stderr.contains("window not found")
+        {
+            return;
+        }
+    }
+
+    // 3. Fallback: launch application detached via setsid -f
     let _ = Command::new("setsid")
         .args(["-f", &clean])
         .stdin(Stdio::null())
