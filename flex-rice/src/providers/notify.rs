@@ -329,11 +329,13 @@ pub fn feed_tab_from(state: &NotifyState, now: u64) -> Tab {
         })
         .collect();
 
-    // 3a. Sticky Critical Alerts at Top
-    let (critical_notifs, normal_notifs): (Vec<&NotificationItem>, Vec<&NotificationItem>) =
+    // 3a. Sticky Critical Alerts at Top (most recent first)
+    let (mut critical_notifs, normal_notifs): (Vec<&NotificationItem>, Vec<&NotificationItem>) =
         active_notifs
             .into_iter()
             .partition(|n| n.urgency == Urgency::Critical);
+
+    critical_notifs.sort_by_key(|n| std::cmp::Reverse(n.timestamp));
 
     for item in critical_notifs {
         rows.push(notification_row_from(item, now, false));
@@ -354,7 +356,8 @@ pub fn feed_tab_from(state: &NotifyState, now: u64) -> Tab {
         std::cmp::Reverse(items.iter().map(|n| n.timestamp).max().unwrap_or(0))
     });
 
-    for (app_name, items) in sorted_apps {
+    for (app_name, mut items) in sorted_apps {
+        items.sort_by_key(|n| std::cmp::Reverse(n.timestamp));
         if items.len() > 1 {
             let latest_ts = items.iter().map(|n| n.timestamp).max().unwrap_or(now);
             let latest_rel = notify::format_relative_time(latest_ts, now);
@@ -418,14 +421,22 @@ pub fn channels_tab_from(state: &NotifyState, now: u64) -> Tab {
     apps.sort_unstable();
     apps.dedup();
 
+    let mut app_channels: Vec<(&str, Vec<&NotificationItem>, u64)> = Vec::new();
     for app in apps {
-        let active_items: Vec<&NotificationItem> = state
+        let mut active_items: Vec<&NotificationItem> = state
             .notifications
             .iter()
             .filter(|n| n.app_name == app && !n.is_dismissed)
             .collect();
+        active_items.sort_by_key(|n| std::cmp::Reverse(n.timestamp));
+        let max_ts = active_items.iter().map(|n| n.timestamp).max().unwrap_or(0);
+        app_channels.push((app, active_items, max_ts));
+    }
+    app_channels.sort_by_key(|(_, _, max_ts)| std::cmp::Reverse(*max_ts));
+
+    for (app, active_items, _max_ts) in app_channels {
         let count = active_items.len();
-        let latest = active_items.iter().max_by_key(|n| n.timestamp);
+        let latest = active_items.first().copied();
 
         let meta = latest.map_or_else(
             || String::from("idle"),
@@ -541,13 +552,14 @@ pub fn focus_tab_from(state: &NotifyState, now: u64) -> Tab {
 pub fn history_tab_from(state: &NotifyState, now: u64) -> Tab {
     let mut rows = Vec::new();
 
-    let dismissed_items: Vec<&NotificationItem> = state
+    let mut dismissed_items: Vec<&NotificationItem> = state
         .notifications
         .iter()
         .filter(|n| n.is_dismissed)
         .collect();
+    dismissed_items.sort_by_key(|n| std::cmp::Reverse(n.timestamp));
 
-    for item in dismissed_items.iter().rev().take(30) {
+    for item in dismissed_items.iter().take(30) {
         let rel_time = notify::format_relative_time(item.timestamp, now);
         let targets = vec![
             Target::new(

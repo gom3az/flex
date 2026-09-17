@@ -316,7 +316,8 @@ fn run_waybar_status(state_path: Option<&Path>) {
             std::cmp::Reverse(items.iter().map(|n| n.timestamp).max().unwrap_or(0))
         });
 
-        for (app, items) in sorted_apps {
+        for (app, mut items) in sorted_apps {
+            items.sort_by_key(|n| std::cmp::Reverse(n.timestamp));
             lines.push(format!("\n󰙯 {app} ({}):", items.len()));
             for item in items.iter().take(3) {
                 let rel = notify::format_relative_time(item.timestamp, now);
