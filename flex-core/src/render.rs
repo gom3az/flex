@@ -145,6 +145,7 @@ pub const HELP_LINES: &[&str] = &[
 
 /// Vertical frame split: the list height plus the chrome flags the renderer
 /// branches on (`run` needs the same numbers to place the image pane).
+#[allow(clippy::struct_excessive_bools)]
 struct FrameLayout {
     /// Rows owned by the list (and therefore by the preview pane).
     list_h: u16,
@@ -154,18 +155,24 @@ struct FrameLayout {
     filterable: bool,
     /// Gauge widget occupies the last rows above the tab bar.
     gauge_on: bool,
+    /// Menu has multiple tabs requiring the tab bar even on bare tabs.
+    has_tabs: bool,
 }
 
 fn frame_layout(area: Rect, menu: &Menu) -> FrameLayout {
     let bare = menu.app.active_tab().is_some_and(|tab| tab.bare_rows);
     let filterable = menu.app.active_tab().is_some_and(|tab| tab.filterable);
     let gauge_on = !bare && menu.gauge.is_some();
+    let has_tabs = menu.app.tabs.len() > 1;
 
-    // Bare tabs (flex extension) draw no chrome at all, so the list owns the
-    // whole frame; otherwise it stops above the gauge/filter/hints rows and
-    // the tab bar.
+    // Bare tabs (flex extension) draw no chrome at all unless there are multiple
+    // tabs to switch between (where the tab bar must remain visible).
     let chrome_bottom: u16 = if bare {
-        0
+        if has_tabs {
+            TAB_BAR_HEIGHT
+        } else {
+            0
+        }
     } else if gauge_on {
         3 + TAB_BAR_HEIGHT
     } else if filterable {
@@ -180,6 +187,7 @@ fn frame_layout(area: Rect, menu: &Menu) -> FrameLayout {
         bare,
         filterable,
         gauge_on,
+        has_tabs,
     }
 }
 
@@ -211,6 +219,7 @@ pub fn render(frame: &mut Frame, menu: &mut Menu) {
         bare,
         filterable,
         gauge_on,
+        has_tabs,
     } = frame_layout(area, menu);
 
     // Image preview pane: reserved on the right of the list area only (the
@@ -239,10 +248,8 @@ pub fn render(frame: &mut Frame, menu: &mut Menu) {
     let buf = frame.buffer_mut();
     fill_bg(buf, area.x, area.y, width_cells, height);
 
-    if bare {
-        draw_list(buf, list_area, menu);
-    } else {
-        draw_list(buf, list_area, menu);
+    draw_list(buf, list_area, menu);
+    if !bare {
         if gauge_on && height >= 4 {
             draw_gauge(
                 buf,
@@ -270,6 +277,8 @@ pub fn render(frame: &mut Frame, menu: &mut Menu) {
                 menu,
             );
         }
+    }
+    if !bare || has_tabs {
         draw_tab_bar(
             buf,
             area.x,
@@ -308,31 +317,110 @@ fn fill_bg(buf: &mut Buffer, ox: u16, oy: u16, width: usize, height: usize) {
 /// Each tab gets `title width + 2` cells — `[x]` for the active tab and
 /// ` x ` for the others — so there is no extra separator between tabs, and
 /// inactive tabs keep the terminal's default foreground (`theme.tab`).
+#[allow(clippy::too_many_lines, clippy::needless_range_loop)]
 fn draw_tab_bar(buf: &mut Buffer, ox: u16, y: u16, width: usize, menu: &Menu) {
     if width == 0 || menu.app.tabs.is_empty() {
         return;
     }
-    let area = Rect::new(ox, y, u16::try_from(width).unwrap_or(u16::MAX), 1);
     let char_set = &menu.char_set;
     let theme = &menu.theme;
-    let constraints: Vec<Constraint> = menu
+    let total_tabs = menu.app.tabs.len();
+
+    let tab_widths: Vec<u16> = menu
         .app
         .tabs
         .iter()
         .map(|tab| {
             let name_w = u16::try_from(width::str_width(&tab.name)).unwrap_or(u16::MAX);
-            Constraint::Length(name_w.saturating_add(2))
+            name_w.saturating_add(2)
         })
         .collect();
-    let areas = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints(constraints)
-        .split(area);
 
-    for (index, tab) in menu.app.tabs.iter().enumerate() {
-        let Some(&tab_area) = areas.get(index) else {
+    let total_needed: usize = tab_widths.iter().map(|&w| usize::from(w)).sum();
+
+    if total_needed <= width {
+        let mut cur_x = ox;
+        for (index, tab) in menu.app.tabs.iter().enumerate() {
+            let tab_w = tab_widths[index];
+            let tab_area = Rect::new(cur_x, y, tab_w, 1);
+            let line = if index == menu.app.active {
+                Line::from(vec![
+                    Span::styled(char_set.tab_marker_left, theme.tab_marker),
+                    Span::styled(tab.name.clone(), theme.tab_selected),
+                    Span::styled(char_set.tab_marker_right, theme.tab_marker),
+                ])
+            } else {
+                Line::from(Span::styled(
+                    format!(" {} ", width::sanitize(&tab.name)),
+                    theme.tab,
+                ))
+            };
+            line.render(tab_area, buf);
+            cur_x = cur_x.saturating_add(tab_w);
+        }
+        return;
+    }
+
+    let active = menu.app.active.min(total_tabs.saturating_sub(1));
+    let mut start = active;
+    let mut end = active;
+
+    loop {
+        let left_ind = usize::from(start > 0);
+        let right_ind = usize::from(end < total_tabs - 1);
+        let current_w: usize = tab_widths[start..=end]
+            .iter()
+            .map(|&w| usize::from(w))
+            .sum::<usize>()
+            + left_ind
+            + right_ind;
+
+        let can_expand_left = start > 0
+            && current_w
+                + usize::from(tab_widths[start - 1])
+                + usize::from(start - 1 > 0 && left_ind == 0)
+                <= width;
+        let can_expand_right = end < total_tabs - 1
+            && current_w
+                + usize::from(tab_widths[end + 1])
+                + usize::from(end + 1 < total_tabs - 1 && right_ind == 0)
+                <= width;
+
+        if !can_expand_left && !can_expand_right {
             break;
-        };
+        }
+
+        if can_expand_right && (start == 0 || active - start >= end - active) {
+            end += 1;
+        } else if can_expand_left {
+            start -= 1;
+        } else if can_expand_right {
+            end += 1;
+        }
+    }
+
+    let mut cur_x = ox;
+    if start > 0 {
+        let ind_area = Rect::new(cur_x, y, 1, 1);
+        let line = Line::from(Span::styled("‹", theme.tab_marker));
+        line.render(ind_area, buf);
+        cur_x = cur_x.saturating_add(1);
+    }
+
+    for index in start..=end {
+        let tab = &menu.app.tabs[index];
+        let tab_w = tab_widths[index];
+        let available = width.saturating_sub(usize::from(cur_x - ox));
+        if available == 0 {
+            break;
+        }
+        let right_ind_reserved = usize::from(end < total_tabs - 1 && index == end);
+        let render_w = tab_w
+            .min(u16::try_from(available.saturating_sub(right_ind_reserved)).unwrap_or(u16::MAX));
+        if render_w == 0 {
+            break;
+        }
+        let tab_area = Rect::new(cur_x, y, render_w, 1);
         let line = if index == menu.app.active {
             Line::from(vec![
                 Span::styled(char_set.tab_marker_left, theme.tab_marker),
@@ -346,6 +434,13 @@ fn draw_tab_bar(buf: &mut Buffer, ox: u16, y: u16, width: usize, menu: &Menu) {
             ))
         };
         line.render(tab_area, buf);
+        cur_x = cur_x.saturating_add(render_w);
+    }
+
+    if end < total_tabs - 1 && usize::from(cur_x - ox) < width {
+        let ind_area = Rect::new(cur_x, y, 1, 1);
+        let line = Line::from(Span::styled("›", theme.tab_marker));
+        line.render(ind_area, buf);
     }
 }
 
@@ -556,7 +651,7 @@ fn draw_header(buf: &mut Buffer, area: Rect, menu: &Menu, row: &Row, armed_confi
 
     // Right column: the row's current target (upstream `target_line`,
     // `node_widget.rs:258-279`), else flex's generic meta.
-    let target_line = if bare {
+    let target_line = if bare && !row.meta.as_deref().is_some_and(|m| m.contains("Active")) {
         Line::default()
     } else if !row.hide_target_in_header && row.current_target().is_some() {
         let target = row.current_target().unwrap();

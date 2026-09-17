@@ -19,6 +19,10 @@ name = "flex-power"
 path = "src/bin/flex-power.rs"
 
 [[bin]]
+name = "flex-profile"
+path = "src/bin/flex-profile.rs"
+
+[[bin]]
 name = "flex-launch"
 path = "src/bin/flex-launch.rs"
 

@@ -87,6 +87,12 @@ pub enum PowerAction {
     Off,
     /// `logout` → `pkill -SIGTERM Hyprland`.
     Logout,
+    /// `profile:performance` → `powerprofilesctl set performance`.
+    ProfilePerformance,
+    /// `profile:balanced` → `powerprofilesctl set balanced`.
+    ProfileBalanced,
+    /// `profile:power-saver` → `powerprofilesctl set power-saver`.
+    ProfilePowerSaver,
     /// Well-formed but unsupported id (the wrapper's `unknown action` arm).
     Unknown(String),
 }
@@ -106,6 +112,9 @@ impl PowerAction {
             "reboot" => Self::Reboot,
             "poweroff" => Self::Off,
             "logout" => Self::Logout,
+            "profile:performance" | "profile-performance" => Self::ProfilePerformance,
+            "profile:balanced" | "profile-balanced" => Self::ProfileBalanced,
+            "profile:power-saver" | "profile-power-saver" => Self::ProfilePowerSaver,
             _ => Self::Unknown(id.to_string()),
         })
     }
@@ -126,6 +135,12 @@ pub enum PlannedAction {
     Off,
     /// `pkill -SIGTERM Hyprland`.
     Logout,
+    /// `powerprofilesctl set performance`.
+    ProfilePerformance,
+    /// `powerprofilesctl set balanced`.
+    ProfileBalanced,
+    /// `powerprofilesctl set power-saver`.
+    ProfilePowerSaver,
 }
 
 impl PlannedAction {
@@ -138,6 +153,9 @@ impl PlannedAction {
             Self::Reboot => "reboot",
             Self::Off => "poweroff",
             Self::Logout => "logout",
+            Self::ProfilePerformance => "profile:performance",
+            Self::ProfileBalanced => "profile:balanced",
+            Self::ProfilePowerSaver => "profile:power-saver",
         }
     }
 }
@@ -155,6 +173,8 @@ pub enum Step {
     SystemctlPoweroff,
     /// `pkill -SIGTERM Hyprland` (quiet).
     PkillHyprland,
+    /// `powerprofilesctl set <profile>` (loud).
+    PowerprofilesctlSet(String),
 }
 
 /// What [`execute`] did.
@@ -179,6 +199,13 @@ pub fn plan(planned: &PlannedAction) -> Vec<Step> {
         PlannedAction::Reboot => vec![Step::SystemctlReboot],
         PlannedAction::Off => vec![Step::SystemctlPoweroff],
         PlannedAction::Logout => vec![Step::PkillHyprland],
+        PlannedAction::ProfilePerformance => {
+            vec![Step::PowerprofilesctlSet(String::from("performance"))]
+        }
+        PlannedAction::ProfileBalanced => vec![Step::PowerprofilesctlSet(String::from("balanced"))],
+        PlannedAction::ProfilePowerSaver => {
+            vec![Step::PowerprofilesctlSet(String::from("power-saver"))]
+        }
     }
 }
 
@@ -195,6 +222,7 @@ pub fn describe(step: &Step) -> String {
         Step::SystemctlReboot => String::from("systemctl reboot"),
         Step::SystemctlPoweroff => String::from("systemctl poweroff"),
         Step::PkillHyprland => String::from("pkill -SIGTERM Hyprland"),
+        Step::PowerprofilesctlSet(profile) => format!("powerprofilesctl set {profile}"),
     }
 }
 
@@ -276,6 +304,18 @@ fn power_argv(kind: &PlannedAction) -> (&'static str, Vec<String>) {
             "pkill",
             vec![String::from("-SIGTERM"), String::from("Hyprland")],
         ),
+        PlannedAction::ProfilePerformance => (
+            "powerprofilesctl",
+            vec![String::from("set"), String::from("performance")],
+        ),
+        PlannedAction::ProfileBalanced => (
+            "powerprofilesctl",
+            vec![String::from("set"), String::from("balanced")],
+        ),
+        PlannedAction::ProfilePowerSaver => (
+            "powerprofilesctl",
+            vec![String::from("set"), String::from("power-saver")],
+        ),
     }
 }
 
@@ -293,6 +333,9 @@ fn decide(action: &PowerAction) -> Result<PlannedAction> {
         PowerAction::Reboot => Ok(PlannedAction::Reboot),
         PowerAction::Off => Ok(PlannedAction::Off),
         PowerAction::Logout => Ok(PlannedAction::Logout),
+        PowerAction::ProfilePerformance => Ok(PlannedAction::ProfilePerformance),
+        PowerAction::ProfileBalanced => Ok(PlannedAction::ProfileBalanced),
+        PowerAction::ProfilePowerSaver => Ok(PlannedAction::ProfilePowerSaver),
         PowerAction::Unknown(id) => anyhow::bail!("power: unknown action: {id}"),
     }
 }
@@ -326,6 +369,34 @@ fn run_step(step: &Step, path_env: &str) -> Result<()> {
         Step::PkillHyprland => {
             let (name, args) = power_argv(&PlannedAction::Logout);
             tool_quiet(path_env, name, &args);
+            Ok(())
+        }
+        Step::PowerprofilesctlSet(profile) => {
+            crate::providers::profile::save_active_profile(profile);
+            let tuned_profile = match profile.as_str() {
+                "performance" => "throughput-performance",
+                "power-saver" => "powersave",
+                _ => "balanced",
+            };
+            let script = format!(
+                "powerprofilesctl set {profile} 2>/dev/null || tuned-adm profile {tuned_profile}"
+            );
+            if let Some(setsid) = resolve_tool("setsid", path_env) {
+                let _ = Command::new(setsid)
+                    .args(["-f", "sh", "-c", &script])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status_retrying();
+            } else {
+                let _ = Command::new("sh")
+                    .args(["-c", &script])
+                    .env("PATH", path_env)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn();
+            }
             Ok(())
         }
     }
@@ -446,6 +517,9 @@ mod tests {
             PlannedAction::Reboot => PowerAction::Reboot,
             PlannedAction::Off => PowerAction::Off,
             PlannedAction::Logout => PowerAction::Logout,
+            PlannedAction::ProfilePerformance => PowerAction::ProfilePerformance,
+            PlannedAction::ProfileBalanced => PowerAction::ProfileBalanced,
+            PlannedAction::ProfilePowerSaver => PowerAction::ProfilePowerSaver,
         }
     }
 

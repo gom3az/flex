@@ -21,7 +21,7 @@ use flex_rice::exec::power as exec_power;
 use flex_rice::providers::power;
 
 fn power_menu() -> Menu {
-    flex_rice::menu(power::PROVIDER, vec![power::power_tab()])
+    flex_rice::menu(power::PROVIDER, power::power_tabs())
 }
 
 fn press(code: KeyCode) -> KeyEvent {
@@ -44,12 +44,12 @@ fn at(base: Instant, ms: u64) -> Instant {
 
 #[test]
 fn row_set_matches_bash_power_rows_exactly() {
-    let tab = power::power_tab();
-    assert_eq!(tab.name, power::TAB_NAME);
-    assert!(tab.bare_rows, "power uses launch-style bare rows");
-    assert!(!tab.filterable, "power has no search");
-    assert!(!tab.deletable, "power rows are non-deletable");
-    let rows: Vec<(&str, &str, Option<&str>, bool)> = tab
+    let power = power::power_tab();
+    assert_eq!(power.name, power::TAB_POWER);
+    assert!(power.bare_rows, "power uses launch-style bare rows");
+    assert!(!power.filterable, "power has no search");
+    assert!(!power.deletable, "power rows are non-deletable");
+    let rows: Vec<(&str, &str, Option<&str>, bool)> = power
         .rows
         .iter()
         .map(|row| {
@@ -69,6 +69,47 @@ fn row_set_matches_bash_power_rows_exactly() {
             ("reboot", "Reboot", Some("systemctl reboot"), true),
             ("poweroff", "Power Off", Some("systemctl poweroff"), true),
             ("logout", "Logout", Some("pkill -SIGTERM Hyprland"), false),
+        ]
+    );
+
+    let profiles = power::profiles_tab_from(None);
+    assert_eq!(profiles.name, power::TAB_PROFILES);
+    assert!(profiles.bare_rows);
+    assert!(!profiles.filterable);
+    assert!(!profiles.deletable);
+    let prof_rows: Vec<(&str, &str, Option<&str>, bool)> = profiles
+        .rows
+        .iter()
+        .map(|row| {
+            (
+                row.id.as_str(),
+                row.label.as_str(),
+                row.meta.as_deref(),
+                row.confirmable,
+            )
+        })
+        .collect();
+    assert_eq!(
+        prof_rows,
+        vec![
+            (
+                "profile:performance",
+                "Performance Profile",
+                Some("powerprofilesctl set performance"),
+                false
+            ),
+            (
+                "profile:balanced",
+                "Balanced Profile",
+                Some("powerprofilesctl set balanced"),
+                false
+            ),
+            (
+                "profile:power-saver",
+                "Power Saver Profile",
+                Some("powerprofilesctl set power-saver"),
+                false
+            ),
         ]
     );
 }
@@ -403,7 +444,7 @@ exit 0
 "#;
 
 fn install_log_stubs(dir: &Path) {
-    for tool in ["hyprlock", "systemctl", "pkill"] {
+    for tool in ["hyprlock", "systemctl", "pkill", "powerprofilesctl"] {
         write_exe(&dir.join(tool), LOG_STUB);
     }
 }

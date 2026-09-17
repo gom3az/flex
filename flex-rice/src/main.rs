@@ -120,6 +120,12 @@ enum Command {
         #[arg(long)]
         print_action: bool,
     },
+    /// Power Profile switcher.
+    Profile {
+        /// Print the selected `ACTION:` line without executing it.
+        #[arg(long)]
+        print_action: bool,
+    },
 }
 
 /// Non-interactive `clip` verbs forwarded to `flex-clip` (mirrors the
@@ -252,6 +258,7 @@ fn run() -> Result<()> {
             *print_action,
             &[String::from("-m")],
         ),
+        Command::Profile { print_action } => reexec(Provider::Profile, style, *print_action, &[]),
     }
 }
 

@@ -27,10 +27,10 @@ use flex_core::{CharSet, CharSetName, Menu, Outcome, Peaks, Theme, ThemeName};
 
 use crate::{menu, popup, providers};
 use providers::{
-    bt, center, clip, launch, net, notify, power, proc, shot, theme_, wallpaper, wifi,
+    bt, center, clip, launch, net, notify, power, proc, profile, shot, theme_, wallpaper, wifi,
 };
 
-/// The twelve menu providers, one per `flex-<name>` binary.
+/// The thirteen menu providers, one per `flex-<name>` binary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provider {
     /// Shutdown/reboot/logout menu.
@@ -57,11 +57,13 @@ pub enum Provider {
     Bt,
     /// Notification Center drawer.
     Notify,
+    /// Power Profile switcher.
+    Profile,
 }
 
 impl Provider {
     /// Every provider, in binary-name order.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::Power,
         Self::Launch,
         Self::Shot,
@@ -74,6 +76,7 @@ impl Provider {
         Self::Net,
         Self::Bt,
         Self::Notify,
+        Self::Profile,
     ];
 
     /// Parse a provider subcommand/binary name (`None` for anything else).
@@ -92,6 +95,7 @@ impl Provider {
             "net" => Some(Self::Net),
             "bt" => Some(Self::Bt),
             "notify" => Some(Self::Notify),
+            "profile" => Some(Self::Profile),
             _ => None,
         }
     }
@@ -112,6 +116,7 @@ impl Provider {
             Self::Net => net::PROVIDER,
             Self::Bt => bt::PROVIDER,
             Self::Notify => notify::PROVIDER,
+            Self::Profile => profile::PROVIDER,
         }
     }
 
@@ -121,13 +126,15 @@ impl Provider {
         format!("flex-{}", self.name())
     }
 
-    /// Popup variant for this provider (`menu` for power/shot/theme/wifi/bt,
+    /// Popup variant for this provider (`menu` for power/shot/theme/wifi/bt/profile,
     /// `menu-wide` for launch/clip/center/wallpaper/proc/net, `drawer` for notify — see
     /// [`popup::MENU_VARIANT`] / [`popup::WIDE_VARIANT`] / [`popup::DRAWER_VARIANT`]).
     #[must_use]
     pub fn variant(self) -> &'static str {
         match self {
-            Self::Power | Self::Shot | Self::Theme | Self::Wifi | Self::Bt => popup::MENU_VARIANT,
+            Self::Power | Self::Shot | Self::Theme | Self::Wifi | Self::Bt | Self::Profile => {
+                popup::MENU_VARIANT
+            }
             Self::Launch | Self::Clip | Self::Center | Self::Wallpaper | Self::Proc | Self::Net => {
                 popup::WIDE_VARIANT
             }
@@ -139,7 +146,9 @@ impl Provider {
     #[must_use]
     pub fn variant_class(self) -> &'static str {
         match self {
-            Self::Power | Self::Shot | Self::Theme | Self::Wifi | Self::Bt => popup::MENU_CLASS,
+            Self::Power | Self::Shot | Self::Theme | Self::Wifi | Self::Bt | Self::Profile => {
+                popup::MENU_CLASS
+            }
             Self::Launch | Self::Clip | Self::Center | Self::Wallpaper | Self::Proc | Self::Net => {
                 popup::WIDE_CLASS
             }
@@ -303,8 +312,8 @@ impl StyleOptions {
 pub fn build_menu(provider: Provider, style: StyleOptions) -> Result<Menu> {
     match provider {
         Provider::Power => {
-            let tab = power::power_tab();
-            Ok(style.apply(menu(power::PROVIDER, vec![tab])))
+            let tabs = power::power_tabs();
+            Ok(style.apply(menu(power::PROVIDER, tabs)))
         }
         Provider::Launch => {
             let tab = launch::launch_tab();
@@ -344,6 +353,10 @@ pub fn build_menu(provider: Provider, style: StyleOptions) -> Result<Menu> {
         Provider::Net => Ok(style.apply(net::net_menu())),
         Provider::Bt => Ok(style.apply(bt::bt_menu())),
         Provider::Notify => Ok(style.apply(notify::menu())),
+        Provider::Profile => {
+            let tab = profile::profile_tab();
+            Ok(style.apply(menu(profile::PROVIDER, vec![tab])))
+        }
     }
 }
 
@@ -511,7 +524,9 @@ mod tests {
     fn providers_map_to_the_wrappers_popup_table() {
         for provider in Provider::ALL {
             let (variant, class) = match provider.name() {
-                "power" | "shot" | "theme" | "wifi" | "bt" => ("menu", popup::MENU_CLASS),
+                "power" | "shot" | "theme" | "wifi" | "bt" | "profile" => {
+                    ("menu", popup::MENU_CLASS)
+                }
                 "launch" | "clip" | "center" | "wallpaper" | "proc" | "net" => {
                     ("menu-wide", popup::WIDE_CLASS)
                 }

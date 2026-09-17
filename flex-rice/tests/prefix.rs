@@ -55,6 +55,7 @@ fn providers_report_tty_errors_with_a_single_prefix() {
         env!("CARGO_BIN_EXE_flex-center"),
         env!("CARGO_BIN_EXE_flex-wifi"),
         env!("CARGO_BIN_EXE_flex-proc"),
+        env!("CARGO_BIN_EXE_flex-profile"),
     ];
     for bin in cases {
         let home = scratch_home("tty");
