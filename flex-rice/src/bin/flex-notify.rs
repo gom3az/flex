@@ -138,9 +138,8 @@ fn run_toast(id: u32, state_path: Option<&std::path::Path>) {
         return;
     };
 
-    let urgency = item.urgency;
-    let is_critical = urgency == Urgency::Critical;
-    let timeout_secs: u64 = if is_critical { 0 } else { 5 };
+    let is_critical = item.urgency == Urgency::Critical;
+    let timeout_secs: u64 = if is_critical { 7 } else { 4 };
 
     let rel = notify::format_relative_time(item.timestamp, now);
 
@@ -149,69 +148,17 @@ fn run_toast(id: u32, state_path: Option<&std::path::Path>) {
     print!("\x1b[2J\x1b[H\x1b[?25l");
 
     let card = notify::format_toast_card(item, &rel, 50, timeout_secs);
-    println!("{card}");
+    for (idx, line) in card.lines().enumerate() {
+        print!("\x1b[{};1H{line}\x1b[K", idx + 1);
+    }
     let _ = std::io::stdout().flush();
 
-    // ── Input / timeout loop ────────────────────────────────────────────────
-    let _ = std::process::Command::new("stty")
-        .args(["-echo", "raw", "-icanon", "min", "0", "time", "1"])
-        .status();
+    // ── Auto-dismiss timeout ────────────────────────────────────────────────
+    std::thread::sleep(std::time::Duration::from_secs(timeout_secs));
 
-    let deadline = if timeout_secs > 0 {
-        Some(std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs))
-    } else {
-        None
-    };
-
-    let mut buf = [0u8; 1];
-    let mut open_center = false;
-    let mut chosen_action_id: Option<String> = None;
-
-    loop {
-        use std::io::Read as _;
-        let n = std::io::stdin().read(&mut buf).unwrap_or(0);
-        if n > 0 {
-            let b = buf[0];
-            if b == b'q' || b == 0x1b || b == b'd' {
-                // Quiet dismiss
-                break;
-            }
-            if (b'1'..=b'9').contains(&b) {
-                let idx = (b - b'1') as usize;
-                if idx < item.actions.len() {
-                    chosen_action_id = Some(item.actions[idx].id.clone());
-                }
-                break;
-            }
-            // Enter / Space / 'n' -> open drawer
-            open_center = true;
-            break;
-        }
-        if let Some(dl) = deadline {
-            if std::time::Instant::now() >= dl {
-                break;
-            }
-        }
-    }
-
-    // Restore terminal & show cursor
-    let _ = std::process::Command::new("stty").arg("sane").status();
+    // Show cursor on exit
     print!("\x1b[?25h");
     let _ = std::io::stdout().flush();
-
-    if let Some(act_id) = chosen_action_id {
-        // Output action choice (for logging or daemon signal listener)
-        println!("Action: {act_id}");
-    }
-
-    if open_center {
-        let _ = std::process::Command::new("flex")
-            .args(["popup", "flex-notify-center", "flex-notify"])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
-    }
 }
 
 fn main() {

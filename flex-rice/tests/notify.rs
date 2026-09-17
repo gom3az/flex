@@ -531,8 +531,6 @@ fn toast_boxed_card_rendering() {
     // Verify Wiremix box borders
     assert!(card.contains("╭─"));
     assert!(card.contains("─╮"));
-    assert!(card.contains("├"));
-    assert!(card.contains("┤"));
     assert!(card.contains("╰"));
     assert!(card.contains("╯"));
 
@@ -543,12 +541,6 @@ fn toast_boxed_card_rendering() {
     // Verify progress bar & actions
     assert!(card.contains("Progress: ["));
     assert!(card.contains("Actions:"));
-    assert!(card.contains("[1]"));
     assert!(card.contains("Clean Up"));
-    assert!(card.contains("[2]"));
     assert!(card.contains("Ignore"));
-
-    // Verify footer hints
-    assert!(card.contains("[Enter] Open"));
-    assert!(card.contains("[Esc] Dismiss"));
 }

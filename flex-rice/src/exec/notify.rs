@@ -1201,7 +1201,7 @@ pub fn format_toast_card(
     item: &NotificationItem,
     rel_time: &str,
     width: usize,
-    timeout_secs: u64,
+    _timeout_secs: u64,
 ) -> String {
     use unicode_width::UnicodeWidthStr as _;
 
@@ -1315,34 +1315,6 @@ pub fn format_toast_card(
         lines.push(make_content_row(&action_spans, act_w.min(inner_width)));
     }
 
-    // ── Divider Line ───────────────────────────────────────────────────────
-    let mid_dash = "─".repeat(target_width.saturating_sub(2));
-    lines.push(format!("{border_ansi}├{mid_dash}┤{reset}"));
-
-    // ── Footer Hint Line ───────────────────────────────────────────────────
-    let (hint_text, hint_len) = if !item.actions.is_empty() {
-        (
-            format!("{dim}[Enter] Open  [1-9] Action  [Esc] Dismiss{reset}"),
-            41,
-        )
-    } else if item.urgency == Urgency::Critical {
-        (
-            format!("{dim}[Enter] Open Drawer  [Esc] Dismiss (critical){reset}"),
-            43,
-        )
-    } else if timeout_secs > 0 {
-        (
-            format!("{dim}[Enter] Open Drawer  [Esc] Dismiss ({timeout_secs}s){reset}"),
-            41,
-        )
-    } else {
-        (
-            format!("{dim}[Enter] Open Drawer  [Esc] Dismiss{reset}"),
-            35,
-        )
-    };
-    lines.push(make_content_row(&hint_text, hint_len.min(inner_width)));
-
     // ── Bottom Border Line ─────────────────────────────────────────────────
     let bot_dash = "─".repeat(target_width.saturating_sub(2));
     lines.push(format!("{border_ansi}╰{bot_dash}╯{reset}"));
@@ -1353,12 +1325,12 @@ pub fn format_toast_card(
 /// Spawn a transient toast overlay for a newly-arrived notification.
 ///
 /// Launches `kitty --class flex-notify-toast -o font_size=11 -o remember_window_size=no
-/// -o initial_window_width=54c -o initial_window_height=10c -e flex-notify toast <id>` detached.
+/// -o initial_window_width=54c -o initial_window_height=14c -e flex-notify toast <id>` detached.
 pub fn spawn_toast(id: u32, state_path: Option<&Path>) {
     let state_arg =
         state_path.map_or_else(String::new, |p| format!(" --state-file '{}'", p.display()));
     let cmd = format!(
-        "kitty --class flex-notify-toast -o font_size=11 -o remember_window_size=no -o initial_window_width=54c -o initial_window_height=10c -e flex-notify{state_arg} toast {id}"
+        "kitty --class flex-notify-toast -o font_size=11 -o remember_window_size=no -o initial_window_width=54c -o initial_window_height=14c -o window_padding_width=1 -o window_padding_height=1 -e flex-notify{state_arg} toast {id}"
     );
     // Double-fork via `sh -c '… &'`: the grandchild is reparented to init so
     // no daemon FDs (including the zbus socket) are inherited.
