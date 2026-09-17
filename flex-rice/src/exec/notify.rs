@@ -369,6 +369,31 @@ pub fn open_application(app_name: &str) {
         return;
     }
 
+    // Unset fullscreen lock on active workspace if currently active
+    let active_ws_has_fullscreen = Command::new("hyprctl")
+        .args(["activeworkspace", "-j"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
+        .and_then(|val| val["hasfullscreen"].as_bool())
+        .unwrap_or(false);
+
+    if active_ws_has_fullscreen {
+        let _ = Command::new("hyprctl")
+            .args([
+                "dispatch",
+                "hl.dsp.window.fullscreen({ action = \"unset\" })",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+
     // 1. Query hyprctl clients -j to locate matching window and workspace
     if let Ok(output) = Command::new("hyprctl")
         .args(["clients", "-j"])

@@ -646,6 +646,7 @@ pub fn refresh(menu: &mut Menu) {
 pub struct ExecuteReport {
     pub action_id: String,
     pub detail: Option<String>,
+    pub should_close: bool,
 }
 
 /// Helper to copy text to system clipboard via `wl-copy` or `xclip` detached.
@@ -685,8 +686,16 @@ pub fn execute(
 ) -> anyhow::Result<ExecuteReport> {
     let mut state = notify::load_state(state_path);
     let now = now_secs();
+    let mut should_close = false;
 
-    if action_id == ACTION_CLEAR_ALL
+    if let Some(id_str) = action_id.strip_prefix("notif:") {
+        if let Ok(id) = id_str.parse::<u32>() {
+            if let Some(n) = state.notifications.iter().find(|n| n.id == id) {
+                notify::open_application(&n.app_name);
+                should_close = true;
+            }
+        }
+    } else if action_id == ACTION_CLEAR_ALL
         || action_id == "clear_all"
         || action_id == "dismiss:clear_all"
         || action_id == ACTION_QUICK_CONTROLS
@@ -722,18 +731,8 @@ pub fn execute(
             .args(["position", "10-"])
             .status();
     } else if let Some(player) = action_id.strip_prefix("focus_player:") {
-        let class_name = if player.starts_with("brave") {
-            "brave-browser"
-        } else {
-            player
-        };
-        let _ = std::process::Command::new("hyprctl")
-            .args([
-                "dispatch",
-                "focuswindow",
-                &format!("class:^({class_name})$"),
-            ])
-            .status();
+        notify::open_application(player);
+        should_close = true;
     } else if let Some(info) = action_id.strip_prefix("copy_media:") {
         copy_to_clipboard(info);
     } else if action_id == "toggle_mic" || action_id == ACTION_TOGGLE_MIC {
@@ -813,20 +812,25 @@ pub fn execute(
                 }
             }
         }
+        should_close = true;
     } else if let Some(code) = action_id.strip_prefix("copy_otp:") {
         copy_to_clipboard(code);
     } else if let Some(url) = action_id.strip_prefix("open_url:") {
         notify::open_url(url);
+        should_close = true;
     } else if let Some(url) = action_id.strip_prefix("copy_url:") {
         copy_to_clipboard(url);
     } else if let Some(path) = action_id.strip_prefix("open_file:") {
         notify::open_file(path);
+        should_close = true;
     } else if let Some(path) = action_id.strip_prefix("open_dir:") {
         notify::open_dir(path);
+        should_close = true;
     } else if let Some(path) = action_id.strip_prefix("copy_path:") {
         copy_to_clipboard(path);
     } else if let Some(app) = action_id.strip_prefix("open_app:") {
         notify::open_application(app);
+        should_close = true;
     } else if let Some(hex) = action_id.strip_prefix("copy_hex:") {
         copy_to_clipboard(hex);
     } else if action_id == "dnd:25m" || target_title.contains("Pomodoro") {
@@ -856,6 +860,7 @@ pub fn execute(
     Ok(ExecuteReport {
         action_id: action_id.to_string(),
         detail: Some(target_title.to_string()),
+        should_close,
     })
 }
 

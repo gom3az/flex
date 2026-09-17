@@ -464,10 +464,18 @@ fn run() -> anyhow::Result<()> {
                 | Outcome::Toggle {
                     action_id, label, ..
                 } => {
-                    let _ = provider::execute(&action_id, &label, state_path);
+                    if let Ok(report) = provider::execute(&action_id, &label, state_path) {
+                        if report.should_close {
+                            std::process::exit(0);
+                        }
+                    }
                 }
                 Outcome::Target { target, title, .. } => {
-                    let _ = provider::execute(&target, &title, state_path);
+                    if let Ok(report) = provider::execute(&target, &title, state_path) {
+                        if report.should_close {
+                            std::process::exit(0);
+                        }
+                    }
                 }
                 Outcome::Delete { action_id, .. } => {
                     let action = if action_id.starts_with("notif:") {
