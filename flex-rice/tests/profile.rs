@@ -96,15 +96,24 @@ fn executor_plan_snapshot() {
     let cases = [
         (
             exec_profile::PlannedAction::Performance,
-            vec!["would run: powerprofilesctl set performance"],
+            vec![
+                "would run: powerprofilesctl set performance",
+                "would run: tuned-adm profile throughput-performance",
+            ],
         ),
         (
             exec_profile::PlannedAction::Balanced,
-            vec!["would run: powerprofilesctl set balanced"],
+            vec![
+                "would run: powerprofilesctl set balanced",
+                "would run: tuned-adm profile balanced",
+            ],
         ),
         (
             exec_profile::PlannedAction::PowerSaver,
-            vec!["would run: powerprofilesctl set power-saver"],
+            vec![
+                "would run: powerprofilesctl set power-saver",
+                "would run: tuned-adm profile powersave",
+            ],
         ),
     ];
     for (planned, expected_lines) in cases {
