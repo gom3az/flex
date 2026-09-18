@@ -444,6 +444,82 @@ fn sound_playback_safety_with_dnd_and_urgency() {
     notify::play_notification_sound(Urgency::Critical, false);
 }
 
+/// Number of zombie (`Z`) children of this test process right now.
+fn own_zombie_children() -> usize {
+    let me = std::process::id();
+    let Ok(dir) = std::fs::read_dir("/proc") else {
+        return 0;
+    };
+    dir.filter_map(|entry| {
+        let entry = entry.ok()?;
+        entry.file_name().to_str()?.parse::<u32>().ok()?;
+        let stat = std::fs::read_to_string(entry.path().join("stat")).ok()?;
+        // `comm` may contain spaces/parens: state follows the last `)`.
+        let after_comm = stat.rsplit(')').next()?;
+        let mut fields = after_comm.split_whitespace();
+        let state = fields.next()?;
+        let ppid: u32 = fields.nth(1)?.parse().ok()?;
+        (state == "Z" && ppid == me).then_some(())
+    })
+    .count()
+}
+
+/// The daemon's fire-and-forget spawns (sound player, toast `sh`) must be
+/// reaped, not left as zombies: without the waiter thread each notification
+/// leaks one `pw-play` + one `sh` defunct pair under the daemon for its whole
+/// lifetime. Reaping is async, so poll back to baseline with a timeout.
+#[test]
+fn daemon_spawns_leave_no_zombies() {
+    use std::os::unix::fs::PermissionsExt as _;
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("flex-notify-reap-{}-{seq}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    for name in ["pw-play", "kitty"] {
+        let stub = dir.join(name);
+        std::fs::write(&stub, "#!/bin/sh\nexit 0\n").expect("stub");
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+    // Narrow, immediately-restored `PATH` prepend: the stub names (`pw-play`,
+    // `kitty`) collide with no other test's stub tools, and every other suite
+    // prepends its own stub dir (which keeps precedence), so the blast radius
+    // of this window is limited to ambient lookups of those two names.
+    let old_path = std::env::var("PATH").unwrap_or_default();
+    std::env::set_var("PATH", format!("{}:{old_path}", dir.display()));
+
+    let baseline = own_zombie_children();
+    // Sound path needs a real sound file (hardcoded freedesktop paths); skip
+    // that leg where the fixtures are absent (e.g. CI containers) — the toast
+    // leg below still exercises the reap path unconditionally.
+    let sound_file_present = [
+        "/usr/share/sounds/freedesktop/stereo/message.oga",
+        "/usr/share/sounds/freedesktop/stereo/message-new-instant.oga",
+        "/usr/share/sounds/freedesktop/stereo/dialog-information.oga",
+    ]
+    .iter()
+    .any(|p| std::path::Path::new(p).exists());
+    if sound_file_present {
+        notify::play_notification_sound(Urgency::Normal, false);
+    } else {
+        eprintln!("no freedesktop sound file; skipping sound leg");
+    }
+    // `kitty` is stubbed above, so no window opens; the intermediate `sh`
+    // still runs and must be reaped.
+    notify::spawn_toast(4242, None);
+    std::env::set_var("PATH", old_path);
+
+    for _ in 0..200 {
+        if own_zombie_children() <= baseline {
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    panic!("zombie count never returned to baseline {baseline} (fire-and-forget spawn leaked)");
+}
+
 #[test]
 fn notify_daemon_dbus_server_contract() {
     let dir = std::env::temp_dir().join(format!("flex-notify-dbus-test-{}", std::process::id()));

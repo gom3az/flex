@@ -923,14 +923,14 @@ pub fn play_notification_sound(urgency: Urgency, dnd_active: bool) {
     ];
 
     for &(prog, args) in players {
-        if std::process::Command::new(prog)
-            .args(args)
+        let mut cmd = std::process::Command::new(prog);
+        cmd.args(args)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .is_ok()
-        {
+            .stderr(std::process::Stdio::null());
+        // Reaped on a waiter thread: dropping the `Child` here would leak a
+        // zombie for as long as the (long-lived) daemon process runs.
+        if crate::spawn::spawn_and_reap(&mut cmd).is_ok() {
             break;
         }
     }
@@ -1366,12 +1366,15 @@ pub fn spawn_toast(id: u32, state_path: Option<&Path>) {
     // PTY — not /dev/null.  Redirecting them here would break the ANSI render
     // (stdout→null = blank window) and the keypress poll (stdin→null = stty
     // fails + instant-exit for Normal or spin-forever for Critical).
-    let _ = std::process::Command::new("sh")
+    let mut toast = std::process::Command::new("sh");
+    toast
         .args(["-c", &format!("{cmd} &")])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+        .stderr(std::process::Stdio::null());
+    // Reaped on a waiter thread: the intermediate `sh` exits immediately and
+    // would otherwise linger as a zombie under the long-lived daemon.
+    let _ = crate::spawn::spawn_and_reap(&mut toast);
 }
 
 /// Run the D-Bus Notification daemon.
