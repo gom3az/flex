@@ -91,7 +91,7 @@ enum NotifyOp {
         urgency: String,
 
         /// In-flight progress fraction (0.0 - 1.0)
-        #[arg(short = 'p', long = "progress")]
+        #[arg(long = "progress")]
         progress: Option<f32>,
 
         /// Path to attached preview image

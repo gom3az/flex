@@ -31,22 +31,30 @@ fn write_exe(path: &Path, body: &str) {
     }
 }
 
-/// Stub `PATH` dir: `wl-paste` cats `payload`, `notify-send` appends its argv
-/// to `notify.log` (via a temp + rename so a reader never sees a half file).
+/// Stub `PATH` dir: `wl-paste` cats `payload` and logs argv to `wl_paste_log`,
+/// `notify-send` appends its argv to `notify.log`.
 struct Stubs {
     dir: PathBuf,
     payload: PathBuf,
     notify_log: PathBuf,
+    wl_paste_log: PathBuf,
 }
 
 fn install_stubs(name: &str) -> Stubs {
     let dir = scratch(name);
     let payload = dir.join("payload");
     let notify_log = dir.join("notify.log");
+    let wl_paste_log = dir.join("wl_paste.log");
     std::fs::write(&payload, b"").expect("payload");
     write_exe(
         &dir.join("wl-paste"),
-        &format!("#!/usr/bin/env bash\ncat '{}'\n", payload.display()),
+        &format!(
+            "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > '{}.tmp'\nmv '{}.tmp' '{}'\ncat '{}'\n",
+            wl_paste_log.display(),
+            wl_paste_log.display(),
+            wl_paste_log.display(),
+            payload.display(),
+        ),
     );
     write_exe(
         &dir.join("notify-send"),
@@ -61,6 +69,7 @@ fn install_stubs(name: &str) -> Stubs {
         dir,
         payload,
         notify_log,
+        wl_paste_log,
     }
 }
 
@@ -202,6 +211,70 @@ fn dispatcher_forwards_the_add_verb() {
     assert_eq!(
         std::fs::read(home.join("hist")).expect("hist"),
         b"via dispatcher\n".to_vec()
+    );
+    let _ = std::fs::remove_dir_all(&stubs.dir);
+}
+
+#[test]
+fn watch_verb_spawns_wl_paste_watcher() {
+    let stubs = install_stubs("watch");
+    let home = stubs.dir.join("home");
+    std::fs::create_dir_all(&home).expect("home");
+
+    assert_ok(&run_verb(&stubs, &home, &["watch"]));
+    let logged = std::fs::read_to_string(&stubs.wl_paste_log).expect("wl-paste log");
+    assert!(
+        logged.contains("--type") && logged.contains("text") && logged.contains("--watch"),
+        "wl-paste received watcher args: {logged:?}"
+    );
+    let _ = std::fs::remove_dir_all(&stubs.dir);
+}
+
+#[test]
+fn daemon_verb_alias_spawns_wl_paste_watcher() {
+    let stubs = install_stubs("daemon");
+    let home = stubs.dir.join("home");
+    std::fs::create_dir_all(&home).expect("home");
+
+    assert_ok(&run_verb(&stubs, &home, &["daemon"]));
+    let logged = std::fs::read_to_string(&stubs.wl_paste_log).expect("wl-paste log");
+    assert!(
+        logged.contains("--type") && logged.contains("text") && logged.contains("--watch"),
+        "daemon alias invoked watcher: {logged:?}"
+    );
+    let _ = std::fs::remove_dir_all(&stubs.dir);
+}
+
+#[test]
+fn dispatcher_forwards_the_watch_verb() {
+    let stubs = install_stubs("dispatch-watch");
+    let home = stubs.dir.join("home");
+    std::fs::create_dir_all(&home).expect("home");
+
+    let path_env = format!(
+        "{}:{}",
+        stubs.dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_flex"))
+        .args(["clip", "watch"])
+        .env("HOME", &home)
+        .env("PATH", path_env)
+        .env("CLIPHIST_FILE", home.join("hist"))
+        .env("CLIPHIST_PINS", home.join("pins"))
+        .env("CLIPHIST_CURRENT", home.join("current"))
+        .stdin(Stdio::null())
+        .output()
+        .expect("run flex clip watch");
+    assert!(
+        output.status.success(),
+        "dispatcher watch verb exits 0: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let logged = std::fs::read_to_string(&stubs.wl_paste_log).expect("wl-paste log");
+    assert!(
+        logged.contains("--type") && logged.contains("text") && logged.contains("--watch"),
+        "dispatcher watch spawned watcher: {logged:?}"
     );
     let _ = std::fs::remove_dir_all(&stubs.dir);
 }

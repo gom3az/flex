@@ -71,7 +71,7 @@ enum Command {
         /// Print the selected `ACTION:` line without executing it.
         #[arg(long)]
         print_action: bool,
-        /// Optional non-interactive store verb (`add`/`pin`/`unpin`/`current`).
+        /// Optional non-interactive store verb (`add`/`pin`/`unpin`/`current`/`watch`/`daemon`).
         #[command(subcommand)]
         op: Option<ClipVerb>,
     },
@@ -140,14 +140,18 @@ enum ClipVerb {
     Unpin { text: Option<String> },
     /// Print the current clipboard entry (decoded).
     Current,
+    /// Watch Wayland selection updates and add them to history.
+    #[command(alias = "daemon")]
+    Watch,
 }
 
-/// Re-exec tokens for a `clip` verb (`add`/`pin TEXT`/`unpin TEXT`/`current`).
+/// Re-exec tokens for a `clip` verb (`add`/`pin TEXT`/`unpin TEXT`/`current`/`watch`/`daemon`).
 fn clip_verb_tail(op: Option<&ClipVerb>) -> Vec<String> {
     match op {
         None => Vec::new(),
         Some(ClipVerb::Add) => vec![String::from("add")],
         Some(ClipVerb::Current) => vec![String::from("current")],
+        Some(ClipVerb::Watch) => vec![String::from("watch")],
         Some(ClipVerb::Pin { text }) => verb_with_text("pin", text.as_deref()),
         Some(ClipVerb::Unpin { text }) => verb_with_text("unpin", text.as_deref()),
     }

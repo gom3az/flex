@@ -198,26 +198,48 @@ fn feed_tab_groups_multi_notification_apps() {
     n5.timestamp = 900;
     state.notifications.push(n5);
 
-    let tab = provider::feed_tab_from(&state, 1000);
+    // Collapsed by default:
     // Row 0: Quick Controls
     // Row 1: MPRIS
     // Row 2: Critical Low Battery
-    // Row 3: Discord Group Header (2 notifications)
-    // Row 4: Discord #general
-    // Row 5: Discord #dev-team
-    // Row 6: PackageKit
-    assert_eq!(tab.rows.len(), 7);
+    // Row 3: Discord Parent Row (2 notifications, latest preview)
+    // Row 4: PackageKit
+    let tab = provider::feed_tab_from(&state, 1000);
+    assert_eq!(tab.rows.len(), 5);
 
     let group_row = tab
         .rows
         .iter()
         .find(|r| r.id.as_str() == "group:Discord")
         .expect("group header found");
-    assert!(group_row.label.contains("Discord (2)"));
+    assert!(group_row.label.contains("▶ 󰙯 Discord (2)"));
+    assert_eq!(group_row.sublabel.as_deref(), Some("#general"));
+    assert!(group_row
+        .targets
+        .iter()
+        .any(|t| t.title.contains("Expand Thread (1 earlier)")));
     assert!(group_row
         .targets
         .iter()
         .any(|t| t.title.contains("Dismiss All (2)")));
+
+    // Test expanding thread:
+    provider::toggle_thread_expanded("Discord");
+    let expanded_tab = provider::feed_tab_from(&state, 1000);
+    assert_eq!(expanded_tab.rows.len(), 6);
+
+    let expanded_row = expanded_tab
+        .rows
+        .iter()
+        .find(|r| r.id.as_str() == "group:Discord")
+        .expect("group header found");
+    assert!(expanded_row.label.contains("▼ 󰙯 Discord (2)"));
+
+    let child_row = &expanded_tab.rows[5];
+    assert!(child_row.label.contains("└─ #dev-team"));
+
+    // Reset toggle
+    provider::toggle_thread_expanded("Discord");
 }
 
 #[test]

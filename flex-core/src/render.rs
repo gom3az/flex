@@ -58,15 +58,6 @@ pub const COMPACT_NODE_HEIGHT: u16 = 1;
 pub const COMPACT_NODE_SPACING: u16 = 1;
 
 /// Geometry of one node in the list (flex extension, §10 of the design doc).
-///
-/// Upstream always renders 3-line nodes because every `PipeWire` node carries
-/// volumes (`node_widget.rs:53-60`). Flex's providers mostly carry nothing but
-/// a label, so a data-less tab would render one inked line per five rows. The
-/// metrics therefore follow the data: [`NodeMetrics::UPSTREAM`] when any row
-/// in the tab has a detail line to draw (volume, enabled peaks, or a config
-/// line), [`NodeMetrics::COMPACT`] otherwise. Both modes run upstream's own
-/// widget code — a 1-row node area simply degenerates the selector to its top
-/// glyph, exactly as upstream's `SelectorWidget` would (`node_widget.rs:217-224`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NodeMetrics {
     /// Node height in lines.
@@ -76,12 +67,12 @@ pub struct NodeMetrics {
 }
 
 impl NodeMetrics {
-    /// Upstream's 3 lines + 2 spacing (`node_widget.rs:53-60`).
+    /// Upstream's 3 lines + 1 spacing (`node_widget.rs:53-60`).
     pub const UPSTREAM: Self = Self {
         height: NODE_HEIGHT,
         spacing: NODE_SPACING,
     };
-    /// Flex's compact 1 line + 1 spacing for data-less rows.
+    /// Flex's compact 1 line + 0 spacing for data-less rows.
     pub const COMPACT: Self = Self {
         height: COMPACT_NODE_HEIGHT,
         spacing: COMPACT_NODE_SPACING,
@@ -93,10 +84,22 @@ impl NodeMetrics {
         self.height + self.spacing
     }
 
+    /// Metrics for a single row.
+    #[must_use]
+    pub fn for_row(row: &Row, peaks: Peaks) -> Self {
+        let has_detail = row.volume.is_some()
+            || row.config.is_some()
+            || row.detail.is_some()
+            || row.sublabel.is_some()
+            || (row.peaks.is_some() && peaks != Peaks::Off);
+        if has_detail {
+            Self::UPSTREAM
+        } else {
+            Self::COMPACT
+        }
+    }
+
     /// Metrics for a tab: upstream when any row draws a detail line.
-    ///
-    /// `peaks` is the menu's peak mode: rows whose peaks are hidden
-    /// ([`Peaks::Off`]) have no detail line either.
     #[must_use]
     pub fn for_rows(rows: &[Row], peaks: Peaks) -> Self {
         let has_detail = rows.iter().any(|row| {
@@ -479,8 +482,6 @@ fn draw_list(buf: &mut Buffer, list_area: Rect, menu: &mut Menu) {
         .areas(list_area);
 
     let metrics = node_metrics(menu);
-    let row_h = usize::from(metrics.pitch());
-    let entries_visible = usize::from(rows_area.height) / row_h;
     let len = visible.len();
     let scroll = tab.state.scroll;
 
@@ -492,36 +493,56 @@ fn draw_list(buf: &mut Buffer, list_area: Rect, menu: &mut Menu) {
             .render(header_area, buf);
     }
 
-    // `•••` below, except when the last row is only partially rendered but
-    // still shows everything that matters (upstream `object_list.rs:491-517`).
-    let is_bottom_last = scroll.saturating_add(entries_visible) == len.saturating_sub(1);
-    let is_bottom_enough = (usize::from(rows_area.height) % row_h) >= usize::from(metrics.height);
-    if scroll.saturating_add(entries_visible) < len && !(is_bottom_last && is_bottom_enough) {
-        Line::from(Span::styled(menu.char_set.list_more, menu.theme.list_more))
-            .alignment(Alignment::Center)
-            .render(footer_area, buf);
-    }
+    let mut current_y = rows_area.y;
+    let max_y = rows_area.y + rows_area.height;
+    let mut last_drawn_index = scroll;
 
-    // Row areas: `entries_visible` full rows plus one partial row for the
-    // remainder (upstream `object_list.rs:519-527`).
-    let mut constraints = vec![Constraint::Length(metrics.height); entries_visible];
-    constraints.push(Constraint::Max(metrics.height));
-    let row_areas = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(constraints)
-        .spacing(metrics.spacing)
-        .split(rows_area);
-
-    for (offset, row_area) in row_areas.iter().enumerate() {
-        let Some(&provider_index) = visible.get(scroll + offset) else {
+    for (offset, &provider_index) in visible.iter().skip(scroll).enumerate() {
+        if current_y >= max_y {
             break;
-        };
+        }
         let Some(row) = tab.rows.get(provider_index) else {
             continue;
         };
+        last_drawn_index = scroll + offset;
+
+        let row_m = if row.compact {
+            NodeMetrics {
+                height: COMPACT_NODE_HEIGHT,
+                spacing: 0,
+            }
+        } else {
+            metrics
+        };
+        let rh = row_m.height;
+        let avail = max_y.saturating_sub(current_y);
+        if avail == 0 {
+            break;
+        }
+        let h = rh.min(avail);
+        let item_rect = Rect::new(rows_area.x, current_y, rows_area.width, h);
         let selected = scroll + offset == tab.state.focus;
         let armed_confirm = selected && row.confirmable && tab.state.is_armed();
-        draw_node(buf, *row_area, menu, row, selected, armed_confirm, metrics);
+        draw_node(buf, item_rect, menu, row, selected, armed_confirm, row_m);
+        let next_is_compact = visible
+            .get(scroll + offset + 1)
+            .and_then(|&idx| tab.rows.get(idx))
+            .is_some_and(|r| r.compact);
+        let spacing = if next_is_compact {
+            0
+        } else if row.compact {
+            1
+        } else {
+            row_m.spacing
+        };
+        current_y += h + spacing;
+    }
+
+    // `•••` below only when there are items after the last drawn item
+    if len > 0 && last_drawn_index.saturating_add(1) < len {
+        Line::from(Span::styled(menu.char_set.list_more, menu.theme.list_more))
+            .alignment(Alignment::Center)
+            .render(footer_area, buf);
     }
 }
 

@@ -21,7 +21,7 @@ use flex_rice::exec::clip::{self, ClipOp};
 use flex_rice::runner::{self, GlobalStyle, Provider};
 
 /// Clipboard history: select a row and copy, delete, or (un)pin it; or run
-/// one non-interactive store verb (`add`/`pin`/`unpin`/`current`).
+/// one non-interactive store verb (`add`/`pin`/`unpin`/`current`/`watch`/`daemon`).
 #[derive(Debug, Parser)]
 #[command(name = "flex-clip", version, about = "Clipboard history")]
 struct Cli {
@@ -56,6 +56,9 @@ enum Op {
     },
     /// Print the current clipboard entry (decoded).
     Current,
+    /// Watch Wayland selection updates and add them to history.
+    #[command(alias = "daemon")]
+    Watch,
 }
 
 fn main() {
@@ -81,6 +84,7 @@ fn run() -> anyhow::Result<()> {
             Op::Pin { text } => clip::pin(text.as_deref(), None),
             Op::Unpin { text } => clip::unpin(text.as_deref(), None),
             Op::Current => clip::current(),
+            Op::Watch => clip::watch(None),
         };
     }
     let style = cli.style.options();

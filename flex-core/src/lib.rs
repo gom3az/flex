@@ -173,6 +173,8 @@ pub struct Row {
     /// When true, the row's targets are not drawn in the header right column,
     /// leaving space for [`Row::meta`] (e.g. notification timestamps).
     pub hide_target_in_header: bool,
+    /// Compact 1-line node rendering with 0 spacing (e.g. child notification thread rows).
+    pub compact: bool,
 }
 
 impl Row {
@@ -196,6 +198,7 @@ impl Row {
             target_index: 0,
             preview_image: None,
             hide_target_in_header: false,
+            compact: false,
         }
     }
 
