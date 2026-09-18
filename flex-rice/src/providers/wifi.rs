@@ -105,6 +105,9 @@ pub fn radio_enabled(out: &str) -> bool {
     out.trim() == "enabled"
 }
 
+/// Prefix for `Saved:` rows.
+pub const SAVED_PREFIX: &str = "Saved: ";
+
 /// One dim `— offline` row (Q7, shared shape with `center`).
 fn offline_row() -> Row {
     Row::offline_placeholder(RowId::new(center::NOOP_ID), center::OFFLINE_LABEL)
@@ -464,6 +467,7 @@ pub fn store_scan(rows: Vec<Row>) {
     if let Ok(mut slot) = PENDING_SCAN.lock() {
         *slot = Some(crate::spawn::BgTask::ready(rows));
     }
+    crate::spawn::wake_ui();
 }
 
 /// Tick hook ([`Menu::tick`], `wifi` menus only): swap in a finished scan.

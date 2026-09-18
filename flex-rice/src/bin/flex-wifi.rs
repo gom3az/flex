@@ -17,7 +17,6 @@
 //! [`exec::wifi`]: flex_rice::exec::wifi
 
 use clap::Parser;
-use flex_core::backend::EXIT_CANCELLED;
 use flex_core::Outcome;
 use flex_rice::exec::wifi;
 use flex_rice::runner::{self, GlobalStyle, Provider};
@@ -36,9 +35,11 @@ struct Cli {
     print_action: bool,
 }
 
-fn main() {
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
+    runner::init_logging();
     // `flex: error:` is added once, in the runner, and nowhere else.
-    if let Err(err) = run() {
+    if let Err(err) = run().await {
         runner::fail(&err);
     }
 }
@@ -51,36 +52,31 @@ fn main() {
 /// action id is unknown, or the outcome is unreachable for wifi rows
 /// (`Delete`/`Toggle`/`Target` — the wrapper has no arm for any of them).
 /// The error carries no `flex:` prefix; `main` adds it via the runner.
-fn run() -> anyhow::Result<()> {
+async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let style = cli.style.options();
-    runner::popup_guard(Provider::Wifi)?;
-    if cli.print_action {
-        // Probe path: exercise the real row→action mapping, never execute.
-        return runner::run_select(Provider::Wifi, style);
-    }
-    let menu = runner::build_menu(Provider::Wifi, style)?;
-    match flex_core::run::run_capture(menu)? {
-        Outcome::Chosen {
-            action_id, label, ..
-        } => {
-            wifi::execute(&action_id, &label, None)?;
-            Ok(())
-        }
-        Outcome::Delete { action_id, .. } => {
-            anyhow::bail!("wifi: unexpected delete outcome for '{action_id}'")
-        }
-        Outcome::Toggle { action_id, .. } => {
-            anyhow::bail!("wifi: unexpected toggle outcome for '{action_id}'")
-        }
-        Outcome::Target { row, .. } => {
-            anyhow::bail!("wifi: unexpected target outcome for '{row}'")
-        }
-        Outcome::Quit { code } => {
-            std::process::exit(code);
-        }
-        Outcome::Cancelled => {
-            std::process::exit(EXIT_CANCELLED);
-        }
-    }
+    runner::run_standard_cli(
+        Provider::Wifi,
+        style,
+        cli.print_action,
+        |outcome| match outcome {
+            Outcome::Chosen {
+                action_id, label, ..
+            } => {
+                wifi::execute(&action_id, &label, None)?;
+                Ok(())
+            }
+            Outcome::Delete { action_id, .. } => {
+                anyhow::bail!("wifi: unexpected delete outcome for '{action_id}'")
+            }
+            Outcome::Toggle { action_id, .. } => {
+                anyhow::bail!("wifi: unexpected toggle outcome for '{action_id}'")
+            }
+            Outcome::Target { row, .. } => {
+                anyhow::bail!("wifi: unexpected target outcome for '{row}'")
+            }
+            _ => unreachable!(),
+        },
+    )
+    .await
 }

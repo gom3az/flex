@@ -86,6 +86,9 @@ serde_json.workspace = true
 unicode-width.workspace = true
 signal-hook.workspace = true
 zbus = { version = "5.19.0", default-features = false, features = ["async-io", "blocking-api"] }
+tokio = { version = "1.53.1", features = ["rt", "rt-multi-thread", "macros", "process", "sync"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
 [lints]
 workspace = true

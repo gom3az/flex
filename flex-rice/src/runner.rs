@@ -25,6 +25,14 @@ use clap::Args;
 use flex_core::backend::{EXIT_CANCELLED, EXIT_ERROR, EXIT_OK};
 use flex_core::{CharSet, CharSetName, Menu, Outcome, Peaks, Theme, ThemeName};
 
+/// Initialize tracing/logging from `RUST_LOG`.
+pub fn init_logging() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_writer(std::io::stderr)
+        .try_init();
+}
+
 use crate::{menu, popup, providers};
 use providers::{
     bt, center, clip, launch, net, notify, power, proc, profile, shot, theme_, wallpaper, wifi,
@@ -309,7 +317,7 @@ impl StyleOptions {
 ///
 /// Currently infallible (`Ok` always); the `Result` keeps the shared
 /// call-site shape for providers whose construction may fail later.
-pub fn build_menu(provider: Provider, style: StyleOptions) -> Result<Menu> {
+pub async fn build_menu(provider: Provider, style: StyleOptions) -> Result<Menu> {
     match provider {
         Provider::Power => {
             let tabs = power::power_tabs();
@@ -335,7 +343,7 @@ pub fn build_menu(provider: Provider, style: StyleOptions) -> Result<Menu> {
             }
             Ok(style.apply(menu(clip::PROVIDER, vec![tab])))
         }
-        Provider::Center => Ok(style.apply(center::center_menu())),
+        Provider::Center => Ok(style.apply(center::center_menu().await)),
         Provider::Wallpaper => {
             let tab = wallpaper::wallpaper_tab();
             if tab.rows.is_empty() {
@@ -407,9 +415,42 @@ pub fn popup_guard(provider: Provider) -> Result<()> {
 /// When the terminal cannot initialize, frames cannot draw, events cannot
 /// be polled/read, or the `ACTION:` line cannot be written. The error
 /// carries no `flex:` prefix; [`fail`] adds it.
-pub fn run_select(provider: Provider, style: StyleOptions) -> Result<()> {
-    let built = build_menu(provider, style)?;
-    emit_outcome(flex_core::run::run_capture(built)?)
+pub async fn run_select(provider: Provider, style: StyleOptions) -> Result<()> {
+    let built = build_menu(provider, style).await?;
+    crate::spawn::set_wakeup_notifier(built.notifier());
+    emit_outcome(flex_core::run::run_capture(built).await?)
+}
+
+/// Helper for the standard provider CLI execution path.
+///
+/// Guards the popup, optionally prints the action (dry-run), runs the UI,
+/// handles the standard `Quit` and `Cancelled` outcomes natively, and passes
+/// any other outcome to the provider-specific handler.
+///
+/// # Errors
+///
+/// Returns an error when popup toggle, menu building, event loop execution,
+/// or the outcome handler fails.
+pub async fn run_standard_cli<F>(
+    provider: Provider,
+    style: StyleOptions,
+    print_action: bool,
+    handler: F,
+) -> Result<()>
+where
+    F: FnOnce(Outcome) -> Result<()>,
+{
+    popup_guard(provider)?;
+    if print_action {
+        return run_select(provider, style).await;
+    }
+    let menu = build_menu(provider, style).await?;
+    crate::spawn::set_wakeup_notifier(menu.notifier());
+    match flex_core::run::run_capture(menu).await? {
+        Outcome::Quit { code } => std::process::exit(code),
+        Outcome::Cancelled => std::process::exit(EXIT_CANCELLED),
+        other => handler(other),
+    }
 }
 
 /// Emit one terminal outcome and exit (the diverging half of [`run_select`]).
@@ -576,8 +617,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn build_menu_tags_every_provider() {
+    #[tokio::test]
+    async fn build_menu_tags_every_provider() {
         // Non-empty providers build a menu tagged with their own name; the
         // two empty-store providers (`clip`, `wallpaper`) exit 130 instead
         // of returning, so they are covered by the integration prefix test.
@@ -592,7 +633,7 @@ mod tests {
             Provider::Net,
             Provider::Bt,
         ] {
-            let built = build_menu(provider, style()).expect("menu builds");
+            let built = build_menu(provider, style()).await.expect("menu builds");
             assert_eq!(built.provider, provider.name());
         }
     }

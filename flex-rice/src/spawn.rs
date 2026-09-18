@@ -100,15 +100,59 @@ pub(crate) trait RetryExec {
 
 impl RetryExec for Command {
     fn status_retrying(&mut self) -> io::Result<ExitStatus> {
+        tracing::debug!("RetryExec::status_retrying: {:?}", self);
         status(self)
     }
 
     fn output_retrying(&mut self) -> io::Result<Output> {
+        tracing::debug!("RetryExec::output_retrying: {:?}", self);
         output(self)
     }
 
     fn spawn_retrying(&mut self) -> io::Result<Child> {
+        tracing::debug!("RetryExec::spawn_retrying: {:?}", self);
         spawn(self)
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) trait AsyncRetryExec {
+    async fn status_retrying(&mut self) -> io::Result<ExitStatus>;
+    async fn output_retrying(&mut self) -> io::Result<Output>;
+}
+
+impl AsyncRetryExec for tokio::process::Command {
+    async fn status_retrying(&mut self) -> io::Result<ExitStatus> {
+        tracing::debug!("AsyncRetryExec::status_retrying: {:?}", self);
+        // Note: we just loop natively, since we don't block the thread.
+        let mut last = None;
+        for _ in 0..ATTEMPTS {
+            match self.status().await {
+                Ok(value) => return Ok(value),
+                Err(err) if err.kind() == io::ErrorKind::ExecutableFileBusy => {
+                    last = Some(err);
+                    tokio::time::sleep(BACKOFF).await;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        Err(last.unwrap_or_else(|| io::Error::other("spawn: exec stayed busy")))
+    }
+
+    async fn output_retrying(&mut self) -> io::Result<Output> {
+        tracing::debug!("AsyncRetryExec::output_retrying: {:?}", self);
+        let mut last = None;
+        for _ in 0..ATTEMPTS {
+            match self.output().await {
+                Ok(value) => return Ok(value),
+                Err(err) if err.kind() == io::ErrorKind::ExecutableFileBusy => {
+                    last = Some(err);
+                    tokio::time::sleep(BACKOFF).await;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        Err(last.unwrap_or_else(|| io::Error::other("spawn: exec stayed busy")))
     }
 }
 
@@ -119,6 +163,25 @@ impl RetryExec for Command {
 #[derive(Debug)]
 pub(crate) struct BgTask<T> {
     result: std::sync::Arc<std::sync::Mutex<Option<T>>>,
+}
+
+static WAKEUP_NOTIFIER: std::sync::Mutex<Option<std::sync::Arc<tokio::sync::Notify>>> =
+    std::sync::Mutex::new(None);
+
+/// Register the current interactive menu's wakeup notifier.
+pub fn set_wakeup_notifier(notify: std::sync::Arc<tokio::sync::Notify>) {
+    if let Ok(mut slot) = WAKEUP_NOTIFIER.lock() {
+        *slot = Some(notify);
+    }
+}
+
+/// Awaken the running menu's event loop to immediately tick and redraw.
+pub fn wake_ui() {
+    if let Ok(slot) = WAKEUP_NOTIFIER.lock() {
+        if let Some(notify) = slot.as_ref() {
+            notify.notify_one();
+        }
+    }
 }
 
 impl<T: Send + 'static> BgTask<T> {
@@ -141,6 +204,7 @@ impl<T: Send + 'static> BgTask<T> {
             if let Ok(mut guard) = slot.lock() {
                 *guard = Some(val);
             }
+            wake_ui();
         });
         Self { result }
     }

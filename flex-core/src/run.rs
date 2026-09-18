@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
 use crossterm::event::{Event, KeyEvent};
+use futures::stream::StreamExt;
 
 use crate::backend;
 use crate::keys::{self, KeyOutcome};
@@ -80,20 +81,22 @@ pub fn replay_keys(menu: &mut Menu, keys: &[KeyEvent], base: Instant) -> KeyOutc
 ///
 /// Returns an error when the terminal cannot initialize, frames cannot
 /// draw, or events cannot be polled/read.
-pub fn run_capture(mut menu: Menu) -> Result<Outcome> {
+#[allow(clippy::too_many_lines)]
+pub async fn run_capture(mut menu: Menu) -> Result<Outcome> {
     let provider = menu.provider.clone();
     let mut terminal = backend::init()?;
     let base = Instant::now();
     let seeded = backend::is_flex_test();
     let mut step: u32 = 0;
     let mut images = menu.preview.then(preview::Preview::new);
-    // Second handle on the same terminal for the out-of-band image writes;
-    // without it the menu still runs, just without previews.
     let mut preview_tty = if menu.preview {
         backend::open_tty().ok()
     } else {
         None
     };
+
+    let notify = menu.notifier();
+    let mut reader = crossterm::event::EventStream::new();
     loop {
         let mut area = ratatui::layout::Rect::default();
         terminal
@@ -103,9 +106,6 @@ pub fn run_capture(mut menu: Menu) -> Result<Outcome> {
             })
             .context("failed to draw frame")?;
         if let (Some(images), Some(tty)) = (images.as_mut(), preview_tty.as_mut()) {
-            // Best effort: a preview that cannot be drawn (no kitty graphics,
-            // unreadable image, converter missing) leaves the pane blank and
-            // must never take the menu down with it.
             let pane = render::preview_area(area, &menu);
             let source = menu
                 .app
@@ -114,136 +114,85 @@ pub fn run_capture(mut menu: Menu) -> Result<Outcome> {
             let park = render::cursor_position(area, &menu);
             let _ = images.sync(tty, pane, source.as_deref().map(std::path::Path::new), park);
         }
-        if crossterm::event::poll(backend::poll_timeout()).context("event poll failed")? {
-            match crossterm::event::read().context("event read failed")? {
-                Event::Key(key) => {
-                    let now = loop_now(base, &mut step, seeded);
-                    match keys::handle_key(&mut menu, key, now) {
-                        KeyOutcome::Consumed => {}
-                        KeyOutcome::Select => {
-                            let Some(row) = menu.app.focused_row() else {
-                                continue;
-                            };
-                            let (id, label) = (row.id.as_str().to_string(), row.label.clone());
-                            backend::restore();
-                            return Ok(Outcome::Chosen {
-                                provider: provider.clone(),
-                                action_id: id,
-                                label,
-                            });
-                        }
-                        KeyOutcome::Delete => {
-                            let Some(row) = menu.app.focused_row() else {
-                                continue;
-                            };
-                            let (id, label) = (row.id.as_str().to_string(), row.label.clone());
-                            backend::restore();
-                            return Ok(Outcome::Delete {
-                                provider: provider.clone(),
-                                action_id: id,
-                                label,
-                            });
-                        }
-                        KeyOutcome::Toggle => {
-                            let Some(row) = menu.app.focused_row() else {
-                                continue;
-                            };
-                            let (id, label) = (row.id.as_str().to_string(), row.label.clone());
-                            backend::restore();
-                            return Ok(Outcome::Toggle {
-                                provider: provider.clone(),
-                                action_id: id,
-                                label,
-                            });
-                        }
-                        KeyOutcome::ChooseTarget { row, target, title } => {
-                            backend::restore();
-                            return Ok(Outcome::Target {
-                                provider: provider.clone(),
-                                row: row.as_str().to_string(),
-                                target: target.as_str().to_string(),
-                                title,
-                            });
-                        }
-                        KeyOutcome::Quit(code) => {
-                            backend::restore();
-                            return Ok(Outcome::Quit { code });
+
+        // Wait for next event or 1s tick
+        tokio::select! {
+            event = reader.next() => {
+                match event {
+                    Some(Ok(Event::Key(key))) => {
+                        let now = loop_now(base, &mut step, seeded);
+                        match keys::handle_key(&mut menu, key, now) {
+                            KeyOutcome::Consumed => {}
+                            KeyOutcome::Select => {
+                                let Some(row) = menu.app.focused_row() else {
+                                    continue;
+                                };
+                                let (id, label) = (row.id.as_str().to_string(), row.label.clone());
+                                backend::restore();
+                                return Ok(Outcome::Chosen {
+                                    provider: provider.clone(),
+                                    action_id: id,
+                                    label,
+                                });
+                            }
+                            KeyOutcome::Delete => {
+                                let Some(row) = menu.app.focused_row() else {
+                                    continue;
+                                };
+                                let (id, label) = (row.id.as_str().to_string(), row.label.clone());
+                                backend::restore();
+                                return Ok(Outcome::Delete {
+                                    provider: provider.clone(),
+                                    action_id: id,
+                                    label,
+                                });
+                            }
+                            KeyOutcome::Toggle => {
+                                let Some(row) = menu.app.focused_row() else {
+                                    continue;
+                                };
+                                let (id, label) = (row.id.as_str().to_string(), row.label.clone());
+                                backend::restore();
+                                return Ok(Outcome::Toggle {
+                                    provider: provider.clone(),
+                                    action_id: id,
+                                    label,
+                                });
+                            }
+                            KeyOutcome::ChooseTarget { row, target, title } => {
+                                backend::restore();
+                                return Ok(Outcome::Target {
+                                    provider: provider.clone(),
+                                    row: row.as_str().to_string(),
+                                    target: target.as_str().to_string(),
+                                    title,
+                                });
+                            }
+                            KeyOutcome::Quit(code) => {
+                                backend::restore();
+                                return Ok(Outcome::Quit { code });
+                            }
                         }
                     }
+                    Some(Ok(Event::Resize(_, _)
+                    | Event::FocusGained
+                    | Event::FocusLost
+                    | Event::Mouse(_)
+                    | Event::Paste(_))) => {}
+                    Some(Err(err)) => return Err(err).context("event stream failed"),
+                    None => break,
                 }
-                // Resize: the next frame re-sizes once (see `render`), and
-                // focus/mouse/paste events never affect the menu.
-                Event::Resize(_, _)
-                | Event::FocusGained
-                | Event::FocusLost
-                | Event::Mouse(_)
-                | Event::Paste(_) => {}
             }
-        } else {
-            menu.tick(loop_now(base, &mut step, seeded));
+            () = notify.notified() => {
+                menu.tick(loop_now(base, &mut step, seeded));
+            }
+            () = tokio::time::sleep(backend::poll_timeout()) => {
+                menu.tick(loop_now(base, &mut step, seeded));
+            }
         }
     }
-}
 
-/// Run the interactive menu until it selects, deletes, quits, or errors.
-///
-/// Thin wrapper over [`run_capture`]: it performs today's exact emit+exit
-/// mapping (`Chosen` prints one `ACTION:` line and exits `0`, `Delete`
-/// prints one `ACTION:DELETE` line and exits `0`, `Toggle` prints one
-/// `ACTION:TOGGLE` line and exits `0`, `Target` prints one `ACTION:TARGET`
-/// line and exits `0`, `Quit(code)` exits with `code` and prints nothing,
-/// `Cancelled` exits `130` and prints nothing). See the module docs for the
-/// frame/outcome contract. Diverges via [`std::process::exit`] on terminal
-/// outcomes (matching `main.rs` stub behavior); returns `Ok` only on TTY
-/// errors handled by the caller.
-///
-/// # Errors
-///
-/// Returns an error when the terminal cannot initialize, frames cannot
-/// draw, events cannot be polled/read, or the `ACTION:` line cannot be
-/// written.
-pub fn run(menu: Menu) -> Result<()> {
-    match run_capture(menu)? {
-        Outcome::Chosen {
-            provider,
-            action_id,
-            label,
-        } => {
-            backend::emit_action(&provider, &action_id, &label)?;
-            std::process::exit(backend::EXIT_OK);
-        }
-        Outcome::Delete {
-            provider,
-            action_id,
-            label,
-        } => {
-            backend::emit_delete(&provider, &action_id, &label)?;
-            std::process::exit(backend::EXIT_OK);
-        }
-        Outcome::Toggle {
-            provider,
-            action_id,
-            label,
-        } => {
-            backend::emit_toggle(&provider, &action_id, &label)?;
-            std::process::exit(backend::EXIT_OK);
-        }
-        Outcome::Target {
-            provider,
-            row,
-            target,
-            title,
-        } => {
-            backend::emit_target(&provider, &row, &target, &title)?;
-            std::process::exit(backend::EXIT_OK);
-        }
-        Outcome::Quit { code } => {
-            std::process::exit(code);
-        }
-        Outcome::Cancelled => {
-            std::process::exit(backend::EXIT_CANCELLED);
-        }
-    }
+    Ok(Outcome::Cancelled)
 }
 
 /// Loop clock: seeded fixed-step in `FLEX_TEST` mode, wall clock otherwise.

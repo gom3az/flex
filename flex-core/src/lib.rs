@@ -15,6 +15,7 @@ pub mod meter;
 pub mod preview;
 pub mod render;
 pub mod run;
+pub mod strings;
 pub mod theme;
 pub mod width;
 
@@ -355,9 +356,20 @@ pub struct TabState {
     pub confirm_pending: bool,
     /// Open target dropdown, if any (upstream `dropdown_state`).
     pub dropdown: Option<DropdownState>,
+    /// Memoized fuzzy filter results to avoid O(M*N) recomputes on every frame.
+    pub cached_hits: std::cell::RefCell<FilterCache>,
 }
 
+/// Composite cache key for fuzzy filter memoization.
+pub type FilterCacheKey = (filter::FilterMode, String, usize, usize, Option<RowId>);
+/// Memoized filter cache payload: `(cache_key, matching_indices)`.
+pub type FilterCache = Option<(FilterCacheKey, Vec<usize>)>;
+
 impl TabState {
+    /// Invalidate any cached filter hits.
+    pub fn invalidate_filter_cache(&self) {
+        *self.cached_hits.borrow_mut() = None;
+    }
     /// Whether the danger flow is currently armed.
     #[must_use]
     pub fn is_armed(&self) -> bool {
@@ -720,13 +732,28 @@ impl App {
         match self.active_tab() {
             None => Vec::new(),
             Some(tab) => {
-                let hits = match self.filter_mode {
-                    filter::FilterMode::Spec => filter::rank_all(&tab.state.filter, &tab.rows),
-                    filter::FilterMode::Legacy => {
-                        filter::rank_all_legacy(&tab.state.filter, &tab.rows)
+                let filter = &tab.state.filter;
+                let mode = self.filter_mode;
+                let key = (
+                    mode,
+                    filter.clone(),
+                    tab.rows.as_ptr() as usize,
+                    tab.rows.len(),
+                    tab.rows.first().map(|r| r.id.clone()),
+                );
+                let mut cache = tab.state.cached_hits.borrow_mut();
+                if let Some((old_key, old_hits)) = cache.as_ref() {
+                    if *old_key == key {
+                        return old_hits.clone();
                     }
+                }
+                let hits = match mode {
+                    filter::FilterMode::Spec => filter::rank_all(filter, &tab.rows),
+                    filter::FilterMode::Legacy => filter::rank_all_legacy(filter, &tab.rows),
                 };
-                hits.into_iter().map(|hit| hit.index).collect()
+                let result: Vec<usize> = hits.into_iter().map(|hit| hit.index).collect();
+                *cache = Some((key, result.clone()));
+                result
             }
         }
     }
@@ -887,6 +914,9 @@ pub struct Menu {
     /// ([`preview::pane`]). Set by providers whose rows carry
     /// [`Row::preview_image`] and only when the terminal can draw one.
     pub preview: bool,
+    /// Asynchronous wakeup handle to awaken the event loop instantly when
+    /// background tasks complete.
+    pub notify: std::sync::Arc<tokio::sync::Notify>,
     /// Per-tick refresh hook; private so it can only be set through
     /// [`Menu::on_tick`].
     on_tick: Option<TickHook>,
@@ -907,6 +937,7 @@ impl Default for Menu {
             peaks: Peaks::default(),
             max_volume_percent: DEFAULT_MAX_VOLUME_PERCENT,
             preview: false,
+            notify: std::sync::Arc::new(tokio::sync::Notify::new()),
             on_tick: None,
         }
     }
@@ -931,6 +962,17 @@ impl Menu {
     pub fn on_tick(mut self, hook: TickHook) -> Self {
         self.on_tick = Some(hook);
         self
+    }
+
+    /// Clone the background wakeup notifier handle.
+    #[must_use]
+    pub fn notifier(&self) -> std::sync::Arc<tokio::sync::Notify> {
+        self.notify.clone()
+    }
+
+    /// Awaken the interactive event loop to redraw/tick immediately.
+    pub fn notify(&self) {
+        self.notify.notify_one();
     }
 
     /// Periodic tick; delegates to [`App::tick`] (never steals focus), then
