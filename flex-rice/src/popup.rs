@@ -186,15 +186,15 @@ fn spawn_detached(argv: &[String], path_env: &str) -> anyhow::Result<()> {
             }
         }
     };
-    retrying(|| {
-        std::process::Command::new(&bin)
-            .args(rest)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-    })
-    .context("popup: failed to spawn terminal")?;
+    let mut cmd = std::process::Command::new(&bin);
+    cmd.args(rest)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    // Reaped on a waiter thread (uniform with `spawn::spawn_and_reap`
+    // callers): the toggler is short-lived so init would collect the child
+    // anyway, but an explicit wait leaves no window for a stray zombie.
+    crate::spawn::spawn_and_reap(&mut cmd).context("popup: failed to spawn terminal")?;
     Ok(())
 }
 

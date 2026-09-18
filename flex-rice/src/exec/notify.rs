@@ -892,6 +892,19 @@ pub fn parse_hint_progress(val: &zbus::zvariant::Value) -> Option<f32> {
 
 /// Play a subtle notification audio cue based on urgency, respecting DND mode.
 pub fn play_notification_sound(urgency: Urgency, dnd_active: bool) {
+    play_notification_sound_with_path(urgency, dnd_active, None);
+}
+
+/// [`play_notification_sound`] with an explicit `PATH` override (test seam).
+///
+/// `None` inherits the ambient `PATH`; `Some` shadows it, so tests exercise
+/// the player-fallback spawn against stub players without touching the
+/// process env or any live audio tool.
+pub fn play_notification_sound_with_path(
+    urgency: Urgency,
+    dnd_active: bool,
+    path_override: Option<&str>,
+) {
     if dnd_active {
         return;
     }
@@ -923,11 +936,18 @@ pub fn play_notification_sound(urgency: Urgency, dnd_active: bool) {
     ];
 
     for &(prog, args) in players {
-        let mut cmd = std::process::Command::new(prog);
+        let bin = match path_override {
+            Some(path_env) => match crate::tools::resolve_tool(prog, path_env) {
+                Some(path) => path,
+                None => continue,
+            },
+            None => PathBuf::from(prog),
+        };
+        let mut cmd = Command::new(&bin);
         cmd.args(args)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
         // Reaped on a waiter thread: dropping the `Child` here would leak a
         // zombie for as long as the (long-lived) daemon process runs.
         if crate::spawn::spawn_and_reap(&mut cmd).is_ok() {
@@ -1354,6 +1374,15 @@ pub fn format_toast_card(
 /// Launches `kitty --class flex-notify-toast -o font_size=11 -o remember_window_size=no
 /// -o initial_window_width=50c -o initial_window_height=6c -o window_padding_width=0 -o window_padding_height=0 -e flex-notify toast <id>` detached.
 pub fn spawn_toast(id: u32, state_path: Option<&Path>) {
+    spawn_toast_with_path(id, state_path, None);
+}
+
+/// [`spawn_toast`] with an explicit `PATH` override (test seam).
+///
+/// `None` inherits the ambient `PATH`; `Some` shadows it (including inside
+/// the `sh -c` body, via an exported `PATH`) so tests run stub `sh`/`kitty`
+/// scripts without touching the process env or opening windows.
+pub fn spawn_toast_with_path(id: u32, state_path: Option<&Path>, path_override: Option<&str>) {
     let state_arg =
         state_path.map_or_else(String::new, |p| format!(" --state-file '{}'", p.display()));
     let cmd = format!(
@@ -1366,12 +1395,22 @@ pub fn spawn_toast(id: u32, state_path: Option<&Path>) {
     // PTY — not /dev/null.  Redirecting them here would break the ANSI render
     // (stdout→null = blank window) and the keypress poll (stdin→null = stty
     // fails + instant-exit for Normal or spin-forever for Critical).
-    let mut toast = std::process::Command::new("sh");
+    let sh_bin = match path_override {
+        Some(path_env) => match crate::tools::resolve_tool("sh", path_env) {
+            Some(path) => path,
+            None => return,
+        },
+        None => PathBuf::from("sh"),
+    };
+    let mut toast = Command::new(&sh_bin);
     toast
         .args(["-c", &format!("{cmd} &")])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if let Some(path_env) = path_override {
+        toast.env("PATH", path_env);
+    }
     // Reaped on a waiter thread: the intermediate `sh` exits immediately and
     // would otherwise linger as a zombie under the long-lived daemon.
     let _ = crate::spawn::spawn_and_reap(&mut toast);

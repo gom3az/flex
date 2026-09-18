@@ -481,12 +481,14 @@ fn daemon_spawns_leave_no_zombies() {
         std::fs::write(&stub, "#!/bin/sh\nexit 0\n").expect("stub");
         std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     }
-    // Narrow, immediately-restored `PATH` prepend: the stub names (`pw-play`,
-    // `kitty`) collide with no other test's stub tools, and every other suite
-    // prepends its own stub dir (which keeps precedence), so the blast radius
-    // of this window is limited to ambient lookups of those two names.
-    let old_path = std::env::var("PATH").unwrap_or_default();
-    std::env::set_var("PATH", format!("{}:{old_path}", dir.display()));
+    // Seam-scoped `PATH`: the stub dir shadows the ambient `PATH` (so `sh`
+    // still resolves, while `pw-play`/`kitty` hit the exit-0 stubs). Nothing
+    // touches the process environment, so concurrent tests are unaffected.
+    let stub_path = format!(
+        "{}:{}",
+        dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
 
     let baseline = own_zombie_children();
     // Sound path needs a real sound file (hardcoded freedesktop paths); skip
@@ -500,14 +502,13 @@ fn daemon_spawns_leave_no_zombies() {
     .iter()
     .any(|p| std::path::Path::new(p).exists());
     if sound_file_present {
-        notify::play_notification_sound(Urgency::Normal, false);
+        notify::play_notification_sound_with_path(Urgency::Normal, false, Some(&stub_path));
     } else {
         eprintln!("no freedesktop sound file; skipping sound leg");
     }
     // `kitty` is stubbed above, so no window opens; the intermediate `sh`
     // still runs and must be reaped.
-    notify::spawn_toast(4242, None);
-    std::env::set_var("PATH", old_path);
+    notify::spawn_toast_with_path(4242, None, Some(&stub_path));
 
     for _ in 0..200 {
         if own_zombie_children() <= baseline {
