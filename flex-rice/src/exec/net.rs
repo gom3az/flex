@@ -22,52 +22,35 @@ pub const STAT_PATH_ENV: &str = "FLEX_NET_STAT_PATH";
 /// Fallback base directory for stat storage.
 const DEFAULT_STAT_FILE: &str = "flex-net-speed.stat";
 
-/// 1 Kilobyte in bytes (1024).
 pub const KB: f64 = 1024.0;
 
-/// 1 Megabyte in bytes (1024 * 1024 = 1048576).
 pub const MB: f64 = 1_048_576.0;
 
-/// 1 Gigabyte in bytes (1024 * 1024 * 1024 = 1073741824).
 pub const GB: f64 = 1_073_741_824.0;
 
 /// Information about an active process consuming network bandwidth.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProcessBandwidth {
-    /// Process ID.
     pub pid: u32,
-    /// Process name / command.
     pub comm: String,
-    /// Inbound rate in bytes per second.
     pub rx_rate: f64,
-    /// Outbound rate in bytes per second.
     pub tx_rate: f64,
-    /// Total rate in bytes per second (`rx_rate + tx_rate`).
     pub total_rate: f64,
-    /// Fractional share of total active process bandwidth (`0.0 ..= 1.0`).
     pub share: f32,
 }
 
 /// Information about a network interface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InterfaceInfo {
-    /// Interface name (e.g. `wlp15s0`, `enp14s0`, `lo`).
     pub name: String,
-    /// Operational state (`up`, `down`, `unknown`).
     pub operstate: String,
-    /// Whether this is the default route interface.
     pub is_default: bool,
-    /// Assigned IP address with CIDR mask (e.g. `192.168.1.108/24`).
     pub ip_cidr: Option<String>,
-    /// Default gateway IP (e.g. `192.168.1.1`).
     pub gateway: Option<String>,
-    /// Total received bytes in session.
     pub rx_bytes: u64,
-    /// Total transmitted bytes in session.
     pub tx_bytes: u64,
 }
 
-/// Process I/O sample: `(timestamp_millis, rchar, wchar)`.
 #[derive(Debug, Clone, Copy)]
 struct ProcIoSample {
     ts_ms: u128,
@@ -75,7 +58,6 @@ struct ProcIoSample {
     wchar: u64,
 }
 
-/// Fallback base directory for process stat storage.
 const DEFAULT_PROC_STAT_FILE: &str = "flex-net-proc.stat";
 
 /// Static process I/O sample cache across ticks.

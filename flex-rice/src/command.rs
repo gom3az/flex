@@ -6,15 +6,11 @@ use crate::spawn;
 /// Abstract process execution to allow for pure in-memory testing.
 #[allow(clippy::missing_errors_doc)]
 pub trait CommandRunner {
-    /// Execute and return the output.
     fn output(&self, cmd: &mut Command) -> io::Result<Output>;
-    /// Execute and return the status.
     fn status(&self, cmd: &mut Command) -> io::Result<ExitStatus>;
-    /// Spawn the process.
     fn spawn(&self, cmd: &mut Command) -> io::Result<Child>;
 }
 
-/// The production runner that implements transient-ETXTBSY retry logic.
 pub struct OsCommandRunner;
 
 impl CommandRunner for OsCommandRunner {

@@ -36,7 +36,6 @@ pub enum TerminalKind {
     Kitty,
 }
 
-/// The basename matched for [`TerminalKind::Kitty`] in [`parse_kind`].
 const KITTY_BASENAME: &str = "kitty";
 
 /// Basename of a `TERMINAL` value (`/usr/bin/kitty` → `kitty`).

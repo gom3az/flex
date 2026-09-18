@@ -152,12 +152,10 @@ pub fn notify_cmd() -> String {
         .unwrap_or_else(|| String::from("notify-send"))
 }
 
-/// Ambient `PATH` or empty string.
 fn ambient_path() -> String {
     std::env::var("PATH").unwrap_or_default()
 }
 
-/// Resolve `name` against `path_env`.
 fn resolve_tool(name: &str, path_env: &str) -> Option<PathBuf> {
     if name.contains('/') {
         let p = PathBuf::from(name);
@@ -171,7 +169,6 @@ fn resolve_tool(name: &str, path_env: &str) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
-/// Run a command quietly, swallowing failures.
 fn tool_quiet(path_env: &str, name: &str, args: &[&str]) -> bool {
     let Some(bin) = resolve_tool(name, path_env) else {
         return false;
@@ -185,7 +182,6 @@ fn tool_quiet(path_env: &str, name: &str, args: &[&str]) -> bool {
         .is_ok_and(|status| status.success())
 }
 
-/// Capture standard output from a command.
 fn tool_captured(path_env: &str, name: &str, args: &[&str]) -> Option<String> {
     let bin = resolve_tool(name, path_env)?;
     let output = Command::new(&bin)
@@ -197,7 +193,6 @@ fn tool_captured(path_env: &str, name: &str, args: &[&str]) -> Option<String> {
     Some(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-/// Execute a single step.
 #[allow(dead_code)]
 #[must_use]
 pub fn execute_step(step: &Step, path_env: &str) -> bool {

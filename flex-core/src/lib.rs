@@ -75,7 +75,6 @@ pub struct Target {
 }
 
 impl Target {
-    /// Build a target.
     #[must_use]
     pub fn new(id: RowId, title: impl Into<String>) -> Self {
         Self {
@@ -366,7 +365,6 @@ pub type FilterCacheKey = (filter::FilterMode, String, usize, usize, Option<RowI
 pub type FilterCache = Option<(FilterCacheKey, Vec<usize>)>;
 
 impl TabState {
-    /// Invalidate any cached filter hits.
     pub fn invalidate_filter_cache(&self) {
         *self.cached_hits.borrow_mut() = None;
     }
@@ -376,7 +374,6 @@ impl TabState {
         self.armed_at.is_some()
     }
 
-    /// Arm the danger flow at `now`.
     pub fn arm(&mut self, now: Instant) {
         self.armed_at = Some(now);
     }
@@ -407,7 +404,6 @@ pub struct Tab {
 }
 
 impl Tab {
-    /// Build an empty tab with the given name.
     #[must_use]
     pub fn empty(name: impl Into<String>) -> Self {
         Self {
@@ -420,7 +416,6 @@ impl Tab {
         }
     }
 
-    /// Build a tab with rows.
     #[must_use]
     pub fn with_rows(name: impl Into<String>, rows: Vec<Row>) -> Self {
         Self {
@@ -469,7 +464,6 @@ impl Gauge {
         }
     }
 
-    /// Flip the mute toggle.
     pub fn toggle_mute(&mut self) {
         self.muted = !self.muted;
     }
@@ -944,7 +938,6 @@ impl Default for Menu {
 }
 
 impl Menu {
-    /// Create a menu for `provider` with the given tabs.
     #[must_use]
     pub fn new(provider: impl Into<String>, tabs: Vec<Tab>) -> Self {
         Self {
@@ -964,7 +957,6 @@ impl Menu {
         self
     }
 
-    /// Clone the background wakeup notifier handle.
     #[must_use]
     pub fn notifier(&self) -> std::sync::Arc<tokio::sync::Notify> {
         self.notify.clone()

@@ -15,16 +15,12 @@ use crate::providers;
 /// Provider name for the `ACTION:` line.
 pub const PROVIDER: &str = "net";
 
-/// Tab 1 title: Top bandwidth consumers.
 pub const TAB_BANDWIDTH: &str = "Bandwidth";
 
-/// Tab 2 title: Network interfaces.
 pub const TAB_INTERFACES: &str = "Interfaces";
 
-/// Tab 3 title: Speedtest benchmark.
 pub const TAB_SPEEDTEST: &str = "Speedtest";
 
-/// Action ID for triggering the speedtest benchmark.
 pub const SPEEDTEST_RUN_ID: &str = "speedtest:run";
 
 /// Build the `Bandwidth` tab: lists active processes sorted by bandwidth consumption.

@@ -19,56 +19,39 @@ use crate::exec::net::{format_bytes, format_speed, MB};
 /// Environment variable to override the speedtest stat file path (test seam).
 pub const SPEEDTEST_STAT_PATH_ENV: &str = "FLEX_NET_SPEEDTEST_STAT_PATH";
 
-/// Fallback base filename for speedtest stat storage.
 const DEFAULT_STAT_FILE: &str = "flex-net-speedtest.stat";
 
-/// Default target server description.
 pub const DEFAULT_TARGET_SERVER: &str = "Cloudflare CDN (speed.cloudflare.com)";
 
-/// Default ping target host.
 pub const DEFAULT_PING_HOST: &str = "speed.cloudflare.com";
 
-/// Default ping target port.
 pub const DEFAULT_PING_PORT: u16 = 80;
 
-/// Number of TCP handshake probes for latency & jitter.
 pub const PING_PROBES: usize = 10;
 
-/// Number of bytes to download during benchmark (50 MB).
 pub const DOWNLOAD_TARGET_BYTES: u64 = 50_000_000;
 
-/// Default download endpoint (50 MB payload).
 pub const DEFAULT_DOWNLOAD_URL: &str = "https://speed.cloudflare.com/__down?bytes=50000000";
 
-/// Default upload endpoint.
 pub const DEFAULT_UPLOAD_URL: &str = "https://speed.cloudflare.com/__up";
 
-/// Number of bytes to upload during benchmark (20 MB).
 pub const UPLOAD_TARGET_BYTES: u64 = 20_000_000;
 
-/// Reference speed used to normalize volume bars (100 MB/s).
 pub const REFERENCE_MAX_SPEED_BPS: f64 = 100.0 * MB;
 
 /// Benchmark execution phase state machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SpeedtestPhase {
-    /// No benchmark currently running; ready to start.
     #[default]
     Idle,
-    /// Measuring TCP round-trip latency & jitter.
     TestingPing,
-    /// Measuring streaming download throughput.
     TestingDownload,
-    /// Measuring streaming upload throughput.
     TestingUpload,
-    /// Benchmark completed successfully.
     Complete,
-    /// Benchmark encountered an error.
     Failed,
 }
 
 impl SpeedtestPhase {
-    /// Human-readable description of current phase.
     #[must_use]
     pub const fn description(self) -> &'static str {
         match self {
@@ -81,7 +64,6 @@ impl SpeedtestPhase {
         }
     }
 
-    /// Whether a benchmark is actively running.
     #[must_use]
     pub const fn is_running(self) -> bool {
         matches!(

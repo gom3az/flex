@@ -95,9 +95,9 @@ pub fn render_stereo(
     let [meter_left, meter_live, meter_right] = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Fill(2),   // meter_left
-            Constraint::Length(2), // meter_live
-            Constraint::Fill(2),   // meter_right
+            Constraint::Fill(2),
+            Constraint::Length(2),
+            Constraint::Fill(2),
         ])
         .spacing(1)
         .areas(meter_area);
@@ -159,8 +159,8 @@ pub fn render_mono(
     let [meter_live, meter_mono] = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Length(1), // meter_live
-            Constraint::Fill(2),   // meter_mono
+            Constraint::Length(1),
+            Constraint::Fill(2),
         ])
         .spacing(1)
         .areas(meter_area);

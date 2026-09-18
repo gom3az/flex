@@ -13,12 +13,12 @@ Both halves of flex live in this repo as workspace members:
 | Crate | Where it lives | Publishable |
 |---|---|---|
 | `flex-core` | This repo, `flex-core/`: the engine — menu/list rendering, fuzzy filtering, key handling, the design system, kitty-graphics previews. No machine-specific paths. | Yes |
-| `flex-rice` | This repo, `flex-rice/`: the 13 providers, their executors (`exec/`), the `flex` dispatcher, the `flex-<provider>` binaries and the `flex-record` helper. Reads `~/.config/themes`, `hyprpaper.conf`, `~/.cache/cliphist`, `/proc`, PipeWire (`wpctl`), NetworkManager (`nmcli`), BlueZ (`bluetoothctl`), MPRIS players, and FreeDesktop D-Bus notifications. | No (`publish = false`) |
+| `flex-rice` | This repo, `flex-rice/`: the providers, their executors (`exec/`), the `flex` dispatcher, the `flex-<provider>` binaries and the `flex-record` helper. Reads `~/.config/themes`, `hyprpaper.conf`, `~/.cache/cliphist`, `/proc`, PipeWire (`wpctl`), NetworkManager (`nmcli`), BlueZ (`bluetoothctl`), MPRIS players, and FreeDesktop D-Bus notifications. | No (`publish = false`) |
 
 Dependencies run one way (`flex-rice` → `flex-core`). The engine's only former
 reach into providers is now a seam: `Menu::on_tick` takes a `TickHook`, and
 `flex-rice` supplies the one that refreshes `center` gauges, picks up a finished
-`wifi` scan, polls `proc`/`net`/`bt`/`mixer`, and updates `notify` live items —
+`wifi` scan, polls `proc`/`net`/`bt`, and updates `notify` live items —
 build menus in this repo with `flex_rice::menu(…)`, which installs it.
 
 ```sh
@@ -34,13 +34,14 @@ see `Docs/project_structure.md` → "Working on the engine".
 
 ## Entry points
 
-Fifteen binaries are built from `flex-rice`: the `flex` dispatcher, fourteen
-per-provider binaries, and the `flex-record` helper.
+Binaries built from `flex-rice`: the `flex` dispatcher, per-provider binaries,
+and the `flex-record` helper.
 
 | Binary | Provider | What it does |
 |---|---|---|
 | `flex` | dispatcher | `flex popup …`, `flex <provider> [verb] [args…]` |
 | `flex-power` | power | Shutdown/reboot/logout menu: `hyprlock`, `systemctl suspend\|reboot\|poweroff`, `pkill -SIGTERM Hyprland` |
+| `flex-profile` | profile | Power-profile menu |
 | `flex-launch` | launch | Application launcher: scans `.desktop` entries and detaches the chosen app with `setsid -f` (`$TERMINAL -e` for `Terminal=true`) |
 | `flex-shot` | shot | Screenshot/recording flow: `slurp`, `grim`, `wl-copy`, `notify-send`, or the `flex-record` helper (`RECORDING_START` overrides) |
 | `flex-theme` | theme | Theme switcher: scans `~/.config/themes/available` and activates the selection in-process; `list`/`current`/`activate`/`delete` verbs (`$THEME_SWITCHER` overrides with `<switcher> activate <name>`) |
@@ -85,35 +86,6 @@ The executors resolve row ids in-process via the library resolver functions
 (`flex_rice::providers::{clip,wallpaper,launch,theme_}`), so no lookup is a
 separate CLI step.
 
-## `--print-action` probe
-
-`--print-action` on a provider binary runs the interactive TUI, prints the
-selected `ACTION:` line to stdout, and exits **without executing** the row's
-side effect — a dry-run probe of the real binary's row→action mapping without
-a pty.
-
-## Exit codes
-
-- `0` — the action executed (or a probe printed its line)
-- `130` — the user cancelled (`Esc`/`q`), or an empty `clip`/`wallpaper` store
-- `1` — an error
-
-All diagnostics go to **stderr**. `flex: error:` is printed exactly once, by
-`flex_rice::runner::fail`; messages below it carry no `flex:` prefix of their
-own (B-022/B-027).
-
-## Zero bash, not zero exec
-
-There is no shell in the flex call path: the binaries select a row and execute
-it in Rust. Two deliberate **subprocess passthroughs** remain, forced by
-`unsafe_code = "deny"` (no libc `setsid`/`termios`):
-
-- `setsid -f` to detach a session (launching an app, spawning the `shot`
-  capture worker);
-- `stty -echo` around the secured-Wi-Fi password prompt.
-
-These are direct `Command` spawns of the named tools, not shell invocations.
-
 ## Env seams
 
 | Variable | Provider | Purpose |
@@ -154,8 +126,8 @@ terminal window directly.
 
 ## `setup.sh`
 
-`setup.sh` symlinks the fifteen release binaries from `target/release/` into
-`~/.local/bin`; `setup.sh --check` is the gate that all fifteen resolve to
+`setup.sh` symlinks the release binaries from `target/release/` into
+`~/.local/bin`; `setup.sh --check` is the gate that they resolve to
 executables.
 
 ## Notification Daemon (`flex-notify`)
@@ -169,18 +141,3 @@ executables.
 systemctl --user daemon-reload
 systemctl --user enable --now flex-notify.service
 ```
-
-## Image previews (`wallpaper`)
-
-`flex wallpaper` is the only provider with a preview pane. `render` reserves
-the right 45 % of the list area (dropped under 40 columns); `run` paints the
-focused row's `Row::preview_image` there with kitty graphics protocol escapes
-after every frame (`flex-core/src/preview.rs`) — no fzf, no icat, no image crate. PNG
-sources are transmitted straight from disk (`t=f`); other formats are
-converted once into `$XDG_CACHE_HOME/flex/previews` with ImageMagick
-(`FLEX_PREVIEW_CONVERT`) and the PNG is reused afterwards. kitty stretches an
-image to fill whatever `c`×`r` box it is given, so flex computes an
-aspect-correct box from the PNG's `IHDR` dimensions and the terminal's cell
-size (`TIOCGWINSZ`, via crossterm) and centres the image in the pane. Without a
-kitty-compatible terminal (`FLEX_PREVIEW=1` overrides the detection) or with a
-failing converter, the pane simply stays blank and the list still works.

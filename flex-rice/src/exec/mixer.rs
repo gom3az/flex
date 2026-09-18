@@ -14,18 +14,14 @@ use crate::popup;
 use crate::spawn::RetryExec as _;
 use crate::terminal;
 
-/// The window class matched for the floating mixer.
 pub const CLASS: &str = "kitty-wiremix";
 
-/// The command executed inside the floating window.
 const MIXER_BIN: &str = "wiremix";
 
-/// The ambient `PATH`, empty when unset.
 fn ambient_path() -> String {
     std::env::var("PATH").unwrap_or_default()
 }
 
-/// Resolve `name` against `path_env` (`:`-separated, shell-style).
 fn resolve_tool(name: &str, path_env: &str) -> Option<PathBuf> {
     path_env
         .split(':')
@@ -79,7 +75,6 @@ fn close(path_env: &str) -> Result<()> {
     Ok(())
 }
 
-/// Spawn the mixer window detached.
 fn spawn(path_env: &str) -> Result<()> {
     let kind = terminal::detect();
     let cmd = vec![

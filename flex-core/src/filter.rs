@@ -229,7 +229,6 @@ pub fn rank_all_legacy(needle: &str, rows: &[Row]) -> Vec<RankedHit> {
     rank_all_with(&LegacyRanker, needle, rows)
 }
 
-/// Lowercase a string into chars (Unicode default case folding).
 fn lowercase_chars(text: &str) -> Vec<char> {
     text.to_lowercase().chars().collect()
 }
