@@ -69,11 +69,7 @@ pub const TAB_SETTINGS: &str = "Settings";
 /// No-op row id: the shared [`crate::providers::NOOP_ID`] (bash `noop) :`
 /// arm — the matching wrapper exits 0, no effect).
 pub use super::NOOP_ID;
-/// Offline placeholder label (Q7 dim offline; see `render::OFFLINE_STATE`).
-pub const OFFLINE_LABEL: &str = "— offline";
-/// Parenthetical shown when a Wi-Fi scan returns nothing (bash-exact;
-/// shared with the [`wifi`](super::wifi) picker).
-pub const NO_NETWORKS_LABEL: &str = "(No Wi-Fi networks)";
+pub use flex_core::strings::{NO_NETWORKS_LABEL, OFFLINE_LABEL};
 /// Volume gauge row id (stable across online/offline tick rewrites).
 pub const VOL_ID: &str = "vol";
 /// Brightness gauge row id (stable across online/offline tick rewrites).
@@ -721,17 +717,28 @@ pub fn settings_tab() -> Tab {
 
 /// Build the full 7-tab `center` menu (bash `flex_add_tab` order).
 #[must_use]
-pub fn center_menu() -> Menu {
+#[allow(clippy::missing_panics_doc)]
+pub async fn center_menu() -> Menu {
+    let (launchers, networks, bluetooth, power, profiles, themes, settings) = tokio::join!(
+        tokio::task::spawn_blocking(launchers_tab),
+        tokio::task::spawn_blocking(networks_tab),
+        tokio::task::spawn_blocking(bluetooth_tab),
+        tokio::task::spawn_blocking(power_tab),
+        tokio::task::spawn_blocking(profiles_tab),
+        tokio::task::spawn_blocking(themes_tab),
+        tokio::task::spawn_blocking(settings_tab),
+    );
+
     crate::menu(
         PROVIDER,
         vec![
-            launchers_tab(),
-            networks_tab(),
-            bluetooth_tab(),
-            power_tab(),
-            profiles_tab(),
-            themes_tab(),
-            settings_tab(),
+            launchers.unwrap(),
+            networks.unwrap(),
+            bluetooth.unwrap(),
+            power.unwrap(),
+            profiles.unwrap(),
+            themes.unwrap(),
+            settings.unwrap(),
         ],
     )
 }

@@ -114,9 +114,11 @@ fn default_style() -> StyleOptions {
 
 /// The native menu contains rows and arms the danger confirm on
 /// the first Enter, selecting (SIGTERM) on the mature second.
-#[test]
-fn proc_menu_confirms_the_selected_row() {
-    let mut menu = build_menu(Provider::Proc, default_style()).expect("proc menu");
+#[tokio::test]
+async fn proc_menu_confirms_the_selected_row() {
+    let mut menu = build_menu(Provider::Proc, default_style())
+        .await
+        .expect("proc menu");
     let rows = &menu.app.active_tab().expect("tab").rows;
     assert!(!rows.is_empty(), "proc menu has rows");
     let (index, row) = rows
@@ -147,9 +149,11 @@ fn proc_menu_confirms_the_selected_row() {
 }
 
 /// The label carries the comm/pid/service, so the engine's filter matches digits/chars.
-#[test]
-fn proc_filter_matches_labels() {
-    let mut menu = build_menu(Provider::Proc, default_style()).expect("proc menu");
+#[tokio::test]
+async fn proc_filter_matches_labels() {
+    let mut menu = build_menu(Provider::Proc, default_style())
+        .await
+        .expect("proc menu");
     let rows = &menu.app.active_tab().expect("tab").rows;
     assert!(!rows.is_empty(), "proc menu has rows");
     let label = &rows[0].label;

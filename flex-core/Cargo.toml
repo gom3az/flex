@@ -11,9 +11,11 @@ categories = ["command-line-utilities"]
 
 [dependencies]
 anyhow.workspace = true
-crossterm.workspace = true
+crossterm = { workspace = true, features = ["event-stream"] }
+futures = "0.3.34"
 # Pinned: layout must match the wiremix-derived design system exactly.
 ratatui.workspace = true
+tokio = { version = "1.53.1", features = ["macros", "time", "sync"] }
 # Non-CJK widths: narrow ambiguous codepoints (no `cjk` feature). See `src/width.rs`.
 unicode-width.workspace = true
 

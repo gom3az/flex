@@ -11,7 +11,9 @@
 use flex_rice::exec::record;
 use flex_rice::runner;
 
-fn main() {
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
+    runner::init_logging();
     let args: Vec<String> = std::env::args().skip(1).collect();
     if let Err(err) = dispatch(&args) {
         runner::fail(&err);

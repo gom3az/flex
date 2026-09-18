@@ -9,7 +9,6 @@
 //! [`exec::wallpaper`]: flex_rice::exec::wallpaper
 
 use clap::{Parser, Subcommand};
-use flex_core::backend::EXIT_CANCELLED;
 use flex_core::Outcome;
 use flex_rice::exec::wallpaper;
 use flex_rice::runner::{self, GlobalStyle, Provider};
@@ -42,9 +41,11 @@ enum Op {
     },
 }
 
-fn main() {
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
+    runner::init_logging();
     // `flex: error:` is added once, in the runner, and nowhere else.
-    if let Err(err) = run() {
+    if let Err(err) = run().await {
         runner::fail(&err);
     }
 }
@@ -57,37 +58,32 @@ fn main() {
 /// Returns an error when the popup toggle or the select loop fails, the
 /// action id is unknown, or the wallpaper setter cannot run. The error
 /// carries no `flex:` prefix; `main` adds it via the runner.
-fn run() -> anyhow::Result<()> {
+async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     if let Some(Op::Set { path }) = cli.op {
         return wallpaper::set(&path, None);
     }
     let style = cli.style.options();
-    runner::popup_guard(Provider::Wallpaper)?;
-    if cli.print_action {
-        // Probe path: exercise the real row→action mapping, never execute.
-        return runner::run_select(Provider::Wallpaper, style);
-    }
-    let menu = runner::build_menu(Provider::Wallpaper, style)?;
-    match flex_core::run::run_capture(menu)? {
-        Outcome::Chosen { action_id, .. } => {
-            wallpaper::execute(&action_id, None)?;
-            Ok(())
-        }
-        Outcome::Delete { action_id, .. } => {
-            anyhow::bail!("wallpaper: unexpected delete outcome for '{action_id}'")
-        }
-        Outcome::Toggle { action_id, .. } => {
-            anyhow::bail!("wallpaper: unexpected toggle outcome for '{action_id}'")
-        }
-        Outcome::Target { row, .. } => {
-            anyhow::bail!("wallpaper: unexpected target outcome for '{row}'")
-        }
-        Outcome::Quit { code } => {
-            std::process::exit(code);
-        }
-        Outcome::Cancelled => {
-            std::process::exit(EXIT_CANCELLED);
-        }
-    }
+    runner::run_standard_cli(
+        Provider::Wallpaper,
+        style,
+        cli.print_action,
+        |outcome| match outcome {
+            Outcome::Chosen { action_id, .. } => {
+                wallpaper::execute(&action_id, None)?;
+                Ok(())
+            }
+            Outcome::Delete { action_id, .. } => {
+                anyhow::bail!("wallpaper: unexpected delete outcome for '{action_id}'")
+            }
+            Outcome::Toggle { action_id, .. } => {
+                anyhow::bail!("wallpaper: unexpected toggle outcome for '{action_id}'")
+            }
+            Outcome::Target { row, .. } => {
+                anyhow::bail!("wallpaper: unexpected target outcome for '{row}'")
+            }
+            _ => unreachable!(),
+        },
+    )
+    .await
 }

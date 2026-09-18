@@ -36,9 +36,11 @@ struct Cli {
     capture: Option<Vec<String>>,
 }
 
-fn main() {
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
+    runner::init_logging();
     // `flex: error:` is added once, in the runner, and nowhere else.
-    if let Err(err) = run() {
+    if let Err(err) = run().await {
         runner::fail(&err);
     }
 }
@@ -51,39 +53,34 @@ fn main() {
 /// the select loop fails, the action id is unknown, or the capture cannot be
 /// staged/detached. The error carries no `flex:` prefix; `main` adds it via
 /// the runner.
-fn run() -> anyhow::Result<()> {
+async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     if let Some(parts) = cli.capture {
         return run_capture_worker(parts);
     }
     let style = cli.style.options();
-    runner::popup_guard(Provider::Shot)?;
-    if cli.print_action {
-        // Probe path: exercise the real row→action mapping, never execute.
-        return runner::run_select(Provider::Shot, style);
-    }
-    let menu = runner::build_menu(Provider::Shot, style)?;
-    match flex_core::run::run_capture(menu)? {
-        Outcome::Chosen { action_id, .. } => {
-            shot::execute(&action_id, None)?;
-            Ok(())
-        }
-        Outcome::Delete { action_id, .. } => {
-            anyhow::bail!("shot: unexpected delete outcome for '{action_id}'")
-        }
-        Outcome::Toggle { action_id, .. } => {
-            anyhow::bail!("shot: unexpected toggle outcome for '{action_id}'")
-        }
-        Outcome::Target { row, .. } => {
-            anyhow::bail!("shot: unexpected target outcome for '{row}'")
-        }
-        Outcome::Quit { code } => {
-            std::process::exit(code);
-        }
-        Outcome::Cancelled => {
-            std::process::exit(EXIT_CANCELLED);
-        }
-    }
+    runner::run_standard_cli(
+        Provider::Shot,
+        style,
+        cli.print_action,
+        |outcome| match outcome {
+            Outcome::Chosen { action_id, .. } => {
+                shot::execute(&action_id, None)?;
+                Ok(())
+            }
+            Outcome::Delete { action_id, .. } => {
+                anyhow::bail!("shot: unexpected delete outcome for '{action_id}'")
+            }
+            Outcome::Toggle { action_id, .. } => {
+                anyhow::bail!("shot: unexpected toggle outcome for '{action_id}'")
+            }
+            Outcome::Target { row, .. } => {
+                anyhow::bail!("shot: unexpected target outcome for '{row}'")
+            }
+            _ => unreachable!(),
+        },
+    )
+    .await
 }
 
 /// Run one capture synchronously for the detached `--capture` worker.

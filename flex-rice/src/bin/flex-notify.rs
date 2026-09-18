@@ -161,8 +161,9 @@ fn run_toast(id: u32, state_path: Option<&std::path::Path>) {
     let _ = std::io::stdout().flush();
 }
 
-fn main() {
-    if let Err(err) = run() {
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
+    if let Err(err) = run().await {
         runner::fail(&err);
     }
 }
@@ -328,7 +329,7 @@ fn handle_op(op: NotifyOp, state_path: Option<&Path>) -> anyhow::Result<()> {
 }
 
 #[allow(clippy::too_many_lines)]
-fn run() -> anyhow::Result<()> {
+async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let state_path = cli.state_file.as_deref();
     let style = cli.style.options();
@@ -371,12 +372,12 @@ fn run() -> anyhow::Result<()> {
         runner::popup_guard(Provider::Notify)?;
 
         if cli.print_action {
-            return runner::run_select(Provider::Notify, style);
+            return runner::run_select(Provider::Notify, style).await;
         }
 
         loop {
-            let menu = runner::build_menu(Provider::Notify, style)?;
-            match flex_core::run::run_capture(menu)? {
+            let menu = runner::build_menu(Provider::Notify, style).await?;
+            match flex_core::run::run_capture(menu).await? {
                 Outcome::Chosen {
                     action_id, label, ..
                 }

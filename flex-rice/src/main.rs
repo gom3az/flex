@@ -208,6 +208,7 @@ fn wallpaper_verb_tail(op: Option<&WallpaperVerb>) -> Vec<String> {
 }
 
 fn main() {
+    runner::init_logging();
     // `flex: error:` is added once, in the runner, and nowhere else: errors
     // bubbling up must carry no `flex:` prefix of their own (B-022).
     if let Err(err) = run() {

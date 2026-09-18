@@ -16,7 +16,9 @@ use flex_rice::runner;
 )]
 struct Cli {}
 
-fn main() {
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
+    runner::init_logging();
     let _cli = Cli::parse();
     if let Err(err) = mixer::toggle(None) {
         runner::fail(&err);

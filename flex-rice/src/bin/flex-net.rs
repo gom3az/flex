@@ -47,13 +47,14 @@ struct Cli {
     print_action: bool,
 }
 
-fn main() {
-    if let Err(err) = run() {
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
+    if let Err(err) = run().await {
         runner::fail(&err);
     }
 }
 
-fn run() -> anyhow::Result<()> {
+async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     if cli.speedtest {
@@ -95,16 +96,16 @@ fn run() -> anyhow::Result<()> {
         runner::popup_guard(Provider::Net)?;
 
         if cli.print_action {
-            return runner::run_select(Provider::Net, style);
+            return runner::run_select(Provider::Net, style).await;
         }
 
         let mut active_tab = 0;
         loop {
-            let mut menu = runner::build_menu(Provider::Net, style)?;
+            let mut menu = runner::build_menu(Provider::Net, style).await?;
             if active_tab < menu.app.tabs.len() {
                 menu.app.switch_tab(active_tab);
             }
-            match flex_core::run::run_capture(menu)? {
+            match flex_core::run::run_capture(menu).await? {
                 Outcome::Chosen { action_id, .. } => {
                     if let Some(pid) = action_id.strip_prefix("proc:") {
                         net::execute(&format!("signal:{pid}:SIGTERM"))?;

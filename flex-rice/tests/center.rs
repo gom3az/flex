@@ -886,10 +886,10 @@ fn live_builders_honor_fixture_seams() {
     assert_eq!(settings.rows[1].label, "Brightness  50%  [█████░░░░░]");
 }
 
-#[test]
-fn center_menu_smoke_has_seven_tabs_without_panicking() {
+#[tokio::test]
+async fn center_menu_smoke_has_seven_tabs_without_panicking() {
     // Live system state (may be offline/empty here); only structure asserts.
-    let menu = center::center_menu();
+    let menu = center::center_menu().await;
     assert_eq!(menu.provider, center::PROVIDER);
     assert_eq!(menu.app.tabs.len(), 7);
     let names: Vec<&str> = menu.app.tabs.iter().map(|tab| tab.name.as_str()).collect();
