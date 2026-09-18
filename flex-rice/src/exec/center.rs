@@ -134,6 +134,12 @@ pub enum PowerKind {
     Off,
     /// `pwlogout` → `pkill -SIGTERM Hyprland`.
     Logout,
+    /// `pwprofile:performance` → `powerprofilesctl set performance`.
+    ProfilePerformance,
+    /// `pwprofile:balanced` → `powerprofilesctl set balanced`.
+    ProfileBalanced,
+    /// `pwprofile:power-saver` → `powerprofilesctl set power-saver`.
+    ProfilePowerSaver,
 }
 
 impl PowerKind {
@@ -146,6 +152,9 @@ impl PowerKind {
             "pwreboot" => Some(Self::Reboot),
             "pwoff" => Some(Self::Off),
             "pwlogout" => Some(Self::Logout),
+            "pwprofile:performance" | "pwprofile-performance" => Some(Self::ProfilePerformance),
+            "pwprofile:balanced" | "pwprofile-balanced" => Some(Self::ProfileBalanced),
+            "pwprofile:power-saver" | "pwprofile-power-saver" => Some(Self::ProfilePowerSaver),
             _ => None,
         }
     }
@@ -159,6 +168,9 @@ impl PowerKind {
             Self::Reboot => "pwreboot",
             Self::Off => "pwoff",
             Self::Logout => "pwlogout",
+            Self::ProfilePerformance => "pwprofile:performance",
+            Self::ProfileBalanced => "pwprofile:balanced",
+            Self::ProfilePowerSaver => "pwprofile:power-saver",
         }
     }
 }
@@ -531,6 +543,9 @@ pub fn describe(step: &Step) -> String {
             PowerKind::Reboot => String::from("systemctl reboot"),
             PowerKind::Off => String::from("systemctl poweroff"),
             PowerKind::Logout => String::from("pkill -SIGTERM Hyprland"),
+            PowerKind::ProfilePerformance => String::from("powerprofilesctl set performance"),
+            PowerKind::ProfileBalanced => String::from("powerprofilesctl set balanced"),
+            PowerKind::ProfilePowerSaver => String::from("powerprofilesctl set power-saver"),
         },
         Step::ThemeActivate { switcher, name } => match switcher {
             Some(switcher) => format!("{switcher} activate {name}"),
@@ -976,6 +991,7 @@ pub fn execute_with(
 ///
 /// When a loud tool (launch `setsid`, power tools, theme switcher) is
 /// missing or exits non-zero. Messages carry no `flex:` prefix.
+#[allow(clippy::too_many_lines)]
 fn run_step(
     path_env: &str,
     step: Step,
@@ -1060,12 +1076,49 @@ fn run_step(
         } => {
             run_launch_step(path_env, planned, action_id, terminal, &program, &args)?;
         }
-        Step::Power { kind } => {
-            let (name, args) = power_argv(kind);
-            if !tool(path_env, name, &args)? {
-                anyhow::bail!("center: {} failed", describe(&Step::Power { kind }));
+        Step::Power { kind } => match kind {
+            PowerKind::ProfilePerformance
+            | PowerKind::ProfileBalanced
+            | PowerKind::ProfilePowerSaver => {
+                let profile = match kind {
+                    PowerKind::ProfilePerformance => "performance",
+                    PowerKind::ProfilePowerSaver => "power-saver",
+                    _ => "balanced",
+                };
+                crate::providers::profile::save_active_profile(profile);
+                let tuned_profile = match profile {
+                    "performance" => "throughput-performance",
+                    "power-saver" => "powersave",
+                    _ => "balanced",
+                };
+                let script = format!(
+                    "powerprofilesctl set {profile} 2>/dev/null || tuned-adm profile {tuned_profile}"
+                );
+                if let Some(setsid) = resolve_tool("setsid", path_env) {
+                    let _ = Command::new(setsid)
+                        .args(["-f", "sh", "-c", &script])
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status_retrying();
+                } else {
+                    let _ = Command::new("sh")
+                        .arg("-c")
+                        .arg(&script)
+                        .env("PATH", path_env)
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .spawn();
+                }
             }
-        }
+            _ => {
+                let (name, args) = power_argv(kind);
+                if !tool(path_env, name, &args)? {
+                    anyhow::bail!("center: {} failed", describe(&Step::Power { kind }));
+                }
+            }
+        },
         Step::ThemeActivate { switcher, name } => match switcher {
             Some(switcher) => {
                 let args = vec![String::from("activate"), name.clone()];
@@ -1132,6 +1185,18 @@ fn power_argv(kind: PowerKind) -> (&'static str, Vec<String>) {
         PowerKind::Logout => (
             "pkill",
             vec![String::from("-SIGTERM"), String::from("Hyprland")],
+        ),
+        PowerKind::ProfilePerformance => (
+            "powerprofilesctl",
+            vec![String::from("set"), String::from("performance")],
+        ),
+        PowerKind::ProfileBalanced => (
+            "powerprofilesctl",
+            vec![String::from("set"), String::from("balanced")],
+        ),
+        PowerKind::ProfilePowerSaver => (
+            "powerprofilesctl",
+            vec![String::from("set"), String::from("power-saver")],
         ),
     }
 }

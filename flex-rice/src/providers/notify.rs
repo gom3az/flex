@@ -9,6 +9,8 @@
 //! - Smart entity extractors (1-click copy OTP, URLs, hex colors)
 //! - Per-app mute rules and Focus/DND timers
 
+use std::collections::HashSet;
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use flex_core::{Menu, Row, RowId, Tab, Target};
@@ -16,6 +18,35 @@ use flex_core::{Menu, Row, RowId, Tab, Target};
 use crate::exec::notify::{
     self, DndState, ExtractedEntity, NotificationItem, NotifyState, Urgency,
 };
+
+/// Thread expansion state tracking.
+fn expanded_threads() -> &'static Mutex<HashSet<String>> {
+    static SET: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    SET.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// Toggle expanded state for an app thread.
+pub fn toggle_thread_expanded(app: &str) {
+    let mut guard = match expanded_threads().lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    if guard.contains(app) {
+        guard.remove(app);
+    } else {
+        guard.insert(app.to_string());
+    }
+}
+
+/// Check if an app thread is expanded.
+#[must_use]
+pub fn is_thread_expanded(app: &str) -> bool {
+    let guard = match expanded_threads().lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    guard.contains(app)
+}
 
 /// The provider name matching `flex notify` and `flex-notify`.
 pub const PROVIDER: &str = "notify";
@@ -178,6 +209,187 @@ fn notification_row_from(item: &NotificationItem, now: u64, _is_child: bool) -> 
         row.volume = Some(prog.clamp(0.0, 1.0));
     }
 
+    row
+}
+
+/// Helper to construct a grouped thread parent row showing the latest notification's preview,
+/// with an expansion indicator (`▶` / `▼`) and thread management targets.
+#[allow(clippy::too_many_lines)]
+fn grouped_parent_row_from(
+    app_name: &str,
+    items: &[&NotificationItem],
+    now: u64,
+    expanded: bool,
+) -> Row {
+    let latest = items[0];
+    let rel_time = notify::format_relative_time(latest.timestamp, now);
+    let entities = notify::extract_entities(&format!("{} {}", latest.summary, latest.body));
+
+    let mut targets = Vec::new();
+
+    // 1. Thread expansion target first
+    let toggle_title = if expanded {
+        String::from("Collapse Thread")
+    } else {
+        format!("Expand Thread ({} earlier)", items.len() - 1)
+    };
+    targets.push(Target::new(
+        RowId::new(format!("toggle_thread:{app_name}")),
+        toggle_title,
+    ));
+
+    // 2. Extracted entity targets from the latest notification
+    for entity in &entities {
+        match entity {
+            ExtractedEntity::OtpCode(code) => {
+                targets.push(Target::new(
+                    RowId::new(format!("copy_otp:{code}")),
+                    format!("Copy OTP Code ({code})"),
+                ));
+            }
+            ExtractedEntity::Url(url) => {
+                targets.push(Target::new(
+                    RowId::new(format!("open_url:{url}")),
+                    format!("Open Link ({url})"),
+                ));
+                targets.push(Target::new(
+                    RowId::new(format!("copy_url:{url}")),
+                    format!("Copy Link ({url})"),
+                ));
+            }
+            ExtractedEntity::FilePath(path) => {
+                let file_name = std::path::Path::new(path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(path);
+                targets.push(Target::new(
+                    RowId::new(format!("open_file:{path}")),
+                    format!("Open File ({file_name})"),
+                ));
+                targets.push(Target::new(
+                    RowId::new(format!("open_dir:{path}")),
+                    "Open Containing Folder".to_string(),
+                ));
+                targets.push(Target::new(
+                    RowId::new(format!("copy_path:{path}")),
+                    format!("Copy Path ({file_name})"),
+                ));
+            }
+            ExtractedEntity::HexColor(hex) => {
+                targets.push(Target::new(
+                    RowId::new(format!("copy_hex:{hex}")),
+                    format!("Copy Color ({hex})"),
+                ));
+            }
+        }
+    }
+
+    // 3. Open desktop application
+    let clean_app = app_name.trim();
+    let lower_app = clean_app.to_lowercase();
+    if !clean_app.is_empty()
+        && lower_app != "system"
+        && lower_app != "packagekit"
+        && lower_app != "wiremix"
+    {
+        targets.push(Target::new(
+            RowId::new(format!("open_app:{clean_app}")),
+            format!("Open App ({clean_app})"),
+        ));
+    }
+
+    // 4. Attached D-Bus action buttons for the latest item
+    for action in &latest.actions {
+        targets.push(Target::new(
+            RowId::new(format!("action:{}:{}", latest.id, action.id)),
+            format!("Action: {}", action.title),
+        ));
+    }
+
+    // 5. Thread and notification management targets
+    targets.push(Target::new(
+        RowId::new(format!("dismiss:{}", latest.id)),
+        "Dismiss Latest Notification",
+    ));
+    targets.push(Target::new(
+        RowId::new(format!("dismiss_app:{app_name}")),
+        format!("Dismiss All ({})", items.len()),
+    ));
+    if !latest.body.is_empty() {
+        targets.push(Target::new(
+            RowId::new(format!("copy_body:{}", latest.id)),
+            "Copy Latest Message Text",
+        ));
+    }
+    targets.push(Target::new(
+        RowId::new(format!("snooze_15:{}", latest.id)),
+        "Snooze 15 Minutes",
+    ));
+    targets.push(Target::new(
+        RowId::new(format!("snooze_60:{}", latest.id)),
+        "Snooze 1 Hour",
+    ));
+    targets.push(Target::new(
+        RowId::new(format!("mute_app:{app_name}")),
+        format!("Silence {app_name} for 1 Hour"),
+    ));
+    targets.push(Target::new(
+        RowId::new(format!("priority_app:{app_name}")),
+        format!("Toggle Priority for {app_name}"),
+    ));
+
+    let glyph = if expanded { '▼' } else { '▶' };
+    let label = format!("{glyph} 󰙯 {app_name} ({})", items.len());
+    let sublabel = Some(latest.summary.clone());
+
+    let meta = if latest.urgency == Urgency::Critical {
+        format!("{rel_time} · Critical")
+    } else {
+        rel_time
+    };
+
+    let mut row = Row::with_targets(RowId::new(format!("group:{app_name}")), label, targets, 0);
+    row.sublabel = sublabel;
+    row.meta = Some(meta);
+    row.is_default = latest.is_pinned || latest.urgency == Urgency::Critical;
+    row.hide_target_in_header = true;
+
+    if !latest.body.is_empty() {
+        let clean_body = latest.body.replace('\n', " ");
+        row.detail = Some(clean_body);
+    }
+
+    if let Some(img) = &latest.image_path {
+        if std::path::Path::new(img).is_file() {
+            row.preview_image = Some(img.clone());
+        }
+    }
+
+    if let Some(prog) = latest.progress {
+        row.volume = Some(prog.clamp(0.0, 1.0));
+    }
+
+    row
+}
+
+/// Helper to construct an indented child row for expanded thread items.
+fn child_notification_row_from(item: &NotificationItem, now: u64, is_last: bool) -> Row {
+    let mut row = notification_row_from(item, now, true);
+    let prefix = if is_last { "  └─ " } else { "  ├─ " };
+    let summary_clean = item.summary.trim();
+    let body_clean = item.body.replace('\n', " ");
+    let body_clean = body_clean.trim();
+
+    row.label = if body_clean.is_empty() || summary_clean == body_clean {
+        format!("{prefix}{summary_clean}")
+    } else if summary_clean.is_empty() {
+        format!("{prefix}{body_clean}")
+    } else {
+        format!("{prefix}{summary_clean}: {body_clean}")
+    };
+    row.sublabel = None;
+    row.detail = None;
+    row.compact = true;
     row
 }
 
@@ -359,35 +571,15 @@ pub fn feed_tab_from(state: &NotifyState, now: u64) -> Tab {
     for (app_name, mut items) in sorted_apps {
         items.sort_by_key(|n| std::cmp::Reverse(n.timestamp));
         if items.len() > 1 {
-            let latest_ts = items.iter().map(|n| n.timestamp).max().unwrap_or(now);
-            let latest_rel = notify::format_relative_time(latest_ts, now);
-            let group_targets = vec![
-                Target::new(
-                    RowId::new(format!("dismiss_app:{app_name}")),
-                    format!("Dismiss All ({})", items.len()),
-                ),
-                Target::new(
-                    RowId::new(format!("mute_app:{app_name}")),
-                    format!("Mute {app_name} for 1h"),
-                ),
-                Target::new(
-                    RowId::new(format!("priority_app:{app_name}")),
-                    format!("Toggle Priority for {app_name}"),
-                ),
-            ];
+            let expanded = is_thread_expanded(app_name);
+            rows.push(grouped_parent_row_from(app_name, &items, now, expanded));
 
-            let mut group_row = Row::with_targets(
-                RowId::new(format!("group:{app_name}")),
-                format!("󰙯 {app_name} ({})", items.len()),
-                group_targets,
-                0,
-            );
-            group_row.meta = Some(latest_rel);
-            group_row.hide_target_in_header = true;
-            rows.push(group_row);
-
-            for item in items {
-                rows.push(notification_row_from(item, now, true));
+            if expanded {
+                let older_count = items.len() - 1;
+                for (i, item) in items[1..].iter().enumerate() {
+                    let is_last = i + 1 == older_count;
+                    rows.push(child_notification_row_from(item, now, is_last));
+                }
             }
         } else if let Some(item) = items.first() {
             rows.push(notification_row_from(item, now, false));
@@ -443,32 +635,62 @@ pub fn channels_tab_from(state: &NotifyState, now: u64) -> Tab {
             |l| notify::format_relative_time(l.timestamp, now),
         );
 
-        let targets = vec![
-            Target::new(
-                RowId::new(format!("dismiss_app:{app}")),
-                format!("Dismiss All ({count})"),
-            ),
-            Target::new(
-                RowId::new(format!("mute_app:{app}")),
-                format!("Mute {app} for 1h"),
-            ),
-            Target::new(
-                RowId::new(format!("priority_app:{app}")),
-                format!("Toggle Priority for {app}"),
-            ),
-        ];
+        let expanded = is_thread_expanded(app);
+        let mut targets = Vec::new();
 
-        let mut header_row = Row::with_targets(
-            RowId::new(format!("channel:{app}")),
-            format!("{app} ({count} active)"),
-            targets,
-            0,
-        );
+        if count > 1 {
+            let toggle_title = if expanded {
+                String::from("Collapse Channel")
+            } else {
+                format!("Expand Channel ({count} active)")
+            };
+            targets.push(Target::new(
+                RowId::new(format!("toggle_thread:{app}")),
+                toggle_title,
+            ));
+        }
+
+        targets.push(Target::new(
+            RowId::new(format!("dismiss_app:{app}")),
+            format!("Dismiss All ({count})"),
+        ));
+        targets.push(Target::new(
+            RowId::new(format!("mute_app:{app}")),
+            format!("Mute {app} for 1h"),
+        ));
+        targets.push(Target::new(
+            RowId::new(format!("priority_app:{app}")),
+            format!("Toggle Priority for {app}"),
+        ));
+
+        let glyph_prefix = if count > 1 {
+            if expanded {
+                "▼ "
+            } else {
+                "▶ "
+            }
+        } else {
+            ""
+        };
+
+        let label = if count == 0 {
+            format!("{app} (idle)")
+        } else {
+            format!("{glyph_prefix}{app} ({count} active)")
+        };
+
+        let mut header_row =
+            Row::with_targets(RowId::new(format!("channel:{app}")), label, targets, 0);
         header_row.meta = Some(meta);
         rows.push(header_row);
 
-        for item in active_items {
-            rows.push(notification_row_from(item, now, true));
+        if count == 1 {
+            rows.push(notification_row_from(active_items[0], now, true));
+        } else if count > 1 && expanded {
+            for (i, item) in active_items.iter().enumerate() {
+                let is_last = i + 1 == count;
+                rows.push(child_notification_row_from(item, now, is_last));
+            }
         }
     }
 
@@ -684,6 +906,9 @@ pub fn execute(
     target_title: &str,
     state_path: Option<&std::path::Path>,
 ) -> anyhow::Result<ExecuteReport> {
+    notify::log_notify_trace(&format!(
+        "[EXECUTE] action_id='{action_id}', title='{target_title}'"
+    ));
     let mut state = notify::load_state(state_path);
     let now = now_secs();
     let mut should_close = false;
@@ -750,15 +975,21 @@ pub fn execute(
             }
         }
     } else if let Some(app) = action_id
+        .strip_prefix("toggle_thread:")
+        .or_else(|| action_id.strip_prefix("channel:"))
+    {
+        toggle_thread_expanded(app);
+    } else if let Some(app) = action_id
         .strip_prefix("dismiss_app:")
         .or_else(|| action_id.strip_prefix("dismiss:group:"))
-        .or_else(|| action_id.strip_prefix("group:"))
     {
         for n in &mut state.notifications {
             if n.app_name == app {
                 n.is_dismissed = true;
             }
         }
+    } else if let Some(app) = action_id.strip_prefix("group:") {
+        toggle_thread_expanded(app);
     } else if let Some(app) = action_id.strip_prefix("mute_app:") {
         if !state.muted_apps.iter().any(|a| a.eq_ignore_ascii_case(app)) {
             state.muted_apps.push(app.to_string());

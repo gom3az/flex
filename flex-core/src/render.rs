@@ -58,15 +58,6 @@ pub const COMPACT_NODE_HEIGHT: u16 = 1;
 pub const COMPACT_NODE_SPACING: u16 = 1;
 
 /// Geometry of one node in the list (flex extension, §10 of the design doc).
-///
-/// Upstream always renders 3-line nodes because every `PipeWire` node carries
-/// volumes (`node_widget.rs:53-60`). Flex's providers mostly carry nothing but
-/// a label, so a data-less tab would render one inked line per five rows. The
-/// metrics therefore follow the data: [`NodeMetrics::UPSTREAM`] when any row
-/// in the tab has a detail line to draw (volume, enabled peaks, or a config
-/// line), [`NodeMetrics::COMPACT`] otherwise. Both modes run upstream's own
-/// widget code — a 1-row node area simply degenerates the selector to its top
-/// glyph, exactly as upstream's `SelectorWidget` would (`node_widget.rs:217-224`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NodeMetrics {
     /// Node height in lines.
@@ -76,12 +67,12 @@ pub struct NodeMetrics {
 }
 
 impl NodeMetrics {
-    /// Upstream's 3 lines + 2 spacing (`node_widget.rs:53-60`).
+    /// Upstream's 3 lines + 1 spacing (`node_widget.rs:53-60`).
     pub const UPSTREAM: Self = Self {
         height: NODE_HEIGHT,
         spacing: NODE_SPACING,
     };
-    /// Flex's compact 1 line + 1 spacing for data-less rows.
+    /// Flex's compact 1 line + 0 spacing for data-less rows.
     pub const COMPACT: Self = Self {
         height: COMPACT_NODE_HEIGHT,
         spacing: COMPACT_NODE_SPACING,
@@ -93,10 +84,22 @@ impl NodeMetrics {
         self.height + self.spacing
     }
 
+    /// Metrics for a single row.
+    #[must_use]
+    pub fn for_row(row: &Row, peaks: Peaks) -> Self {
+        let has_detail = row.volume.is_some()
+            || row.config.is_some()
+            || row.detail.is_some()
+            || row.sublabel.is_some()
+            || (row.peaks.is_some() && peaks != Peaks::Off);
+        if has_detail {
+            Self::UPSTREAM
+        } else {
+            Self::COMPACT
+        }
+    }
+
     /// Metrics for a tab: upstream when any row draws a detail line.
-    ///
-    /// `peaks` is the menu's peak mode: rows whose peaks are hidden
-    /// ([`Peaks::Off`]) have no detail line either.
     #[must_use]
     pub fn for_rows(rows: &[Row], peaks: Peaks) -> Self {
         let has_detail = rows.iter().any(|row| {
@@ -145,6 +148,7 @@ pub const HELP_LINES: &[&str] = &[
 
 /// Vertical frame split: the list height plus the chrome flags the renderer
 /// branches on (`run` needs the same numbers to place the image pane).
+#[allow(clippy::struct_excessive_bools)]
 struct FrameLayout {
     /// Rows owned by the list (and therefore by the preview pane).
     list_h: u16,
@@ -154,18 +158,24 @@ struct FrameLayout {
     filterable: bool,
     /// Gauge widget occupies the last rows above the tab bar.
     gauge_on: bool,
+    /// Menu has multiple tabs requiring the tab bar even on bare tabs.
+    has_tabs: bool,
 }
 
 fn frame_layout(area: Rect, menu: &Menu) -> FrameLayout {
     let bare = menu.app.active_tab().is_some_and(|tab| tab.bare_rows);
     let filterable = menu.app.active_tab().is_some_and(|tab| tab.filterable);
     let gauge_on = !bare && menu.gauge.is_some();
+    let has_tabs = menu.app.tabs.len() > 1;
 
-    // Bare tabs (flex extension) draw no chrome at all, so the list owns the
-    // whole frame; otherwise it stops above the gauge/filter/hints rows and
-    // the tab bar.
+    // Bare tabs (flex extension) draw no chrome at all unless there are multiple
+    // tabs to switch between (where the tab bar must remain visible).
     let chrome_bottom: u16 = if bare {
-        0
+        if has_tabs {
+            TAB_BAR_HEIGHT
+        } else {
+            0
+        }
     } else if gauge_on {
         3 + TAB_BAR_HEIGHT
     } else if filterable {
@@ -180,6 +190,7 @@ fn frame_layout(area: Rect, menu: &Menu) -> FrameLayout {
         bare,
         filterable,
         gauge_on,
+        has_tabs,
     }
 }
 
@@ -211,6 +222,7 @@ pub fn render(frame: &mut Frame, menu: &mut Menu) {
         bare,
         filterable,
         gauge_on,
+        has_tabs,
     } = frame_layout(area, menu);
 
     // Image preview pane: reserved on the right of the list area only (the
@@ -239,10 +251,8 @@ pub fn render(frame: &mut Frame, menu: &mut Menu) {
     let buf = frame.buffer_mut();
     fill_bg(buf, area.x, area.y, width_cells, height);
 
-    if bare {
-        draw_list(buf, list_area, menu);
-    } else {
-        draw_list(buf, list_area, menu);
+    draw_list(buf, list_area, menu);
+    if !bare {
         if gauge_on && height >= 4 {
             draw_gauge(
                 buf,
@@ -270,6 +280,8 @@ pub fn render(frame: &mut Frame, menu: &mut Menu) {
                 menu,
             );
         }
+    }
+    if !bare || has_tabs {
         draw_tab_bar(
             buf,
             area.x,
@@ -308,31 +320,110 @@ fn fill_bg(buf: &mut Buffer, ox: u16, oy: u16, width: usize, height: usize) {
 /// Each tab gets `title width + 2` cells — `[x]` for the active tab and
 /// ` x ` for the others — so there is no extra separator between tabs, and
 /// inactive tabs keep the terminal's default foreground (`theme.tab`).
+#[allow(clippy::too_many_lines, clippy::needless_range_loop)]
 fn draw_tab_bar(buf: &mut Buffer, ox: u16, y: u16, width: usize, menu: &Menu) {
     if width == 0 || menu.app.tabs.is_empty() {
         return;
     }
-    let area = Rect::new(ox, y, u16::try_from(width).unwrap_or(u16::MAX), 1);
     let char_set = &menu.char_set;
     let theme = &menu.theme;
-    let constraints: Vec<Constraint> = menu
+    let total_tabs = menu.app.tabs.len();
+
+    let tab_widths: Vec<u16> = menu
         .app
         .tabs
         .iter()
         .map(|tab| {
             let name_w = u16::try_from(width::str_width(&tab.name)).unwrap_or(u16::MAX);
-            Constraint::Length(name_w.saturating_add(2))
+            name_w.saturating_add(2)
         })
         .collect();
-    let areas = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints(constraints)
-        .split(area);
 
-    for (index, tab) in menu.app.tabs.iter().enumerate() {
-        let Some(&tab_area) = areas.get(index) else {
+    let total_needed: usize = tab_widths.iter().map(|&w| usize::from(w)).sum();
+
+    if total_needed <= width {
+        let mut cur_x = ox;
+        for (index, tab) in menu.app.tabs.iter().enumerate() {
+            let tab_w = tab_widths[index];
+            let tab_area = Rect::new(cur_x, y, tab_w, 1);
+            let line = if index == menu.app.active {
+                Line::from(vec![
+                    Span::styled(char_set.tab_marker_left, theme.tab_marker),
+                    Span::styled(tab.name.clone(), theme.tab_selected),
+                    Span::styled(char_set.tab_marker_right, theme.tab_marker),
+                ])
+            } else {
+                Line::from(Span::styled(
+                    format!(" {} ", width::sanitize(&tab.name)),
+                    theme.tab,
+                ))
+            };
+            line.render(tab_area, buf);
+            cur_x = cur_x.saturating_add(tab_w);
+        }
+        return;
+    }
+
+    let active = menu.app.active.min(total_tabs.saturating_sub(1));
+    let mut start = active;
+    let mut end = active;
+
+    loop {
+        let left_ind = usize::from(start > 0);
+        let right_ind = usize::from(end < total_tabs - 1);
+        let current_w: usize = tab_widths[start..=end]
+            .iter()
+            .map(|&w| usize::from(w))
+            .sum::<usize>()
+            + left_ind
+            + right_ind;
+
+        let can_expand_left = start > 0
+            && current_w
+                + usize::from(tab_widths[start - 1])
+                + usize::from(start - 1 > 0 && left_ind == 0)
+                <= width;
+        let can_expand_right = end < total_tabs - 1
+            && current_w
+                + usize::from(tab_widths[end + 1])
+                + usize::from(end + 1 < total_tabs - 1 && right_ind == 0)
+                <= width;
+
+        if !can_expand_left && !can_expand_right {
             break;
-        };
+        }
+
+        if can_expand_right && (start == 0 || active - start >= end - active) {
+            end += 1;
+        } else if can_expand_left {
+            start -= 1;
+        } else if can_expand_right {
+            end += 1;
+        }
+    }
+
+    let mut cur_x = ox;
+    if start > 0 {
+        let ind_area = Rect::new(cur_x, y, 1, 1);
+        let line = Line::from(Span::styled("‹", theme.tab_marker));
+        line.render(ind_area, buf);
+        cur_x = cur_x.saturating_add(1);
+    }
+
+    for index in start..=end {
+        let tab = &menu.app.tabs[index];
+        let tab_w = tab_widths[index];
+        let available = width.saturating_sub(usize::from(cur_x - ox));
+        if available == 0 {
+            break;
+        }
+        let right_ind_reserved = usize::from(end < total_tabs - 1 && index == end);
+        let render_w = tab_w
+            .min(u16::try_from(available.saturating_sub(right_ind_reserved)).unwrap_or(u16::MAX));
+        if render_w == 0 {
+            break;
+        }
+        let tab_area = Rect::new(cur_x, y, render_w, 1);
         let line = if index == menu.app.active {
             Line::from(vec![
                 Span::styled(char_set.tab_marker_left, theme.tab_marker),
@@ -346,6 +437,13 @@ fn draw_tab_bar(buf: &mut Buffer, ox: u16, y: u16, width: usize, menu: &Menu) {
             ))
         };
         line.render(tab_area, buf);
+        cur_x = cur_x.saturating_add(render_w);
+    }
+
+    if end < total_tabs - 1 && usize::from(cur_x - ox) < width {
+        let ind_area = Rect::new(cur_x, y, 1, 1);
+        let line = Line::from(Span::styled("›", theme.tab_marker));
+        line.render(ind_area, buf);
     }
 }
 
@@ -384,8 +482,6 @@ fn draw_list(buf: &mut Buffer, list_area: Rect, menu: &mut Menu) {
         .areas(list_area);
 
     let metrics = node_metrics(menu);
-    let row_h = usize::from(metrics.pitch());
-    let entries_visible = usize::from(rows_area.height) / row_h;
     let len = visible.len();
     let scroll = tab.state.scroll;
 
@@ -397,36 +493,56 @@ fn draw_list(buf: &mut Buffer, list_area: Rect, menu: &mut Menu) {
             .render(header_area, buf);
     }
 
-    // `•••` below, except when the last row is only partially rendered but
-    // still shows everything that matters (upstream `object_list.rs:491-517`).
-    let is_bottom_last = scroll.saturating_add(entries_visible) == len.saturating_sub(1);
-    let is_bottom_enough = (usize::from(rows_area.height) % row_h) >= usize::from(metrics.height);
-    if scroll.saturating_add(entries_visible) < len && !(is_bottom_last && is_bottom_enough) {
-        Line::from(Span::styled(menu.char_set.list_more, menu.theme.list_more))
-            .alignment(Alignment::Center)
-            .render(footer_area, buf);
-    }
+    let mut current_y = rows_area.y;
+    let max_y = rows_area.y + rows_area.height;
+    let mut last_drawn_index = scroll;
 
-    // Row areas: `entries_visible` full rows plus one partial row for the
-    // remainder (upstream `object_list.rs:519-527`).
-    let mut constraints = vec![Constraint::Length(metrics.height); entries_visible];
-    constraints.push(Constraint::Max(metrics.height));
-    let row_areas = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(constraints)
-        .spacing(metrics.spacing)
-        .split(rows_area);
-
-    for (offset, row_area) in row_areas.iter().enumerate() {
-        let Some(&provider_index) = visible.get(scroll + offset) else {
+    for (offset, &provider_index) in visible.iter().skip(scroll).enumerate() {
+        if current_y >= max_y {
             break;
-        };
+        }
         let Some(row) = tab.rows.get(provider_index) else {
             continue;
         };
+        last_drawn_index = scroll + offset;
+
+        let row_m = if row.compact {
+            NodeMetrics {
+                height: COMPACT_NODE_HEIGHT,
+                spacing: 0,
+            }
+        } else {
+            metrics
+        };
+        let rh = row_m.height;
+        let avail = max_y.saturating_sub(current_y);
+        if avail == 0 {
+            break;
+        }
+        let h = rh.min(avail);
+        let item_rect = Rect::new(rows_area.x, current_y, rows_area.width, h);
         let selected = scroll + offset == tab.state.focus;
         let armed_confirm = selected && row.confirmable && tab.state.is_armed();
-        draw_node(buf, *row_area, menu, row, selected, armed_confirm, metrics);
+        draw_node(buf, item_rect, menu, row, selected, armed_confirm, row_m);
+        let next_is_compact = visible
+            .get(scroll + offset + 1)
+            .and_then(|&idx| tab.rows.get(idx))
+            .is_some_and(|r| r.compact);
+        let spacing = if next_is_compact {
+            0
+        } else if row.compact {
+            1
+        } else {
+            row_m.spacing
+        };
+        current_y += h + spacing;
+    }
+
+    // `•••` below only when there are items after the last drawn item
+    if len > 0 && last_drawn_index.saturating_add(1) < len {
+        Line::from(Span::styled(menu.char_set.list_more, menu.theme.list_more))
+            .alignment(Alignment::Center)
+            .render(footer_area, buf);
     }
 }
 
@@ -556,7 +672,7 @@ fn draw_header(buf: &mut Buffer, area: Rect, menu: &Menu, row: &Row, armed_confi
 
     // Right column: the row's current target (upstream `target_line`,
     // `node_widget.rs:258-279`), else flex's generic meta.
-    let target_line = if bare {
+    let target_line = if bare && !row.meta.as_deref().is_some_and(|m| m.contains("Active")) {
         Line::default()
     } else if !row.hide_target_in_header && row.current_target().is_some() {
         let target = row.current_target().unwrap();

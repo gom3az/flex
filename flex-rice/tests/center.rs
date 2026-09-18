@@ -71,11 +71,12 @@ fn fixture_menu() -> Menu {
             Some(disconnected.clone())
         }
     });
+    let themes = center::themes_tab_from(&fixture_themes());
     let settings = center::settings_tab_from(
         Some(&fixture("wpctl-50.txt")),
         Some("1200\n"),
         Some("2400\n"),
-        &fixture_themes(),
+        &[],
     );
     flex_rice::menu(
         center::PROVIDER,
@@ -84,6 +85,8 @@ fn fixture_menu() -> Menu {
             networks,
             bluetooth,
             center::power_tab(),
+            center::profiles_tab(),
+            themes,
             settings,
         ],
     )
@@ -147,12 +150,23 @@ fn tab_order_and_names_match_bash_add_tab_order() {
     let names: Vec<&str> = menu.app.tabs.iter().map(|tab| tab.name.as_str()).collect();
     assert_eq!(
         names,
-        vec!["Launchers", "Networks", "Bluetooth", "Power", "Settings"]
+        vec![
+            "Launchers",
+            "Networks",
+            "Bluetooth",
+            "Power",
+            "Profiles",
+            "Themes",
+            "Settings",
+        ]
     );
     // Only Settings opts into `m` → Toggle (volume mute); the rest keep
     // the legacy mark/Delete behavior.
     let deletable: Vec<bool> = menu.app.tabs.iter().map(|tab| tab.deletable).collect();
-    assert_eq!(deletable, vec![false, false, false, false, true]);
+    assert_eq!(
+        deletable,
+        vec![false, false, false, false, false, false, true]
+    );
     assert!(
         menu.app.tabs[1..].iter().all(|tab| tab.bare_rows),
         "center non-Launchers tabs are bare"
@@ -503,11 +517,11 @@ fn gauge_states_golden_zero_half_full_muted_offline() {
 // --- Key-seq replays ---------------------------------------------------------------
 
 #[test]
-fn tab_and_digit_navigation_across_five_tabs() {
+fn tab_and_digit_navigation_across_seven_tabs() {
     let mut menu = fixture_menu();
     let base = run::test_base();
-    // Tab cycles 0→1→…→4→0.
-    for expected in [1, 2, 3, 4, 0] {
+    // Tab cycles 0→1→…→6→0.
+    for expected in [1, 2, 3, 4, 5, 6, 0] {
         let outcome = run::replay_keys(&mut menu, &[press(KeyCode::Tab)], base);
         assert_eq!(outcome, KeyOutcome::Consumed);
         assert_eq!(menu.app.active, expected);
@@ -526,9 +540,9 @@ fn tab_and_digit_navigation_across_five_tabs() {
         "both digits landed in the filter"
     );
     // Alt-digit always switches, even with filter text (Q1).
-    let outcome = run::replay_keys(&mut menu, &[alt_rune('5')], base);
+    let outcome = run::replay_keys(&mut menu, &[alt_rune('7')], base);
     assert_eq!(outcome, KeyOutcome::Consumed);
-    assert_eq!(menu.app.active, 4, "Alt-5 jumps to Settings");
+    assert_eq!(menu.app.active, 6, "Alt-7 jumps to Settings");
 }
 
 #[test]
@@ -708,9 +722,9 @@ fn gauge_tick_skips_snapshots_off_the_settings_tab() {
 fn toggle_flow_mutes_volume_on_deletable_settings_only() {
     let mut menu = fixture_menu();
     let base = run::test_base();
-    // Settings tab (index 4): NAVIGATE `m` on Volume emits Toggle (mute).
-    tap(&mut menu, &[rune('5')], base);
-    assert_eq!(menu.app.active, 4);
+    // Settings tab (index 6): NAVIGATE `m` on Volume emits Toggle (mute).
+    tap(&mut menu, &[rune('7')], base);
+    assert_eq!(menu.app.active, 6);
     let outcome = run::replay_keys(&mut menu, &[ctrl_rune('o'), rune('m')], base);
     assert_eq!(outcome, KeyOutcome::Toggle, "NAVIGATE m → Toggle");
     assert_eq!(
@@ -719,7 +733,7 @@ fn toggle_flow_mutes_volume_on_deletable_settings_only() {
     );
     // NORMAL-mode `m` types into the filter instead.
     let mut menu = fixture_menu();
-    tap(&mut menu, &[rune('5')], base);
+    tap(&mut menu, &[rune('7')], base);
     let outcome = run::replay_keys(&mut menu, &[rune('m')], base);
     assert_eq!(outcome, KeyOutcome::Consumed);
     assert_eq!(
@@ -873,15 +887,23 @@ fn live_builders_honor_fixture_seams() {
 }
 
 #[test]
-fn center_menu_smoke_has_five_tabs_without_panicking() {
+fn center_menu_smoke_has_seven_tabs_without_panicking() {
     // Live system state (may be offline/empty here); only structure asserts.
     let menu = center::center_menu();
     assert_eq!(menu.provider, center::PROVIDER);
-    assert_eq!(menu.app.tabs.len(), 5);
+    assert_eq!(menu.app.tabs.len(), 7);
     let names: Vec<&str> = menu.app.tabs.iter().map(|tab| tab.name.as_str()).collect();
     assert_eq!(
         names,
-        vec!["Launchers", "Networks", "Bluetooth", "Power", "Settings"]
+        vec![
+            "Launchers",
+            "Networks",
+            "Bluetooth",
+            "Power",
+            "Profiles",
+            "Themes",
+            "Settings",
+        ]
     );
 }
 

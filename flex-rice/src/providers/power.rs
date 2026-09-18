@@ -22,7 +22,8 @@ use flex_core::{Row, RowId, Tab};
 /// Provider name for the `ACTION:` line.
 pub const PROVIDER: &str = "power";
 /// Tab title (matches the bash `Power` tab).
-pub const TAB_NAME: &str = "Power";
+pub const TAB_POWER: &str = "Power";
+pub const TAB_PROFILES: &str = "Profiles";
 
 /// One power row: bash `case` id + exact label + truthful command meta.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,10 +38,7 @@ pub struct PowerRow {
     pub confirmable: bool,
 }
 
-/// Power rows in bash `POWER_ROWS` order (lock first, logout last;
-///
-/// destructive rows in the middle, matching the deleted script).
-pub const ROWS: [PowerRow; 5] = [
+pub const SYSTEM_ROWS: [PowerRow; 5] = [
     PowerRow {
         id: "lock",
         label: "Lock Screen",
@@ -73,11 +71,29 @@ pub const ROWS: [PowerRow; 5] = [
     },
 ];
 
-/// Load rows from the static [`ROWS`] table (no subprocess; the set is
-/// fixed by the power commands the wrapper implements).
-#[must_use]
-pub fn load() -> Vec<Row> {
-    ROWS.iter()
+pub const PROFILE_ROWS: [PowerRow; 3] = [
+    PowerRow {
+        id: "profile:performance",
+        label: "Performance Profile",
+        meta: "powerprofilesctl set performance",
+        confirmable: false,
+    },
+    PowerRow {
+        id: "profile:balanced",
+        label: "Balanced Profile",
+        meta: "powerprofilesctl set balanced",
+        confirmable: false,
+    },
+    PowerRow {
+        id: "profile:power-saver",
+        label: "Power Saver Profile",
+        meta: "powerprofilesctl set power-saver",
+        confirmable: false,
+    },
+];
+
+fn to_rows(rows: &[PowerRow]) -> Vec<Row> {
+    rows.iter()
         .map(|row| Row {
             confirmable: row.confirmable,
             ..Row::with_meta(RowId::new(row.id), row.label, row.meta)
@@ -85,15 +101,53 @@ pub fn load() -> Vec<Row> {
         .collect()
 }
 
-/// Build the `Power` tab: standard spec rows, non-deletable rows
-/// (`Delete` never fires here; the danger flow is Enter-arm only).
-/// Five fixed rows need no search and no chrome: launch-style bare rows
-/// (no title, no filter, no hints, no metas).
+/// Build the `Power` tab.
 #[must_use]
 pub fn power_tab() -> Tab {
-    let mut tab = Tab::with_rows(TAB_NAME, load());
+    let mut tab = Tab::with_rows(TAB_POWER, to_rows(&SYSTEM_ROWS));
     tab.filterable = false;
     tab
+}
+
+/// Build the `Profiles` tab with optional active profile highlight.
+#[must_use]
+pub fn profiles_tab_from(active: Option<&str>) -> Tab {
+    let rows: Vec<Row> = PROFILE_ROWS
+        .iter()
+        .map(|row| {
+            let is_active = active.is_some_and(|act| row.id.ends_with(act));
+            let meta = if is_active {
+                format!("{}  Active", row.meta)
+            } else {
+                row.meta.to_string()
+            };
+            let mut r = Row::with_meta(RowId::new(row.id), row.label, meta);
+            r.confirmable = row.confirmable;
+            r.is_default = is_active;
+            r
+        })
+        .collect();
+
+    let mut tab = Tab::with_rows(TAB_PROFILES, rows);
+    tab.filterable = false;
+    if let Some(act) = active {
+        if let Some(idx) = PROFILE_ROWS.iter().position(|r| r.id.ends_with(act)) {
+            tab.state.focus = idx;
+        }
+    }
+    tab
+}
+
+/// Build the `Profiles` tab live (querying active profile).
+#[must_use]
+pub fn profiles_tab() -> Tab {
+    profiles_tab_from(super::profile::active_profile().as_deref())
+}
+
+/// Build both tabs for `flex-power`.
+#[must_use]
+pub fn power_tabs() -> Vec<Tab> {
+    vec![power_tab(), profiles_tab()]
 }
 
 #[cfg(test)]
@@ -101,8 +155,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn row_table_covers_every_bash_case_arm() {
-        let ids: Vec<&str> = ROWS.iter().map(|row| row.id).collect();
-        assert_eq!(ids, vec!["lock", "suspend", "reboot", "poweroff", "logout"]);
+    fn system_and_profile_rows_are_separate() {
+        let sys_ids: Vec<&str> = SYSTEM_ROWS.iter().map(|row| row.id).collect();
+        assert_eq!(
+            sys_ids,
+            vec!["lock", "suspend", "reboot", "poweroff", "logout"]
+        );
+        let prof_ids: Vec<&str> = PROFILE_ROWS.iter().map(|row| row.id).collect();
+        assert_eq!(
+            prof_ids,
+            vec![
+                "profile:performance",
+                "profile:balanced",
+                "profile:power-saver"
+            ]
+        );
     }
 }

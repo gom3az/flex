@@ -16,6 +16,7 @@ pub mod net;
 pub mod notify;
 pub mod power;
 pub mod proc;
+pub mod profile;
 pub mod record;
 pub mod shot;
 pub mod speedtest;

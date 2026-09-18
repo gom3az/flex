@@ -91,7 +91,7 @@ enum NotifyOp {
         urgency: String,
 
         /// In-flight progress fraction (0.0 - 1.0)
-        #[arg(short = 'p', long = "progress")]
+        #[arg(long = "progress")]
         progress: Option<f32>,
 
         /// Path to attached preview image
@@ -138,108 +138,27 @@ fn run_toast(id: u32, state_path: Option<&std::path::Path>) {
         return;
     };
 
-    let urgency = item.urgency;
-    let is_critical = urgency == Urgency::Critical;
-    let timeout_secs: u64 = if is_critical { 0 } else { 5 };
-
-    // ── Badge icon ───────────────────────────────────────────────────────────
-    let icon = match urgency {
-        Urgency::Critical => "󰀦",
-        Urgency::Normal => "󰂚",
-        Urgency::Low => "󰂞",
-    };
-
-    // ── Truncate body to 43 chars (fits 50 col canvas with 5-space indent) ────
-    let body_preview = if item.body.is_empty() {
-        String::new()
-    } else {
-        let trimmed = item.body.replace('\n', " ");
-        if trimmed.len() > 43 {
-            format!("{}…", &trimmed[..42])
-        } else {
-            trimmed
-        }
-    };
+    let is_critical = item.urgency == Urgency::Critical;
+    let timeout_secs: u64 = if is_critical { 7 } else { 4 };
 
     let rel = notify::format_relative_time(item.timestamp, now);
 
-    // ── Render ───────────────────────────────────────────────────────────────
-    // Clear screen + hide cursor
-    print!("\x1b[2J\x1b[H\x1b[?25l");
+    // ── Render Boxed Toast Card ─────────────────────────────────────────────
+    // Detect terminal column width dynamically (default to 50 if query fails)
+    let width = crossterm::terminal::size().map_or(50, |(cols, _)| (cols as usize).clamp(36, 120));
 
-    // Row 1: Top padding line
-    println!();
-
-    // Row 2: Header line (icon + app · summary + right-aligned timestamp)
-    let header = notify::format_toast_header(icon, &item.app_name, &item.summary, &rel, 48);
-    println!("{header}");
-
-    // Row 3: Body preview (dim) or blank line (5-space indent aligned under app name)
-    if body_preview.is_empty() {
-        println!();
-    } else {
-        println!("     \x1b[2m{body_preview}\x1b[0m");
+    let card = notify::format_toast_card(item, &rel, width, timeout_secs);
+    for (idx, line) in card.lines().enumerate() {
+        print!("\x1b[{};1H{line}\x1b[K", idx + 1);
     }
-
-    // Row 4: Hint line (5-space indent aligned under body)
-    if is_critical {
-        println!("     \x1b[2m[SUPER+N] open drawer • critical alert\x1b[0m");
-    } else {
-        println!("     \x1b[2mauto-dismiss in {timeout_secs}s • [SUPER+N] open\x1b[0m");
-    }
-
-    // Row 5: Bottom padding line
-    println!();
-
     let _ = std::io::stdout().flush();
 
-    // ── Input / timeout ──────────────────────────────────────────────────────
-    // Put terminal in raw mode so we get single keystrokes.
-    let _ = std::process::Command::new("stty")
-        .args(["-echo", "raw", "-icanon", "min", "0", "time", "1"])
-        .status();
+    // ── Auto-dismiss timeout ────────────────────────────────────────────────
+    std::thread::sleep(std::time::Duration::from_secs(timeout_secs));
 
-    let deadline = if timeout_secs > 0 {
-        Some(std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs))
-    } else {
-        None
-    };
-
-    let mut buf = [0u8; 1];
-    let mut open_center = false;
-    loop {
-        use std::io::Read as _;
-        let n = std::io::stdin().read(&mut buf).unwrap_or(0);
-        if n > 0 {
-            // 'q' or ESC = quiet dismiss; anything else = open center
-            if buf[0] != b'q' && buf[0] != 0x1b {
-                open_center = true;
-            }
-            break;
-        }
-        if let Some(dl) = deadline {
-            if std::time::Instant::now() >= dl {
-                break;
-            }
-        }
-    }
-
-    // Restore terminal
-    let _ = std::process::Command::new("stty").arg("sane").status();
-
-    // Show cursor again
+    // Show cursor on exit
     print!("\x1b[?25h");
     let _ = std::io::stdout().flush();
-
-    if open_center {
-        // Detach so this process can exit while the drawer opens
-        let _ = std::process::Command::new("flex")
-            .args(["popup", "flex-notify-center", "flex-notify"])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
-    }
 }
 
 fn main() {

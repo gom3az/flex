@@ -31,6 +31,7 @@ BINS=(
     flex-net
     flex-bt
     flex-notify
+    flex-profile
 )
 
 usage() {

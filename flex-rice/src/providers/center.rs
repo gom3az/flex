@@ -459,6 +459,9 @@ pub fn bluetooth_tab() -> Tab {
 /// labels/metas. `Reboot`/`Power Off` are danger rows (armed/confirmed
 /// by `keys`; see the danger-timing lock in `tests/keys.rs`). Rows are
 /// non-deletable — `Delete` never fires here.
+pub const TAB_PROFILES: &str = "Profiles";
+pub const TAB_THEMES: &str = "Themes";
+
 #[must_use]
 pub fn power_tab() -> Tab {
     let plain = |id: &str, label: &str, meta: &str| Row {
@@ -482,7 +485,91 @@ pub fn power_tab() -> Tab {
     )
 }
 
-// --- Settings (gauges + themes) ------------------------------------------------
+#[must_use]
+pub fn profiles_tab_from(active: Option<&str>) -> Tab {
+    let plain = |id: &str, label: &str, meta: &str, is_active: bool| {
+        let meta_str = if is_active {
+            format!("{meta}  Active")
+        } else {
+            meta.to_string()
+        };
+        let mut r = Row::new(RowId::new(id), label);
+        r.meta = Some(meta_str);
+        r.is_default = is_active;
+        r
+    };
+    let mut tab = Tab::with_rows(
+        TAB_PROFILES,
+        vec![
+            plain(
+                "pwprofile:performance",
+                "Performance Profile",
+                "powerprofilesctl set performance",
+                active == Some("performance"),
+            ),
+            plain(
+                "pwprofile:balanced",
+                "Balanced Profile",
+                "powerprofilesctl set balanced",
+                active == Some("balanced"),
+            ),
+            plain(
+                "pwprofile:power-saver",
+                "Power Saver Profile",
+                "powerprofilesctl set power-saver",
+                active == Some("power-saver"),
+            ),
+        ],
+    );
+    if let Some(act) = active {
+        let idx = match act {
+            "performance" => Some(0),
+            "balanced" => Some(1),
+            "power-saver" => Some(2),
+            _ => None,
+        };
+        if let Some(i) = idx {
+            tab.state.focus = i;
+        }
+    }
+    tab
+}
+
+#[must_use]
+pub fn profiles_tab() -> Tab {
+    profiles_tab_from(super::profile::active_profile().as_deref())
+}
+
+#[must_use]
+pub fn themes_rows(themes: &[theme_::ThemeEntry]) -> Vec<Row> {
+    themes
+        .iter()
+        .map(|theme| {
+            let meta = if theme.active {
+                "Theme  Active"
+            } else {
+                "Theme"
+            };
+            Row::with_meta(RowId::new(THEME_ID), format!("Theme: {}", theme.name), meta)
+        })
+        .collect()
+}
+
+#[must_use]
+pub fn themes_tab_from(themes: &[theme_::ThemeEntry]) -> Tab {
+    let mut tab = Tab::with_rows(TAB_THEMES, themes_rows(themes));
+    tab.bare_rows = true;
+    tab
+}
+
+#[must_use]
+pub fn themes_tab() -> Tab {
+    let current = theme_::current_name();
+    let themes = theme_::scan_available(&theme_::available_dir(), &current);
+    themes_tab_from(&themes)
+}
+
+// --- Settings (gauges) --------------------------------------------------------
 
 /// `(pct, muted)` from `wpctl get-volume @DEFAULT_AUDIO_SINK@` output
 /// (`Volume: 0.55`, muted adds `[MUTED]`). Bash-exact: volume is field 2,
@@ -554,8 +641,7 @@ fn offline_gauge_row(id: &str, label: &str) -> Row {
 }
 
 /// `Settings` rows: `Volume` + `Brightness` gauge rows (bash labels,
-/// `sink`/`backlight` metas) plus one `Theme: {name}` row per theme
-/// (meta `Theme`, `  Active` suffix folded in like the bash join).
+/// `sink`/`backlight` metas) plus any optional `Theme: {name}` rows.
 #[must_use]
 pub fn settings_rows(
     volume: Option<(i64, bool)>,
@@ -620,14 +706,12 @@ pub fn settings_tab_from(
     tab
 }
 
-/// Build the `Settings` tab live (commands/seams + theme scan).
+/// Build the `Settings` tab live (commands/seams).
 #[must_use]
 pub fn settings_tab() -> Tab {
     let volume = volume_snapshot();
     let brightness = brightness_snapshot();
-    let current = theme_::current_name();
-    let themes = theme_::scan_available(&theme_::available_dir(), &current);
-    let mut tab = Tab::with_rows(TAB_SETTINGS, settings_rows(volume, brightness, &themes));
+    let mut tab = Tab::with_rows(TAB_SETTINGS, settings_rows(volume, brightness, &[]));
     tab.deletable = true;
     tab.bare_rows = true;
     tab
@@ -635,7 +719,7 @@ pub fn settings_tab() -> Tab {
 
 // --- Menu + tick ---------------------------------------------------------------
 
-/// Build the full 5-tab `center` menu (bash `flex_add_tab` order).
+/// Build the full 7-tab `center` menu (bash `flex_add_tab` order).
 #[must_use]
 pub fn center_menu() -> Menu {
     crate::menu(
@@ -645,6 +729,8 @@ pub fn center_menu() -> Menu {
             networks_tab(),
             bluetooth_tab(),
             power_tab(),
+            profiles_tab(),
+            themes_tab(),
             settings_tab(),
         ],
     )
@@ -780,10 +866,22 @@ mod tests {
         let ids: Vec<&str> = tab.rows.iter().map(|row| row.id.as_str()).collect();
         assert_eq!(
             ids,
-            vec!["pwlock", "pwsuspend", "pwreboot", "pwoff", "pwlogout"]
+            vec!["pwlock", "pwsuspend", "pwreboot", "pwoff", "pwlogout",]
         );
         assert_eq!(tab.rows[2].meta.as_deref(), Some("systemctl reboot"));
         assert!(tab.rows[2].confirmable && tab.rows[3].confirmable);
         assert!(!tab.rows[0].confirmable && !tab.rows[4].confirmable);
+
+        let prof_tab = profiles_tab();
+        assert_eq!(prof_tab.name, TAB_PROFILES);
+        let prof_ids: Vec<&str> = prof_tab.rows.iter().map(|row| row.id.as_str()).collect();
+        assert_eq!(
+            prof_ids,
+            vec![
+                "pwprofile:performance",
+                "pwprofile:balanced",
+                "pwprofile:power-saver"
+            ]
+        );
     }
 }

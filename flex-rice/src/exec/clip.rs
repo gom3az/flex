@@ -58,8 +58,13 @@
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context as _, Result};
+use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGTERM};
+use signal_hook::flag;
 
 use crate::providers::clip;
 use crate::spawn::RetryExec as _;
@@ -635,7 +640,12 @@ fn verb_text(text: Option<&str>, current: &Path) -> String {
 pub fn add(path_env: Option<&str>) -> Result<()> {
     let path_env = path_env.map_or_else(ambient_path, str::to_string);
     let clipboard = read_clipboard(&path_env)?;
-    add_with(&clipboard, &clip::hist_path(), &clip::current_path())
+    add_with(
+        &clipboard,
+        &clip::hist_path(),
+        &clip::current_path(),
+        Some(&path_env),
+    )
 }
 
 /// [`add`] with the clipboard text and paths given (the test seam).
@@ -643,16 +653,30 @@ pub fn add(path_env: Option<&str>) -> Result<()> {
 /// # Errors
 ///
 /// When a store write fails.
-pub fn add_with(clipboard: &str, hist: &Path, current: &Path) -> Result<()> {
+pub fn add_with(
+    clipboard: &str,
+    hist: &Path,
+    current: &Path,
+    path_env: Option<&str>,
+) -> Result<()> {
     let stripped: String = clipboard.chars().filter(|ch| *ch != '\0').collect();
     let trimmed = stripped.trim_end_matches('\n');
     if trimmed.is_empty() {
         return Ok(());
     }
     let encoded = clip::encode(trimmed);
+    let prev_current = current_decoded(current);
     write_current(current, &encoded)?;
     if !file_contains(hist, encoded.as_bytes()) {
         append_line(hist, encoded.as_bytes())?;
+    }
+    if prev_current != trimmed {
+        if let Some(pe) = path_env {
+            if resolve_tool("wl-copy", pe).is_some() {
+                let stdin = copy_stdin(&encoded);
+                let _ = tool_piped(pe, "wl-copy", &[], &stdin);
+            }
+        }
     }
     Ok(())
 }
@@ -742,6 +766,54 @@ pub fn current() -> Result<()> {
     out.write_all(b"\n")
         .context("clip: cannot write current entry")?;
     Ok(())
+}
+
+/// `flex-clip watch`: run a watcher loop that listens for Wayland selection
+/// updates by spawning `wl-paste --type text --watch flex-clip add`.
+///
+/// # Errors
+///
+/// When `wl-paste` is missing from `path_env`, spawning `wl-paste` fails, or
+/// waiting for the child process fails. Messages carry no `flex:` prefix; the
+/// runner reports them.
+pub fn watch(path_env: Option<&str>) -> Result<()> {
+    let path_env = path_env.map_or_else(ambient_path, str::to_string);
+    let Some(wl_paste) = resolve_tool("wl-paste", &path_env) else {
+        anyhow::bail!("clip: wl-paste not found on PATH");
+    };
+    let clip_bin = resolve_tool("flex-clip", &path_env)
+        .map_or_else(|| String::from("flex-clip"), |p| p.display().to_string());
+
+    let mut child = Command::new(&wl_paste)
+        .args(["--type", "text", "--watch", &clip_bin, "add"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn_retrying()
+        .with_context(|| "clip: failed to run wl-paste")?;
+
+    let term = Arc::new(AtomicBool::new(false));
+    let _ = flag::register(SIGINT, Arc::clone(&term));
+    let _ = flag::register(SIGTERM, Arc::clone(&term));
+    let _ = flag::register(SIGHUP, Arc::clone(&term));
+
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .with_context(|| "clip: failed to wait for wl-paste")?
+        {
+            if status.success() {
+                return Ok(());
+            }
+            anyhow::bail!("clip: wl-paste watcher exited with status {status}");
+        }
+        if term.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 #[cfg(test)]
@@ -892,7 +964,7 @@ mod tests {
         let dir = scratch("add");
         let hist = dir.join("hist");
         let current = dir.join("current");
-        add_with("alpha\nbeta\0\n", &hist, &current).expect("add");
+        add_with("alpha\nbeta\0\n", &hist, &current, None).expect("add");
         // NUL stripped, trailing newline trimmed, internal newline encoded.
         assert_eq!(
             std::fs::read(&current).expect("current"),
@@ -903,7 +975,7 @@ mod tests {
             b"alpha<NEWLINE>beta\n".to_vec(),
         );
         // Second add of the same entry updates current but does not re-append.
-        add_with("alpha\nbeta\n", &hist, &current).expect("add again");
+        add_with("alpha\nbeta\n", &hist, &current, None).expect("add again");
         assert_eq!(
             std::fs::read(&hist).expect("hist"),
             b"alpha<NEWLINE>beta\n".to_vec(),
@@ -917,7 +989,7 @@ mod tests {
         let dir = scratch("add-empty");
         let hist = dir.join("hist");
         let current = dir.join("current");
-        add_with("\n", &hist, &current).expect("add");
+        add_with("\n", &hist, &current, None).expect("add");
         assert!(!hist.exists());
         assert!(!current.exists());
         let _ = std::fs::remove_dir_all(&dir);
@@ -981,5 +1053,11 @@ mod tests {
     fn encode_decode_round_trip() {
         assert_eq!(clip::encode("a\nb"), "a<NEWLINE>b");
         assert_eq!(clip::decode("a<NEWLINE>b"), "a\nb");
+    }
+
+    #[test]
+    fn watch_bails_when_wl_paste_is_missing() {
+        let err = watch(Some("")).expect_err("wl-paste missing");
+        assert!(format!("{err:#}").contains("wl-paste not found on PATH"));
     }
 }

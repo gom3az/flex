@@ -19,6 +19,10 @@ name = "flex-power"
 path = "src/bin/flex-power.rs"
 
 [[bin]]
+name = "flex-profile"
+path = "src/bin/flex-profile.rs"
+
+[[bin]]
 name = "flex-launch"
 path = "src/bin/flex-launch.rs"
 
@@ -80,6 +84,7 @@ ratatui.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 unicode-width.workspace = true
+signal-hook.workspace = true
 zbus = { version = "5.19.0", default-features = false, features = ["async-io", "blocking-api"] }
 
 [lints]
