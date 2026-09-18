@@ -321,7 +321,11 @@ mod tests {
     #[test]
     fn plan_has_two_steps_preferred_then_fallback() {
         for (action, ppc_profile, tuned) in [
-            (PlannedAction::Performance, "performance", "throughput-performance"),
+            (
+                PlannedAction::Performance,
+                "performance",
+                "throughput-performance",
+            ),
             (PlannedAction::Balanced, "balanced", "balanced"),
             (PlannedAction::PowerSaver, "power-saver", "powersave"),
         ] {
@@ -342,7 +346,10 @@ mod tests {
 
     #[test]
     fn tuned_profile_mappings_are_correct() {
-        assert_eq!(PlannedAction::Performance.tuned_profile(), "throughput-performance");
+        assert_eq!(
+            PlannedAction::Performance.tuned_profile(),
+            "throughput-performance"
+        );
         assert_eq!(PlannedAction::Balanced.tuned_profile(), "balanced");
         assert_eq!(PlannedAction::PowerSaver.tuned_profile(), "powersave");
     }
