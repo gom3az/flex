@@ -148,6 +148,19 @@ fn notify_service_is_active() {
         eprintln!("e2e: no user systemd, skipping service check");
         return;
     }
+    // The unit only exists where the service was installed (not in CI
+    // containers): without a unit file there is nothing to assert.
+    let has_unit = Command::new("systemctl")
+        .args(["--user", "cat", "flex-notify.service"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    if !has_unit {
+        eprintln!("e2e: flex-notify.service not installed, skipping service check");
+        return;
+    }
     let out = run(Command::new("systemctl").args(["--user", "is-active", "flex-notify.service"]));
     let state = String::from_utf8_lossy(&out.stdout).trim().to_string();
     assert!(
