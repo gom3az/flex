@@ -158,10 +158,7 @@ pub fn render_mono(
 ) {
     let [meter_live, meter_mono] = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Fill(2),
-        ])
+        .constraints([Constraint::Length(1), Constraint::Fill(2)])
         .spacing(1)
         .areas(meter_area);
 
