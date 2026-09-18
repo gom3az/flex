@@ -1220,8 +1220,6 @@ pub fn format_toast_card(
     let yellow_bold = "\x1b[1;33m";
     let cyan = "\x1b[36m";
 
-    // ── Top Header Line ─────────────────────────────────────────────────────
-    // ╭─ icon app_name ──────── [CRITICAL] rel_time ─╮
     let left_width = 3 + 1 + 1 + item.app_name.width() + 1; // "╭─ " + icon(1) + " " + app + " "
     let crit_badge = if item.urgency == Urgency::Critical {
         " [CRITICAL]"
@@ -1249,7 +1247,6 @@ pub fn format_toast_card(
     let mut lines = Vec::new();
     lines.push(top_line);
 
-    // ── Summary Line ───────────────────────────────────────────────────────
     let summary_text = item.summary.replace('\n', " ");
     let mut sum_truncated = String::new();
     let mut sum_w = 0;
@@ -1264,7 +1261,6 @@ pub fn format_toast_card(
     let summary_formatted = format!("{bold}{sum_truncated}{reset}");
     lines.push(make_content_row(&summary_formatted, sum_w));
 
-    // ── Body Text Line ─────────────────────────────────────────────────────
     if !item.body.is_empty() {
         let body_clean = item.body.replace('\n', " ");
         let mut body_truncated = String::new();
@@ -1283,7 +1279,6 @@ pub fn format_toast_card(
         lines.push(make_content_row(&body_formatted, body_w));
     }
 
-    // ── Progress Bar Line ───────────────────────────────────────────────────
     if let Some(p) = item.progress {
         let pct = (p.clamp(0.0, 1.0) * 100.0) as usize;
         let bar_max = inner_width.saturating_sub(17);
@@ -1298,7 +1293,6 @@ pub fn format_toast_card(
         lines.push(make_content_row(&prog_str, raw_prog.width()));
     }
 
-    // ── Action Buttons ──────────────────────────────────────────────────────
     if !item.actions.is_empty() {
         let mut action_spans = format!("{bold}Actions:{reset}");
         let mut raw_actions = String::from("Actions:");
@@ -1318,7 +1312,6 @@ pub fn format_toast_card(
         lines.push(make_content_row(&action_spans, raw_actions.width()));
     }
 
-    // ── Bottom Border Line ─────────────────────────────────────────────────
     let bot_dash = "─".repeat(target_width.saturating_sub(2));
     lines.push(format!("{border_ansi}╰{bot_dash}╯{reset}"));
 
@@ -1362,7 +1355,6 @@ pub async fn run_daemon(state_path: Option<PathBuf>, _replace: bool) -> anyhow::
         .build()
         .await?;
 
-    // Keep daemon running
     std::future::pending::<()>().await;
     Ok(())
 }
@@ -1489,7 +1481,6 @@ mod tests {
 
         let srv = NotificationServer::new(Some(path.clone()));
 
-        // Ingest new notification
         let mut hints = std::collections::HashMap::new();
         hints.insert("urgency".to_string(), zbus::zvariant::Value::U8(2));
         hints.insert("value".to_string(), zbus::zvariant::Value::U8(50));
@@ -1514,7 +1505,6 @@ mod tests {
         assert_eq!(s1.notifications[0].actions.len(), 1);
         assert_eq!(s1.notifications[0].actions[0].id, "open");
 
-        // Thread update on same ID
         let mut hints_update = std::collections::HashMap::new();
         hints_update.insert("value".to_string(), zbus::zvariant::Value::U8(100));
         let id2 = srv.notify(

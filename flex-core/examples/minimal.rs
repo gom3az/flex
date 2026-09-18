@@ -12,6 +12,6 @@ fn main() -> anyhow::Result<()> {
     ];
     let menu = Menu::new("example", vec![Tab::with_rows("Items", rows)]);
     let outcome = futures::executor::block_on(flex_core::run::run_capture(menu))?;
-    println!("{:?}", outcome);
+    println!("{outcome:?}");
     Ok(())
 }

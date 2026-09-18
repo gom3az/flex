@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, development]
   pull_request:
 
 env:
@@ -26,5 +26,5 @@ jobs:
         run: cargo test --locked
       - name: Release build (workspace profile)
         run: cargo build --locked --release
-      - name: Install + verify the fifteen links (setup.sh)
+      - name: Install + verify the sixteen links (setup.sh)
         run: ./setup.sh && ./setup.sh --check

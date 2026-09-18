@@ -706,11 +706,9 @@ Device 00:1B:66:81:28:B4 MX Master 3S
         assert_eq!(tab.name, TAB_DEVICES);
         assert_eq!(tab.rows.len(), 3);
 
-        // Row 0: Top power toggle
         assert_eq!(tab.rows[0].id.as_str(), POWER_OFF_ID);
         assert_eq!(tab.rows[0].label, "Turn Bluetooth Off");
 
-        // Row 1: Connected headphones
         assert_eq!(tab.rows[1].label, "WH-1000XM4 F4:4E:FC:21:40:48");
         assert_eq!(tab.rows[1].meta.as_deref(), Some("Connected (85%) · Audio"));
         assert!(tab.rows[1].is_default);
@@ -721,7 +719,6 @@ Device 00:1B:66:81:28:B4 MX Master 3S
         assert_eq!(tab.rows[1].targets[2].title, "Set as Default Audio Sink");
         assert!(tab.rows[1].targets[2].is_default);
 
-        // Row 2: Available mouse
         assert_eq!(tab.rows[2].label, "MX Master 3S 00:1B:66:81:28:B4");
         assert_eq!(tab.rows[2].meta.as_deref(), Some("Available (-64 dBm)"));
         assert!(!tab.rows[2].is_default);

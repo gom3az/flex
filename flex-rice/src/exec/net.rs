@@ -473,7 +473,6 @@ pub fn scan_top_talkers() -> Vec<ProcessBandwidth> {
     write_proc_stat_cache(&proc_stat_path, &fresh_cache);
     *guard = fresh_cache;
 
-    // Calculate bandwidth share
     let total_active_bandwidth: f64 = results.iter().map(|p| p.total_rate).sum();
     for p in &mut results {
         if total_active_bandwidth > 0.0 {
@@ -485,7 +484,6 @@ pub fn scan_top_talkers() -> Vec<ProcessBandwidth> {
         }
     }
 
-    // Sort descending by total rate, then PID ascending
     results.sort_by(|a, b| {
         b.total_rate
             .partial_cmp(&a.total_rate)
@@ -685,7 +683,6 @@ pub fn sample_json() -> String {
         }
     }
 
-    // Escape tooltip for JSON string
     let escaped_tooltip = tooltip
         .replace('\\', "\\\\")
         .replace('\n', "\\n")

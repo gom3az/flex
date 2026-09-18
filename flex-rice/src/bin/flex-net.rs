@@ -147,7 +147,6 @@ async fn run() -> anyhow::Result<()> {
             }
         }
     } else {
-        // Default (zero arguments / headless): emit single Waybar JSON payload
         println!("{}", net::sample_json());
         Ok(())
     }
