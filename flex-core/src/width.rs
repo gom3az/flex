@@ -121,7 +121,7 @@ pub fn measure(text: &str) -> Measured {
                 break;
             }
             let (_, zwj) = chars.next().expect("peeked ZWJ");
-            debug_assert!(zwj == ZWJ);
+            debug_assert_eq!(zwj, ZWJ);
             let (next_start, next) = chars.next().expect("probed pair tail");
             end = next_start + next.len_utf8();
             joined = true;
