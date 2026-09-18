@@ -1,4 +1,10 @@
-//! `profile` executor: the power-profile selection flow (`powerprofilesctl`).
+//! `profile` executor: the power-profile selection flow (`powerprofilesctl`
+//! with `tuned-adm` as a fallback).
+//!
+//! Both backends are direct `Command` spawns — no shell is involved.
+//! [`run_step`] attempts `powerprofilesctl set <profile>` first; only when
+//! that binary is absent or exits non-zero does it try
+//! `tuned-adm profile <tuned-profile>`.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -57,13 +63,27 @@ impl PlannedAction {
             Self::PowerSaver => "power-saver",
         }
     }
+
+    /// `tuned-adm` profile name that corresponds to this action.
+    ///
+    /// Used as a fallback when `powerprofilesctl` is absent.
+    #[must_use]
+    pub fn tuned_profile(&self) -> &'static str {
+        match self {
+            Self::Performance => "throughput-performance",
+            Self::Balanced => "balanced",
+            Self::PowerSaver => "powersave",
+        }
+    }
 }
 
 /// One profile step: a tool spawn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Step {
-    /// `powerprofilesctl set <profile>`.
+    /// `powerprofilesctl set <profile>` — preferred backend.
     PowerprofilesctlSet(String),
+    /// `tuned-adm profile <profile>` — fallback when `powerprofilesctl` is absent.
+    TunedAdmProfile(String),
 }
 
 /// What [`execute`] did.
@@ -78,9 +98,17 @@ pub struct ExecuteReport {
 }
 
 /// Build the [`Step`]s for a decided [`PlannedAction`].
+///
+/// Returns the preferred step first (`powerprofilesctl`) followed by the
+/// fallback (`tuned-adm`). [`run_step`] stops after the first success, so
+/// only one tool runs at runtime; dry-run output shows both to be transparent
+/// about what *would* run.
 #[must_use]
 pub fn plan(planned: &PlannedAction) -> Vec<Step> {
-    vec![Step::PowerprofilesctlSet(planned.as_str().to_string())]
+    vec![
+        Step::PowerprofilesctlSet(planned.as_str().to_string()),
+        Step::TunedAdmProfile(planned.tuned_profile().to_string()),
+    ]
 }
 
 /// Render one [`Step`] as a single snapshot line.
@@ -88,6 +116,7 @@ pub fn plan(planned: &PlannedAction) -> Vec<Step> {
 pub fn describe(step: &Step) -> String {
     match step {
         Step::PowerprofilesctlSet(profile) => format!("powerprofilesctl set {profile}"),
+        Step::TunedAdmProfile(profile) => format!("tuned-adm profile {profile}"),
     }
 }
 
@@ -137,35 +166,35 @@ fn decide(action: &ProfileAction) -> Result<PlannedAction> {
     }
 }
 
-#[allow(clippy::unnecessary_wraps)]
-fn run_step(step: &Step, path_env: &str) -> Result<()> {
+/// Attempt one step and report whether it succeeded.
+///
+/// Both backends are direct `Command` spawns — no shell. The caller iterates
+/// steps in order and stops after the first success.
+fn run_step(step: &Step, path_env: &str) -> bool {
     match step {
         Step::PowerprofilesctlSet(profile) => {
-            let tuned_profile = match profile.as_str() {
-                "performance" => "throughput-performance",
-                "power-saver" => "powersave",
-                _ => "balanced",
+            let Some(bin) = resolve_tool("powerprofilesctl", path_env) else {
+                return false;
             };
-            let script = format!(
-                "powerprofilesctl set {profile} 2>/dev/null || tuned-adm profile {tuned_profile}"
-            );
-            if let Some(setsid) = resolve_tool("setsid", path_env) {
-                let _ = Command::new(setsid)
-                    .args(["-f", "sh", "-c", &script])
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status_retrying();
-            } else {
-                let _ = Command::new("sh")
-                    .args(["-c", &script])
-                    .env("PATH", path_env)
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .spawn();
-            }
-            Ok(())
+            Command::new(&bin)
+                .args(["set", profile])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status_retrying()
+                .is_ok_and(|s| s.success())
+        }
+        Step::TunedAdmProfile(profile) => {
+            let Some(bin) = resolve_tool("tuned-adm", path_env) else {
+                return false;
+            };
+            Command::new(&bin)
+                .args(["profile", profile])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status_retrying()
+                .is_ok_and(|s| s.success())
         }
     }
 }
@@ -186,9 +215,14 @@ pub fn execute(action_id: &str, path_env: Option<&str>) -> Result<ExecuteReport>
 
 /// Effect half of [`execute`].
 ///
+/// Tries each step in [`plan`] order and stops after the first success.
+/// On a system with `powerprofilesctl`, only that step runs. On a system
+/// without it, `tuned-adm` is tried next.
+///
 /// # Errors
 ///
-/// When `powerprofilesctl` is missing or fails.
+/// Only when the id is malformed or the report cannot be built; individual
+/// tool spawns that fail are silently skipped (both tools may be absent).
 pub fn execute_with(
     action_id: &str,
     planned: &PlannedAction,
@@ -212,8 +246,8 @@ pub fn execute_with(
     }
     crate::providers::profile::save_active_profile(planned.as_str());
     for step in &steps {
-        if let Err(err) = run_step(step, &path_env) {
-            flex_core::diag::note(&format!("{err}"));
+        if run_step(step, &path_env) {
+            break;
         }
     }
     Ok(ExecuteReport {
@@ -266,5 +300,50 @@ mod tests {
             describe(&Step::PowerprofilesctlSet("power-saver".to_string())),
             "powerprofilesctl set power-saver"
         );
+    }
+
+    #[test]
+    fn describe_matches_tuned_adm() {
+        assert_eq!(
+            describe(&Step::TunedAdmProfile("throughput-performance".to_string())),
+            "tuned-adm profile throughput-performance"
+        );
+        assert_eq!(
+            describe(&Step::TunedAdmProfile("balanced".to_string())),
+            "tuned-adm profile balanced"
+        );
+        assert_eq!(
+            describe(&Step::TunedAdmProfile("powersave".to_string())),
+            "tuned-adm profile powersave"
+        );
+    }
+
+    #[test]
+    fn plan_has_two_steps_preferred_then_fallback() {
+        for (action, ppc_profile, tuned) in [
+            (PlannedAction::Performance, "performance", "throughput-performance"),
+            (PlannedAction::Balanced, "balanced", "balanced"),
+            (PlannedAction::PowerSaver, "power-saver", "powersave"),
+        ] {
+            let steps = plan(&action);
+            assert_eq!(steps.len(), 2, "plan always has preferred + fallback");
+            assert_eq!(
+                steps[0],
+                Step::PowerprofilesctlSet(ppc_profile.to_string()),
+                "first step is powerprofilesctl"
+            );
+            assert_eq!(
+                steps[1],
+                Step::TunedAdmProfile(tuned.to_string()),
+                "second step is tuned-adm fallback"
+            );
+        }
+    }
+
+    #[test]
+    fn tuned_profile_mappings_are_correct() {
+        assert_eq!(PlannedAction::Performance.tuned_profile(), "throughput-performance");
+        assert_eq!(PlannedAction::Balanced.tuned_profile(), "balanced");
+        assert_eq!(PlannedAction::PowerSaver.tuned_profile(), "powersave");
     }
 }
