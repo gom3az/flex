@@ -165,19 +165,23 @@ pub fn network_rows(nets: &[center::WifiNet], saved: &[String]) -> Vec<Row> {
             center::NO_NETWORKS_LABEL,
         )];
     }
+    // OPT-8: compute each row's security text once (was once for the width
+    // scan plus once inside `net_meta`), then reuse for width + meta.
+    let security_texts: Vec<String> = nets.iter().map(security_text).collect();
     // One width for the whole list, so the security class and the state
     // column line up down the list.
-    let security_width = nets
+    let security_width = security_texts
         .iter()
-        .map(|net| width::str_width(&security_text(net)))
+        .map(|text| width::str_width(text))
         .max()
         .unwrap_or_default();
     nets.iter()
-        .map(|net| {
+        .zip(security_texts.iter())
+        .map(|(net, security)| {
             Row::with_meta(
                 RowId::new(CONNECT_ID),
                 net.ssid.clone(),
-                net_meta(net, security_width, state_marker(net, saved)),
+                net_meta_with_security(net, security, security_width, state_marker(net, saved)),
             )
         })
         .collect()
@@ -224,11 +228,24 @@ pub fn security_text(net: &center::WifiNet) -> String {
 /// `security_width` comes from [`network_rows`].
 #[must_use]
 pub fn net_meta(net: &center::WifiNet, security_width: usize, state: &str) -> String {
+    let security = security_text(net);
+    net_meta_with_security(net, &security, security_width, state)
+}
+
+/// [`net_meta`] with a precomputed `security` cell (OPT-8: hoists the
+/// per-row `security_text` allocation out of the width scan).
+#[must_use]
+pub fn net_meta_with_security(
+    net: &center::WifiNet,
+    security: &str,
+    security_width: usize,
+    state: &str,
+) -> String {
     let meta = format!(
         "{signal:>3}% {bar:<bar_w$}  {security:<security_w$}  {state:>state_w$}",
         signal = net.signal,
         bar = center::bar(net.signal, 100, 8),
-        security = security_text(net),
+        security = security,
         bar_w = BAR_WIDTH,
         security_w = security_width,
         state_w = STATE_WIDTH,
@@ -519,8 +536,8 @@ fn visible_position(menu: &Menu, pred: impl Fn(&Row) -> bool) -> Option<usize> {
     let rows = &menu.app.active_tab()?.rows;
     menu.app
         .visible_rows()
-        .into_iter()
-        .position(|index| rows.get(index).is_some_and(&pred))
+        .iter()
+        .position(|&index| rows.get(index).is_some_and(&pred))
 }
 
 /// Run the real (multi-second) scan off the UI thread and publish its rows.

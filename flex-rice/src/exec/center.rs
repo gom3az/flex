@@ -97,7 +97,7 @@
 
 use std::fs::File;
 use std::io::{BufRead as _, BufReader};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use anyhow::{Context as _, Result};
@@ -106,6 +106,7 @@ use crate::exec::theme;
 use crate::providers::{center, launch};
 use crate::spawn::RetryExec as _;
 use crate::terminal::{self, TerminalKind};
+use crate::tools;
 
 /// Which menu outcome is being executed: the wrapper has live `select` and
 /// `toggle` arms (toggle only acts on `vol`/`bt:*`, everything else no-ops).
@@ -597,7 +598,7 @@ pub fn wpctl_cmd() -> String {
 /// The ambient `PATH`, empty when unset (tool resolution then fails cleanly
 /// instead of inheriting a surprising default).
 fn ambient_path() -> String {
-    std::env::var("PATH").unwrap_or_default()
+    tools::ambient_path()
 }
 
 /// Resolve `name` against `path_env` (`:`-separated, shell-style).
@@ -607,11 +608,12 @@ fn ambient_path() -> String {
 /// `name` (the usual override shape) resolves to itself, exactly like the
 /// wrapper's `"$nmcli_cmd" …` direct invocation.
 fn resolve_tool(name: &str, path_env: &str) -> Option<PathBuf> {
-    path_env
-        .split(':')
-        .map(|dir| Path::new(dir).join(name))
-        .find(|candidate| candidate.is_file())
+    tools::resolve_tool(name, path_env)
 }
+
+/// Fixed query argv shapes (OPT-11): `&'static` consts, no per-query `Vec<String>`.
+const DEVICE_TYPE_ARGS: &[&str] = &["-t", "-f", "DEVICE,TYPE", "device"];
+const BT_INFO_ARG: &str = "info";
 
 /// Run one tool with `args` (loud): stdin nulled, stdout/stderr inherited
 /// like the wrapper's bare power/theme invocations (feedback reaches the
@@ -660,19 +662,14 @@ fn tool_captured(path_env: &str, name: &str, args: &[String]) -> Option<String> 
         .stderr(Stdio::null())
         .output_retrying()
         .ok()?;
-    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+    Some(tools::decode_stdout(output.stdout))
 }
 
 /// First Wi-Fi interface from `nmcli -t -f DEVICE,TYPE device` (the
 /// wrapper's `awk -F: '$2=="wifi"{print $1; exit}'`, shared with the
 /// provider scan). `None` when the interface vanished since the snapshot.
 fn wifi_iface(nmcli: &str, path_env: &str) -> Option<String> {
-    let args = vec![
-        String::from("-t"),
-        String::from("-f"),
-        String::from("DEVICE,TYPE"),
-        String::from("device"),
-    ];
+    let args: Vec<String> = DEVICE_TYPE_ARGS.iter().map(ToString::to_string).collect();
     let out = tool_captured(path_env, nmcli, &args)?;
     center::parse_nmcli_devices(&out)
 }
@@ -697,7 +694,7 @@ fn wifi_list(nmcli: &str, path_env: &str, iface: &str) -> Option<String> {
 /// wrapper's `… | grep -q 'Connected: yes'`: substring match, and any probe
 /// failure counts as disconnected).
 fn bt_connected(bt: &str, path_env: &str, mac: &str) -> bool {
-    let args = vec![String::from("info"), mac.to_string()];
+    let args = vec![BT_INFO_ARG.to_string(), mac.to_string()];
     tool_captured(path_env, bt, &args).is_some_and(|out| out.contains("Connected: yes"))
 }
 
@@ -1449,7 +1446,7 @@ mod tests {
         std::env::set_var("THEME_SWITCHER", "/tmp/stub-switcher.sh");
         assert_eq!(
             theme::theme_switcher_override().as_deref(),
-            Some(Path::new("/tmp/stub-switcher.sh"))
+            Some(std::path::Path::new("/tmp/stub-switcher.sh"))
         );
         std::env::set_var("THEME_SWITCHER", "");
         std::env::set_var("HOME", "/tmp/fake-home");

@@ -34,6 +34,10 @@
 //! `— no matches —` empty state, the `-- confirm` suffix, offline dimming and
 //! label sanitizing.
 
+use std::cell::RefCell;
+use std::fmt::Write as _;
+use std::sync::{Arc, OnceLock};
+
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Direction, Flex, Layout, Rect};
 use ratatui::style::Style;
@@ -45,7 +49,7 @@ use crate::charset::CharSet;
 use crate::preview;
 use crate::theme::Theme;
 use crate::width;
-use crate::{meter, Menu, Peaks, Row};
+use crate::{meter, Menu, Peaks, Row, RowTextCache};
 
 /// Upstream `NodeWidget::height()` (`node_widget.rs:53-55`).
 pub const NODE_HEIGHT: u16 = 3;
@@ -128,6 +132,16 @@ pub const EMPTY_STATE: &str = "— no matches —";
 pub const OFFLINE_STATE: &str = "— offline";
 /// Flex extension: the filter prompt glyph (`›`).
 pub const FILTER_PROMPT: char = '›';
+/// Flex extension: the filter prompt glyph as a renderable span (`›`).
+pub const FILTER_PROMPT_STR: &str = "›";
+/// Placeholder shown on the filter line when no filter is typed.
+pub const FILTER_EMPTY_TEXT: &str = "filter…";
+/// Upstream's 3-cell ASCII ellipsis area between a clipped title and target.
+pub const TITLE_ELLIPSES: &str = "...";
+/// Upstream volume-label replacement while muted (`node_widget.rs:421-423`).
+pub const MUTED_TEXT: &str = "muted";
+/// Suffix appended to an armed confirmable row's label.
+pub const CONFIRM_SUFFIX: &str = " -- confirm";
 /// Flex extension: the count separator on the filter line.
 pub const HELP_LINES: &[&str] = &[
     "j/k move focus      h/l switch tab",
@@ -145,6 +159,68 @@ pub const HELP_LINES: &[&str] = &[
     "q quit (NORMAL + empty filter)",
     "Esc clear / close / disarm / quit",
 ];
+
+/// Hoisted `Layout` constraints (OPT-4): one `const` per call-site shape so
+/// the draw paths never build a solver or a `Vec<Constraint>` per node.
+const LIST_SPLIT: [Constraint; 3] = [
+    Constraint::Length(1),
+    Constraint::Min(0),
+    Constraint::Length(1),
+];
+const NODE_SPLIT: [Constraint; 2] = [Constraint::Length(1), Constraint::Min(0)];
+const SUBLABEL_SPLIT: [Constraint; 2] = [Constraint::Min(0), Constraint::Length(1)];
+const DETAIL_SPLIT: [Constraint; 2] = [Constraint::Min(0), Constraint::Length(1)];
+const DETAIL_METER_SPLIT: [Constraint; 5] = [
+    Constraint::Length(2),
+    Constraint::Fill(4),
+    Constraint::Fill(1),
+    Constraint::Fill(4),
+    Constraint::Fill(1),
+];
+const DETAIL_VOLUME_SPLIT: [Constraint; 3] = [
+    Constraint::Length(2),
+    Constraint::Fill(9),
+    Constraint::Fill(1),
+];
+const VOLUME_SPLIT: [Constraint; 2] = [Constraint::Length(5), Constraint::Min(0)];
+
+thread_local! {
+    /// Scratch text buffers reused across cells instead of `format!`,
+    /// `repeat` or `to_string` per frame (OPT-4). Borrowed spans over these
+    /// live only for the `render` call that draws them.
+    static SCRATCH_A: RefCell<String> = const { RefCell::new(String::new()) };
+    static SCRATCH_B: RefCell<String> = const { RefCell::new(String::new()) };
+}
+
+/// Cached display width of [`HELP_LINES`]' longest line (OPT-3): measured
+/// once per process instead of per frame.
+fn help_content_width() -> usize {
+    static WIDTH: OnceLock<usize> = OnceLock::new();
+    *WIDTH.get_or_init(|| {
+        HELP_LINES
+            .iter()
+            .map(|line| width::str_width(line))
+            .max()
+            .unwrap_or(0)
+    })
+}
+
+/// Per-frame values hoisted out of the per-row draw paths (OPT-4).
+///
+/// The marker glyphs come from the active [`CharSet`], so their widths are
+/// measured once in [`render`] instead of once per row in `draw_header`.
+struct FrameCtx {
+    /// Ranked provider-row indices for the active filter, computed once per
+    /// frame and shared (OPT-2): every draw path borrows this `Arc` instead
+    /// of calling `visible_rows()` again.
+    visible: Arc<[usize]>,
+    /// Node metrics for the active tab (computed once).
+    metrics: NodeMetrics,
+    /// Display width of the `default_stream` marker glyph + spacer.
+    target_marker_w: usize,
+    /// Display width of the `default_device` marker glyph.
+    device_marker_w: usize,
+}
 
 /// Vertical frame split: the list height plus the chrome flags the renderer
 /// branches on (`run` needs the same numbers to place the image pane).
@@ -229,10 +305,19 @@ pub fn render(frame: &mut Frame, menu: &mut Menu) {
     // chrome below stays full width). `None` on frames too small for it, and
     // whenever the provider did not ask for one — then the list keeps the
     // whole width, exactly as before.
-    let has_image = menu
-        .app
-        .focused_row()
-        .is_some_and(|r| r.preview_image.is_some());
+    // OPT-2: the filtered view is computed once per frame here and threaded
+    // through every draw helper below — no `visible_rows()` recomputes.
+    let visible = menu.app.visible_rows();
+    let has_image = menu.app.active_tab().is_some_and(|tab| {
+        if visible.is_empty() {
+            return false;
+        }
+        let focus = tab.state.focus.min(visible.len() - 1);
+        visible
+            .get(focus)
+            .and_then(|&index| tab.rows.get(index))
+            .is_some_and(|row| row.preview_image.is_some())
+    });
     let pane = preview::pane(area, list_h, menu.preview && has_image);
     let list_w = match pane {
         // One gutter column between the rows and the image.
@@ -246,12 +331,23 @@ pub fn render(frame: &mut Frame, menu: &mut Menu) {
     let metrics = node_metrics(menu);
     let list_rows = list_h.saturating_sub(LIST_INDICATOR_ROWS);
     let entries_visible = usize::from(list_rows) / usize::from(metrics.pitch());
-    menu.app.ensure_visible(entries_visible);
+    menu.app.ensure_visible_with(entries_visible, visible.len());
+
+    // Per-frame hoists (OPT-3/OPT-4): the visible view, the node metrics and
+    // the charset marker widths are computed once here and threaded through
+    // the draw paths, which must not re-measure, re-sanitize or re-solve
+    // layouts per row. No full-screen fill: the background style is the
+    // terminal default, so an untouched `Buffer` already matches it and the
+    // `Buffer` diff skips unchanged cells by itself.
+    let ctx = FrameCtx {
+        visible,
+        metrics,
+        target_marker_w: width::str_width(menu.char_set.default_stream) + 1,
+        device_marker_w: width::str_width(menu.char_set.default_device),
+    };
 
     let buf = frame.buffer_mut();
-    fill_bg(buf, area.x, area.y, width_cells, height);
-
-    draw_list(buf, list_area, menu);
+    draw_list(buf, list_area, menu, &ctx);
     if !bare {
         if gauge_on && height >= 4 {
             draw_gauge(
@@ -270,6 +366,7 @@ pub fn render(frame: &mut Frame, menu: &mut Menu) {
                     area.y + area.height - 2 - TAB_BAR_HEIGHT,
                     width_cells,
                     menu,
+                    &ctx.visible,
                 );
             }
             draw_hints(
@@ -291,28 +388,13 @@ pub fn render(frame: &mut Frame, menu: &mut Menu) {
         );
     }
 
-    draw_dropdown(buf, list_area, menu);
+    draw_dropdown(buf, list_area, menu, &ctx);
 
     if menu.app.help_open {
         draw_help(buf, list_area, menu);
     }
 
     place_cursor(frame, area, menu, bare || !filterable);
-}
-
-fn fill_bg(buf: &mut Buffer, ox: u16, oy: u16, width: usize, height: usize) {
-    let style = Theme::background();
-    for dy in 0..height {
-        for dx in 0..width {
-            #[allow(clippy::cast_possible_truncation)]
-            let (x, y) = (ox + dx as u16, oy + dy as u16);
-            if let Some(cell) = buf.cell_mut((x, y)) {
-                cell.set_symbol(" ");
-                cell.set_style(style);
-                cell.set_skip(false);
-            }
-        }
-    }
 }
 
 /// Tab bar: `[Active] Inactive ` with upstream widths (`app.rs:757-790`).
@@ -329,13 +411,16 @@ fn draw_tab_bar(buf: &mut Buffer, ox: u16, y: u16, width: usize, menu: &Menu) {
     let theme = &menu.theme;
     let total_tabs = menu.app.tabs.len();
 
-    let tab_widths: Vec<u16> = menu
-        .app
-        .tabs
+    // Tab titles come from the per-tab memo (OPT-3): sanitized once per
+    // content change, borrowed here with no per-frame measure or alloc.
+    let names: Vec<std::cell::Ref<'_, crate::CachedText>> =
+        menu.app.tabs.iter().map(|tab| tab.name_texts()).collect();
+    let tab_widths: Vec<u16> = names
         .iter()
-        .map(|tab| {
-            let name_w = u16::try_from(width::str_width(&tab.name)).unwrap_or(u16::MAX);
-            name_w.saturating_add(2)
+        .map(|name| {
+            u16::try_from(name.measured.width)
+                .unwrap_or(u16::MAX)
+                .saturating_add(2)
         })
         .collect();
 
@@ -343,20 +428,26 @@ fn draw_tab_bar(buf: &mut Buffer, ox: u16, y: u16, width: usize, menu: &Menu) {
 
     if total_needed <= width {
         let mut cur_x = ox;
-        for (index, tab) in menu.app.tabs.iter().enumerate() {
+        for (index, name) in names.iter().enumerate() {
             let tab_w = tab_widths[index];
             let tab_area = Rect::new(cur_x, y, tab_w, 1);
             let line = if index == menu.app.active {
                 Line::from(vec![
                     Span::styled(char_set.tab_marker_left, theme.tab_marker),
-                    Span::styled(tab.name.clone(), theme.tab_selected),
+                    Span::styled(name.sanitized.as_str(), theme.tab_selected),
                     Span::styled(char_set.tab_marker_right, theme.tab_marker),
                 ])
             } else {
-                Line::from(Span::styled(
-                    format!(" {} ", width::sanitize(&tab.name)),
-                    theme.tab,
-                ))
+                SCRATCH_A.with(|slot| {
+                    let mut scratch = slot.borrow_mut();
+                    scratch.clear();
+                    scratch.push(' ');
+                    scratch.push_str(&name.sanitized);
+                    scratch.push(' ');
+                    Line::from(Span::styled(scratch.as_str(), theme.tab)).render(tab_area, buf);
+                });
+                cur_x = cur_x.saturating_add(tab_w);
+                continue;
             };
             line.render(tab_area, buf);
             cur_x = cur_x.saturating_add(tab_w);
@@ -411,32 +502,35 @@ fn draw_tab_bar(buf: &mut Buffer, ox: u16, y: u16, width: usize, menu: &Menu) {
     }
 
     for index in start..=end {
-        let tab = &menu.app.tabs[index];
-        let tab_w = tab_widths[index];
         let available = width.saturating_sub(usize::from(cur_x - ox));
         if available == 0 {
             break;
         }
         let right_ind_reserved = usize::from(end < total_tabs - 1 && index == end);
-        let render_w = tab_w
+        let render_w = tab_widths[index]
             .min(u16::try_from(available.saturating_sub(right_ind_reserved)).unwrap_or(u16::MAX));
         if render_w == 0 {
             break;
         }
         let tab_area = Rect::new(cur_x, y, render_w, 1);
-        let line = if index == menu.app.active {
+        let name = &names[index];
+        if index == menu.app.active {
             Line::from(vec![
                 Span::styled(char_set.tab_marker_left, theme.tab_marker),
-                Span::styled(tab.name.clone(), theme.tab_selected),
+                Span::styled(name.sanitized.as_str(), theme.tab_selected),
                 Span::styled(char_set.tab_marker_right, theme.tab_marker),
             ])
+            .render(tab_area, buf);
         } else {
-            Line::from(Span::styled(
-                format!(" {} ", width::sanitize(&tab.name)),
-                theme.tab,
-            ))
-        };
-        line.render(tab_area, buf);
+            SCRATCH_A.with(|slot| {
+                let mut scratch = slot.borrow_mut();
+                scratch.clear();
+                scratch.push(' ');
+                scratch.push_str(&name.sanitized);
+                scratch.push(' ');
+                Line::from(Span::styled(scratch.as_str(), theme.tab)).render(tab_area, buf);
+            });
+        }
         cur_x = cur_x.saturating_add(render_w);
     }
 
@@ -456,11 +550,11 @@ pub fn node_metrics(menu: &Menu) -> NodeMetrics {
     }
 }
 
-fn draw_list(buf: &mut Buffer, list_area: Rect, menu: &mut Menu) {
+fn draw_list(buf: &mut Buffer, list_area: Rect, menu: &mut Menu, ctx: &FrameCtx) {
     if list_area.width == 0 || list_area.height == 0 {
         return;
     }
-    let visible = menu.app.visible_rows();
+    let visible: &[usize] = &ctx.visible;
     let Some(tab) = menu.app.active_tab() else {
         draw_empty(buf, list_area, menu);
         return;
@@ -472,16 +566,13 @@ fn draw_list(buf: &mut Buffer, list_area: Rect, menu: &mut Menu) {
 
     // Upstream `ObjectListWidget::areas` reserves one line above and one
     // below the list for the `•••` indicators (`object_list.rs:301-311`).
+    // The split shape is hoisted to [`LIST_SPLIT`] (OPT-4).
     let [header_area, rows_area, footer_area] = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1), // header_area
-            Constraint::Min(0),    // list_area
-            Constraint::Length(1), // footer_area
-        ])
+        .constraints(LIST_SPLIT)
         .areas(list_area);
 
-    let metrics = node_metrics(menu);
+    let metrics = ctx.metrics;
     let len = visible.len();
     let scroll = tab.state.scroll;
 
@@ -523,7 +614,16 @@ fn draw_list(buf: &mut Buffer, list_area: Rect, menu: &mut Menu) {
         let item_rect = Rect::new(rows_area.x, current_y, rows_area.width, h);
         let selected = scroll + offset == tab.state.focus;
         let armed_confirm = selected && row.confirmable && tab.state.is_armed();
-        draw_node(buf, item_rect, menu, row, selected, armed_confirm, row_m);
+        draw_node(
+            buf,
+            item_rect,
+            menu,
+            row,
+            selected,
+            armed_confirm,
+            row_m,
+            ctx,
+        );
         let next_is_compact = visible
             .get(scroll + offset + 1)
             .and_then(|&idx| tab.rows.get(idx))
@@ -548,6 +648,7 @@ fn draw_list(buf: &mut Buffer, list_area: Rect, menu: &mut Menu) {
 
 /// One node row: selector column + header + detail line
 /// (upstream `node_widget.rs:95-199`).
+#[allow(clippy::too_many_arguments)]
 fn draw_node(
     buf: &mut Buffer,
     area: Rect,
@@ -556,16 +657,18 @@ fn draw_node(
     selected: bool,
     armed_confirm: bool,
     metrics: NodeMetrics,
+    ctx: &FrameCtx,
 ) {
     if area.width == 0 || area.height == 0 {
         return;
     }
+    // One guard covers the whole node (OPT-3): every text below borrows the
+    // row's memoized sanitized strings, so nothing here sanitizes, measures
+    // or allocates per cell.
+    let texts = row.texts();
     let [selector_area, node_area] = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(1), // selector_area
-            Constraint::Min(0),    // node_area
-        ])
+        .constraints(NODE_SPLIT)
         .areas(area);
 
     draw_selector(
@@ -584,29 +687,29 @@ fn draw_node(
             Rect::new(node_area.x, node_area.y, node_area.width, 1),
             menu,
             row,
+            &texts,
             armed_confirm,
+            ctx,
         );
     }
 
     // Middle line (sublabel) on the node's second line.
-    if metrics.height >= NODE_HEIGHT && node_area.height >= 2 {
-        if let Some(sublabel) = &row.sublabel {
-            let sublabel_area = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Min(0), Constraint::Length(1)])
-                .horizontal_margin(1)
-                .split(Rect::new(node_area.x, node_area.y + 1, node_area.width, 1))[0];
-            let style = if row.offline {
-                menu.theme.offline
-            } else {
-                menu.theme.node_title
-            };
-            Line::from(vec![
-                Span::from("  "),
-                Span::styled(width::sanitize(sublabel), style),
-            ])
-            .render(sublabel_area, buf);
-        }
+    if metrics.height >= NODE_HEIGHT && node_area.height >= 2 && texts.sublabel.src.is_some() {
+        let sublabel_area = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints(SUBLABEL_SPLIT)
+            .horizontal_margin(1)
+            .split(Rect::new(node_area.x, node_area.y + 1, node_area.width, 1))[0];
+        let style = if row.offline {
+            menu.theme.offline
+        } else {
+            menu.theme.node_title
+        };
+        Line::from(vec![
+            Span::from("  "),
+            Span::styled(texts.sublabel.sanitized.as_str(), style),
+        ])
+        .render(sublabel_area, buf);
     }
 
     // Detail line on the node's third line: a compact node (flex extension)
@@ -622,6 +725,7 @@ fn draw_node(
             ),
             menu,
             row,
+            &texts,
         );
     }
 }
@@ -660,9 +764,25 @@ fn draw_selector(
     }
 }
 
+/// Width of [`CONFIRM_SUFFIX`] in cells (pure ASCII, so bytes == cells).
+const CONFIRM_SUFFIX_W: usize = CONFIRM_SUFFIX.len();
+
 /// Header line: `◇` marker, title, right-aligned target/meta
 /// (upstream `HeaderWidget`, `node_widget.rs:239-360`).
-fn draw_header(buf: &mut Buffer, area: Rect, menu: &Menu, row: &Row, armed_confirm: bool) {
+///
+/// All text comes from the row memo (`texts` + the target memo): widths are
+/// arithmetic over cached measures, so this performs no sanitize, no
+/// measure and no per-cell allocation (OPT-3/OPT-4).
+#[allow(clippy::too_many_lines)]
+fn draw_header(
+    buf: &mut Buffer,
+    area: Rect,
+    menu: &Menu,
+    row: &Row,
+    texts: &RowTextCache,
+    armed_confirm: bool,
+    ctx: &FrameCtx,
+) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -670,28 +790,37 @@ fn draw_header(buf: &mut Buffer, area: Rect, menu: &Menu, row: &Row, armed_confi
     let theme = &menu.theme;
     let bare = menu.app.active_tab().is_some_and(|tab| tab.bare_rows);
 
-    // Right column: the row's current target (upstream `target_line`,
-    // `node_widget.rs:258-279`), else flex's generic meta.
-    let target_line = if bare && !row.meta.as_deref().is_some_and(|m| m.contains("Active")) {
-        Line::default()
-    } else if !row.hide_target_in_header && row.current_target().is_some() {
-        let target = row.current_target().unwrap();
-        let title = width::sanitize(&target.title);
-        if target.is_default {
-            Line::from(vec![
-                Span::styled(char_set.default_stream, theme.default_stream),
-                Span::from(" "),
-                Span::styled(title, theme.node_target),
-            ])
+    // The row's current target memo, held while the header renders so the
+    // right column borrows it instead of re-sanitizing the title.
+    let target_guard = row.current_target().map(|target| target.title_texts());
+
+    // Right column width, mirroring the spans rendered below (what the old
+    // `target_line.width()` reported, without measuring).
+    let has_active_meta = row.meta.as_deref().is_some_and(|m| m.contains("Active"));
+    let target_width = if bare && !has_active_meta {
+        0
+    } else if !row.hide_target_in_header {
+        if let Some(target) = row.current_target() {
+            let title_w = target_guard
+                .as_ref()
+                .map_or(0, |guard| guard.measured.width);
+            title_w
+                + if target.is_default {
+                    ctx.target_marker_w
+                } else {
+                    0
+                }
+        } else if texts.meta.src.is_some() {
+            texts.meta.measured.width
         } else {
-            Line::from(Span::styled(title, theme.node_target))
+            0
         }
-    } else if let Some(meta) = &row.meta {
-        Line::from(Span::styled(width::sanitize(meta), theme.node_target))
+    } else if texts.meta.src.is_some() {
+        texts.meta.measured.width
     } else {
-        Line::default()
+        0
     };
-    let target_width = u16::try_from(target_line.width()).unwrap_or(u16::MAX);
+    let target_width = u16::try_from(target_width).unwrap_or(u16::MAX);
 
     // Upstream splits `Min(1) title_area | Length(target_width) target_area`
     // with a 1-cell horizontal margin and 1-cell spacing
@@ -710,24 +839,23 @@ fn draw_header(buf: &mut Buffer, area: Rect, menu: &Menu, row: &Row, armed_confi
     } else {
         Span::from(" ")
     };
-    let label = if armed_confirm {
-        format!("{} -- confirm", row.label)
+    // Marker column is `default_device` when marked, else one ASCII space.
+    let marker_w = if row.is_default {
+        ctx.device_marker_w
     } else {
-        row.label.clone()
+        1
     };
+    let title_w = texts.label.measured.width + if armed_confirm { CONFIRM_SUFFIX_W } else { 0 };
+    // Same total the old `title_line.width()` reported, without measuring.
+    let title_width_cells = marker_w + 1 + title_w;
     let title_style = if row.offline {
         theme.offline
     } else {
         theme.node_title
     };
-    let title_line = Line::from(vec![
-        default_span,
-        Span::from(" "),
-        Span::styled(width::sanitize(&label), title_style),
-    ]);
 
     let mut ellipses_area = None;
-    if title_line.width() > title_area.width as usize {
+    if title_width_cells > usize::from(title_area.width) {
         // Title does not fit: upstream inserts a 3-cell `...` area between the
         // title and the target (`node_widget.rs:323-342`).
         let layout = Layout::default()
@@ -745,18 +873,75 @@ fn draw_header(buf: &mut Buffer, area: Rect, menu: &Menu, row: &Row, armed_confi
         target_area = layout[3];
     }
 
-    target_line
+    // Right column, borrowed from the memos (what the old `target_line`
+    // rendered, without rebuilding or measuring it).
+    if bare && !has_active_meta {
+        // Bare rows with no active meta draw no right column.
+    } else if !row.hide_target_in_header {
+        if let (Some(target), Some(guard)) = (row.current_target(), target_guard.as_ref()) {
+            if target.is_default {
+                Line::from(vec![
+                    Span::styled(char_set.default_stream, theme.default_stream),
+                    Span::from(" "),
+                    Span::styled(guard.sanitized.as_str(), theme.node_target),
+                ])
+                .alignment(Alignment::Right)
+                .render(target_area, buf);
+            } else {
+                Line::from(Span::styled(guard.sanitized.as_str(), theme.node_target))
+                    .alignment(Alignment::Right)
+                    .render(target_area, buf);
+            }
+        } else if texts.meta.src.is_some() {
+            Line::from(Span::styled(
+                texts.meta.sanitized.as_str(),
+                theme.node_target,
+            ))
+            .alignment(Alignment::Right)
+            .render(target_area, buf);
+        }
+    } else if texts.meta.src.is_some() {
+        Line::from(Span::styled(
+            texts.meta.sanitized.as_str(),
+            theme.node_target,
+        ))
         .alignment(Alignment::Right)
         .render(target_area, buf);
-    if let Some(ellipses_area) = ellipses_area {
-        Span::styled("...", theme.node_title).render(ellipses_area, buf);
     }
-    title_line.render(title_area, buf);
+    if let Some(ellipses_area) = ellipses_area {
+        Span::styled(TITLE_ELLIPSES, theme.node_title).render(ellipses_area, buf);
+    }
+    // Title, borrowed from the memo (the armed suffix reuses the scratch
+    // buffer instead of `format!`).
+    if armed_confirm {
+        SCRATCH_A.with(|slot| {
+            let mut scratch = slot.borrow_mut();
+            scratch.clear();
+            scratch.push_str(&texts.label.sanitized);
+            scratch.push_str(CONFIRM_SUFFIX);
+            Line::from(vec![
+                default_span,
+                Span::from(" "),
+                Span::styled(scratch.as_str(), title_style),
+            ])
+            .render(title_area, buf);
+        });
+    } else {
+        Line::from(vec![
+            default_span,
+            Span::from(" "),
+            Span::styled(texts.label.sanitized.as_str(), title_style),
+        ])
+        .render(title_area, buf);
+    }
 }
 
 /// Detail line: device config (`▼ profile`) or the volume/meter widgets
 /// (upstream `device_widget.rs:141-153` and `node_widget.rs:165-198`).
-fn draw_detail(buf: &mut Buffer, area: Rect, menu: &Menu, row: &Row) {
+///
+/// Text comes from the row memo; the split shapes are hoisted consts, so
+/// this performs no sanitize, no measure and no per-node layout (OPT-3/4).
+fn draw_detail(buf: &mut Buffer, area: Rect, menu: &Menu, row: &Row, texts: &RowTextCache) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -767,23 +952,13 @@ fn draw_detail(buf: &mut Buffer, area: Rect, menu: &Menu, row: &Row) {
         let (volume_area, meter_area) = if meter_on {
             let layout = Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints(vec![
-                    Constraint::Length(2), // _padding
-                    Constraint::Fill(4),   // volume_area
-                    Constraint::Fill(1),   // _padding
-                    Constraint::Fill(4),   // meter_area
-                    Constraint::Fill(1),   // _padding
-                ])
+                .constraints(DETAIL_METER_SPLIT)
                 .split(area);
             (layout[1], Some(layout[3]))
         } else {
             let layout = Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints(vec![
-                    Constraint::Length(2), // _padding
-                    Constraint::Fill(9),   // volume_area
-                    Constraint::Fill(1),   // _padding
-                ])
+                .constraints(DETAIL_VOLUME_SPLIT)
                 .split(area);
             (layout[1], None)
         };
@@ -799,29 +974,33 @@ fn draw_detail(buf: &mut Buffer, area: Rect, menu: &Menu, row: &Row) {
                 &menu.theme,
             );
         }
-    } else if let Some(config) = &row.config {
+    } else if texts.config.src.is_some() {
         Line::from(vec![
             Span::from("    "),
             Span::styled(menu.char_set.dropdown_icon, menu.theme.dropdown_icon),
             Span::from(" "),
-            Span::styled(width::sanitize(config), menu.theme.config_profile),
+            Span::styled(texts.config.sanitized.as_str(), menu.theme.config_profile),
         ])
         .render(area, buf);
-    } else if let Some(detail) = &row.detail {
+    } else if texts.detail.src.is_some() {
         let detail_area = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Min(0), Constraint::Length(1)])
+            .constraints(DETAIL_SPLIT)
             .horizontal_margin(1)
             .split(area)[0];
         Line::from(vec![
             Span::from("  "),
-            Span::styled(width::sanitize(detail), menu.theme.config_profile),
+            Span::styled(texts.detail.sanitized.as_str(), menu.theme.config_profile),
         ])
         .render(detail_area, buf);
     }
 }
 
 /// Volume label + bar (upstream `VolumeWidget`, `node_widget.rs:373-423`).
+///
+/// The percentage and the bar reuse the scratch buffers instead of
+/// `format!`/`repeat` per frame, and `muted` is an interned span (OPT-4).
+/// Rendered content is byte-identical to before.
 fn draw_volume(buf: &mut Buffer, area: Rect, menu: &Menu, row: &Row) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -830,10 +1009,7 @@ fn draw_volume(buf: &mut Buffer, area: Rect, menu: &Menu, row: &Row) {
     let theme = &menu.theme;
     let [label_area, bar_area] = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(5), // volume_label
-            Constraint::Min(0),    // volume_bar
-        ])
+        .constraints(VOLUME_SPLIT)
         .spacing(1)
         .areas(area);
 
@@ -841,40 +1017,61 @@ fn draw_volume(buf: &mut Buffer, area: Rect, menu: &Menu, row: &Row) {
         let percent = (volume * 100.0).round();
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let percent = percent as u32;
-        Line::from(Span::styled(format!("{percent}%"), theme.volume))
-            .alignment(Alignment::Right)
-            .render(label_area, buf);
+        SCRATCH_A.with(|slot| {
+            let mut scratch = slot.borrow_mut();
+            scratch.clear();
+            let _ = write!(scratch, "{percent}%");
+            Line::from(Span::styled(scratch.as_str(), theme.volume))
+                .alignment(Alignment::Right)
+                .render(label_area, buf);
+        });
 
         let max_volume = menu.max_volume_percent / 100.0;
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let count = ((volume.clamp(0.0, max_volume) / max_volume) * f32::from(bar_area.width))
             .round() as usize;
-        let count = count.min(usize::from(bar_area.width));
-        let filled = char_set.volume_filled.repeat(count);
-        let blank = char_set
-            .volume_empty
-            .repeat((bar_area.width as usize).saturating_sub(count));
-        Line::from(vec![
-            Span::styled(filled, theme.volume_filled),
-            Span::styled(blank, theme.volume_empty),
-        ])
-        .render(bar_area, buf);
+        let bar_w = usize::from(bar_area.width);
+        let count = count.min(bar_w);
+        SCRATCH_A.with(|filled_slot| {
+            SCRATCH_B.with(|blank_slot| {
+                let mut filled = filled_slot.borrow_mut();
+                let mut blank = blank_slot.borrow_mut();
+                filled.clear();
+                blank.clear();
+                for _ in 0..count {
+                    filled.push_str(char_set.volume_filled);
+                }
+                for _ in count..bar_w {
+                    blank.push_str(char_set.volume_empty);
+                }
+                Line::from(vec![
+                    Span::styled(filled.as_str(), theme.volume_filled),
+                    Span::styled(blank.as_str(), theme.volume_empty),
+                ])
+                .render(bar_area, buf);
+            });
+        });
     }
 
     // Upstream draws `muted` over the label area after the percentage
     // (`node_widget.rs:421-423`).
     if row.muted {
-        Line::from(Span::styled("muted", theme.volume)).render(label_area, buf);
+        Line::from(Span::styled(MUTED_TEXT, theme.volume)).render(label_area, buf);
     }
 }
 
 /// Target dropdown, right-aligned over the list (upstream `DropdownWidget`,
 /// `dropdown_widget.rs`; geometry from `node_widget.rs:62-89`).
-fn draw_dropdown(buf: &mut Buffer, list_area: Rect, menu: &mut Menu) {
+///
+/// Titles come from the target memos and the visible view from `ctx`
+/// (OPT-3/OPT-4): no second `visible_rows()` call, no per-title sanitize or
+/// measure, and the highlight symbol reuses the scratch buffer.
+#[allow(clippy::too_many_lines)]
+fn draw_dropdown(buf: &mut Buffer, list_area: Rect, menu: &mut Menu, ctx: &FrameCtx) {
     let Some(dropdown) = menu.app.dropdown().cloned() else {
         return;
     };
-    let visible = menu.app.visible_rows();
+    let visible: &[usize] = &ctx.visible;
     let Some(tab) = menu.app.active_tab() else {
         return;
     };
@@ -884,12 +1081,13 @@ fn draw_dropdown(buf: &mut Buffer, list_area: Rect, menu: &mut Menu) {
     if row.targets.is_empty() || list_area.width == 0 {
         return;
     }
+    let targets_len = row.targets.len();
 
     // The dropdown opens on the selected row: find its on-screen band.
     let Some(offset) = visible.iter().position(|index| *index == dropdown.row) else {
         return;
     };
-    let row_h = usize::from(node_metrics(menu).pitch());
+    let row_h = usize::from(ctx.metrics.pitch());
     let rows_area = Rect::new(
         list_area.x,
         list_area.y.saturating_add(1),
@@ -903,17 +1101,22 @@ fn draw_dropdown(buf: &mut Buffer, list_area: Rect, menu: &mut Menu) {
     // Upstream: width = longest target + 4 (borders + highlight symbol),
     // height = min(5, items) + 2, right-aligned to the list area, one row
     // above the selected object (`node_widget.rs:63-89`). Flex measures the
-    // display width (upstream uses the byte length).
-    let max_target_width = row
+    // display width (upstream uses the byte length); the widths come from
+    // the target memos, so this is arithmetic, not a re-measure (OPT-3).
+    let titles: Vec<std::cell::Ref<'_, crate::CachedText>> = row
         .targets
         .iter()
-        .map(|target| width::str_width(&target.title))
+        .map(|target| target.title_texts())
+        .collect();
+    let max_target_width = titles
+        .iter()
+        .map(|title| title.measured.width)
         .max()
         .unwrap_or(0);
     #[allow(clippy::cast_possible_truncation)]
     let dropdown_width = (max_target_width.saturating_add(4)) as u16;
     #[allow(clippy::cast_possible_truncation)]
-    let dropdown_height = (row.targets.len().min(DROPDOWN_MAX_ITEMS).saturating_add(2)) as u16;
+    let dropdown_height = (targets_len.min(DROPDOWN_MAX_ITEMS).saturating_add(2)) as u16;
     if dropdown_width == 0 || dropdown_height == 0 {
         return;
     }
@@ -930,22 +1133,35 @@ fn draw_dropdown(buf: &mut Buffer, list_area: Rect, menu: &mut Menu) {
         .borders(Borders::ALL)
         .border_style(menu.theme.dropdown_border)
         .border_type(menu.char_set.dropdown_border);
-    let items: Vec<ListItem> = row
-        .targets
+    let items: Vec<ListItem> = titles
         .iter()
-        .map(|target| ListItem::new(Line::from(width::sanitize(&target.title))))
+        .map(|title| ListItem::new(Line::from(title.sanitized.as_str())))
         .collect();
-    let highlight_symbol = format!("{} ", menu.char_set.dropdown_selector);
     let list = List::new(items)
         .block(block)
         .style(menu.theme.dropdown_item)
-        .highlight_symbol(highlight_symbol.as_str())
         .highlight_style(menu.theme.dropdown_selected);
 
     let mut state = ListState::default()
         .with_selected(Some(dropdown.selected))
         .with_offset(dropdown.top);
-    StatefulWidget::render(list, dropdown_area, buf, &mut state);
+    // The highlight symbol reuses the scratch buffer instead of `format!`
+    // per frame (OPT-4); it lives for the `render` call below.
+    SCRATCH_A.with(|slot| {
+        let mut scratch = slot.borrow_mut();
+        scratch.clear();
+        scratch.push_str(menu.char_set.dropdown_selector);
+        scratch.push(' ');
+        StatefulWidget::render(
+            list.highlight_symbol(scratch.as_str()),
+            dropdown_area,
+            buf,
+            &mut state,
+        );
+    });
+    // Release the target-memo borrows before the indicator + state update
+    // below re-borrow the menu.
+    drop(titles);
 
     // `•••` on the borders when the target list is scrolled
     // (upstream `dropdown_widget.rs:88-135`).
@@ -962,7 +1178,7 @@ fn draw_dropdown(buf: &mut Buffer, list_area: Rect, menu: &mut Menu) {
                 buf,
             );
     }
-    if bottom_index < row.targets.len() {
+    if bottom_index < targets_len {
         let y = dropdown_area
             .y
             .saturating_add(dropdown_area.height.saturating_sub(1));
@@ -973,6 +1189,33 @@ fn draw_dropdown(buf: &mut Buffer, list_area: Rect, menu: &mut Menu) {
 
     if let Some(state) = menu.app.dropdown_mut() {
         state.top = top_index;
+    }
+}
+
+/// Write `text` cell by cell at row `y` from `*x`, advancing like the old
+/// per-char `put` closures but encoding into a stack buffer instead of
+/// `to_string` per char (OPT-4). Output is identical.
+fn put_str(
+    buf: &mut Buffer,
+    x: &mut usize,
+    base: usize,
+    width: usize,
+    y: u16,
+    text: &str,
+    style: Style,
+) {
+    for c in text.chars() {
+        if *x >= base + width {
+            break;
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        if let Some(cell) = buf.cell_mut((*x as u16, y)) {
+            let mut encoded = [0_u8; 4];
+            cell.set_symbol(c.encode_utf8(&mut encoded));
+            cell.set_style(style);
+            cell.set_skip(false);
+        }
+        *x += width::char_width(c).max(1);
     }
 }
 
@@ -987,34 +1230,37 @@ fn draw_empty(buf: &mut Buffer, list_area: Rect, menu: &Menu) {
     #[allow(clippy::cast_possible_truncation)]
     let y = list_area.y + list_area.height / 2;
     let mut x = base + usize::from(list_area.width).saturating_sub(w) / 2;
-    for c in text.chars() {
-        if x >= base + usize::from(list_area.width) {
-            break;
-        }
-        #[allow(clippy::cast_possible_truncation)]
-        if let Some(cell) = buf.cell_mut((x as u16, y)) {
-            cell.set_symbol(&c.to_string());
-            cell.set_style(menu.theme.offline);
-            cell.set_skip(false);
-        }
-        x += width::char_width(c).max(1);
-    }
+    put_str(
+        buf,
+        &mut x,
+        base,
+        usize::from(list_area.width),
+        y,
+        text,
+        menu.theme.offline,
+    );
+}
+
+/// Precomputed [`measure`](width::measure) results for [`HELP_LINES`]
+/// (OPT-3): measuring the help body once per process instead of per frame.
+fn help_measured() -> &'static [width::Measured] {
+    static MEASURED: OnceLock<Vec<width::Measured>> = OnceLock::new();
+    MEASURED.get_or_init(|| HELP_LINES.iter().map(|line| width::measure(line)).collect())
 }
 
 /// Help overlay (upstream geometry `app.rs:811-840`, chrome `help.rs:46-53`):
 /// centered inside the list area, `sum(widths) × min(rows + 2, 90%)`, `Clear`
 /// behind it, `help_border` block (no title upstream), and `•••` on the
 /// border rows when the list scrolls.
+///
+/// The content width and per-line measures are cached (OPT-3/OPT-4); fitting
+/// lines render as borrowed spans with no per-frame allocation.
 fn draw_help(buf: &mut Buffer, list_area: Rect, menu: &mut Menu) {
     if list_area.width == 0 || list_area.height == 0 {
         return;
     }
     let lines = HELP_LINES;
-    let content_width = lines
-        .iter()
-        .map(|line| width::str_width(line))
-        .max()
-        .unwrap_or(0);
+    let content_width = help_content_width();
     #[allow(clippy::cast_possible_truncation)]
     let wanted_width = (content_width.saturating_add(4)) as u16; // borders + padding
     let [help_area] = Layout::default()
@@ -1068,43 +1314,45 @@ fn draw_help(buf: &mut Buffer, list_area: Rect, menu: &mut Menu) {
             .render(Rect::new(help_area.x, y, help_area.width, 1), buf);
     }
 
-    for (offset, line) in lines
+    for (offset, (line, measured)) in lines
         .iter()
+        .zip(help_measured().iter())
         .skip(scroll)
         .take(usize::from(inner.height))
         .enumerate()
     {
         #[allow(clippy::cast_possible_truncation)]
         let y = inner.y + offset as u16;
-        Line::from(Span::styled(
-            width::truncate_exact(line, usize::from(inner.width)),
-            menu.theme.help_item,
-        ))
-        .render(Rect::new(inner.x, y, inner.width, 1), buf);
+        let truncated = width::truncate_measured_cow(line, measured, usize::from(inner.width));
+        let text: &str = truncated.as_ref();
+        Line::from(Span::styled(text, menu.theme.help_item))
+            .render(Rect::new(inner.x, y, inner.width, 1), buf);
     }
 }
 
 /// Flex extension: the filter line (`› text …          3/87`).
-fn draw_filter(buf: &mut Buffer, ox: u16, y: u16, width: usize, menu: &Menu) {
+///
+/// The prompt glyph, the filter text and the `pos/total` counter are all
+/// borrowed spans (the counter reuses the scratch buffer); the visible
+/// count arrives from the frame context instead of a second
+/// `visible_rows()` call (OPT-2).
+fn draw_filter(buf: &mut Buffer, ox: u16, y: u16, width: usize, menu: &Menu, visible: &[usize]) {
     if width == 0 {
         return;
     }
     let area = Rect::new(ox, y, u16::try_from(width).unwrap_or(u16::MAX), 1);
     let theme = &menu.theme;
 
-    Span::styled(FILTER_PROMPT.to_string(), theme.filter_prompt).render(area, buf);
+    Span::styled(FILTER_PROMPT_STR, theme.filter_prompt).render(area, buf);
     let prompt_area = Rect::new(ox.saturating_add(2), y, area.width.saturating_sub(2), 1);
     if prompt_area.width == 0 {
         return;
     }
 
-    let total = menu.app.visible_len();
-    let filter = menu
-        .app
-        .active_tab()
-        .map(|tab| tab.state.filter.clone())
-        .unwrap_or_default();
-    let pos = menu.app.active_tab().map_or(0, |tab| {
+    let total = visible.len();
+    let tab = menu.app.active_tab();
+    let filter = tab.map(|tab| tab.state.filter.as_str()).unwrap_or_default();
+    let pos = tab.map_or(0, |tab| {
         if total == 0 {
             0
         } else {
@@ -1113,23 +1361,29 @@ fn draw_filter(buf: &mut Buffer, ox: u16, y: u16, width: usize, menu: &Menu) {
     });
 
     let prompt: &str = if filter.is_empty() {
-        "filter…"
+        FILTER_EMPTY_TEXT
     } else {
-        &filter
+        filter
     };
     let prompt_style = if filter.is_empty() {
         theme.hint
     } else {
         theme.node_title
     };
-    Line::from(Span::styled(prompt.to_string(), prompt_style)).render(prompt_area, buf);
+    Line::from(Span::styled(prompt, prompt_style)).render(prompt_area, buf);
 
-    let right = format!("{pos}/{total}");
-    let right_w = u16::try_from(width::str_width(&right)).unwrap_or(u16::MAX);
-    if right_w < prompt_area.width {
-        let right_area = Rect::new(area.right().saturating_sub(right_w), y, right_w, 1);
-        Line::from(Span::styled(right, theme.hint)).render(right_area, buf);
-    }
+    // The counter is pure ASCII (`pos/total`), so its byte length is its
+    // display width — no measure needed.
+    SCRATCH_A.with(|slot| {
+        let mut scratch = slot.borrow_mut();
+        scratch.clear();
+        let _ = write!(scratch, "{pos}/{total}");
+        let right_w = u16::try_from(scratch.len()).unwrap_or(u16::MAX);
+        if right_w < prompt_area.width {
+            let right_area = Rect::new(area.right().saturating_sub(right_w), y, right_w, 1);
+            Line::from(Span::styled(scratch.as_str(), theme.hint)).render(right_area, buf);
+        }
+    });
 }
 
 /// Flex extension: the hint line under the list.
@@ -1148,11 +1402,12 @@ fn draw_hints(buf: &mut Buffer, ox: u16, y: u16, width: usize, menu: &Menu) {
         "↑↓ navigate · enter select · esc cancel"
     };
     let area = Rect::new(ox, y, u16::try_from(width).unwrap_or(u16::MAX), 1);
-    Line::from(Span::styled(
-        width::truncate_exact(text, width),
-        menu.theme.hint,
-    ))
-    .render(area, buf);
+    // The hint texts are static and clean; one allocation-free measure plus
+    // a borrow-when-fitting truncate replaces `truncate_exact` (OPT-3/4).
+    let measured = width::measure(text);
+    let truncated = width::truncate_measured_cow(text, &measured, width);
+    let text: &str = truncated.as_ref();
+    Line::from(Span::styled(text, menu.theme.hint)).render(area, buf);
 }
 
 /// Flex extension: the `center` gauge row.
@@ -1168,62 +1423,64 @@ fn draw_gauge(buf: &mut Buffer, ox: u16, y: u16, width: usize, menu: &Menu) {
 
     if !gauge.online || menu.offline {
         let mut x = base;
-        for c in OFFLINE_STATE.chars() {
-            if x >= base + width {
-                break;
-            }
-            #[allow(clippy::cast_possible_truncation)]
-            if let Some(cell) = buf.cell_mut((x as u16, y)) {
-                cell.set_symbol(&c.to_string());
-                cell.set_style(theme.offline);
-                cell.set_skip(false);
-            }
-            x += width::char_width(c).max(1);
-        }
+        put_str(buf, &mut x, base, width, y, OFFLINE_STATE, theme.offline);
         return;
     }
 
-    // `muted` replaces the percentage, like upstream's volume label.
-    let value = if gauge.muted {
-        "muted".to_string()
-    } else {
-        format!("{}%", gauge.value.min(100))
-    };
-    let left = format!(" {} ", gauge.label);
-    let right = format!(" {value}");
-    let inner = width
-        .saturating_sub(width::str_width(&left))
-        .saturating_sub(width::str_width(&right))
-        .saturating_sub(2);
-
-    let mut x = base;
-    let mut put = |buf: &mut Buffer, text: &str, style: Style| {
-        for c in text.chars() {
-            if x >= base + width {
-                break;
+    // `muted` replaces the percentage, like upstream's volume label. Both
+    // cells reuse the scratch buffers instead of `format!` (OPT-4); the
+    // label is rendered verbatim, exactly as before.
+    SCRATCH_A.with(|left_slot| {
+        SCRATCH_B.with(|right_slot| {
+            let mut left = left_slot.borrow_mut();
+            let mut right = right_slot.borrow_mut();
+            left.clear();
+            right.clear();
+            left.push(' ');
+            left.push_str(&gauge.label);
+            left.push(' ');
+            right.push(' ');
+            if gauge.muted {
+                right.push_str(MUTED_TEXT);
+            } else {
+                let _ = write!(right, "{}%", gauge.value.min(100));
             }
-            #[allow(clippy::cast_possible_truncation)]
-            if let Some(cell) = buf.cell_mut((x as u16, y)) {
-                cell.set_symbol(&c.to_string());
-                cell.set_style(style);
-                cell.set_skip(false);
+            let inner = width
+                .saturating_sub(width::str_width(left.as_str()))
+                .saturating_sub(width::str_width(right.as_str()))
+                .saturating_sub(2);
+
+            let mut x = base;
+            put_str(buf, &mut x, base, width, y, left.as_str(), theme.hint);
+            put_str(buf, &mut x, base, width, y, "[", theme.hint);
+
+            let fill = inner * usize::from(gauge.value.min(100)) / 100;
+            for _ in 0..fill {
+                put_str(
+                    buf,
+                    &mut x,
+                    base,
+                    width,
+                    y,
+                    menu.char_set.volume_filled,
+                    theme.gauge_fill,
+                );
             }
-            x += width::char_width(c).max(1);
-        }
-    };
-
-    put(buf, &left, theme.hint);
-    put(buf, "[", theme.hint);
-
-    let fill = inner * usize::from(gauge.value.min(100)) / 100;
-    for _ in 0..fill {
-        put(buf, menu.char_set.volume_filled, theme.gauge_fill);
-    }
-    for _ in fill..inner {
-        put(buf, menu.char_set.volume_empty, theme.volume_empty);
-    }
-    put(buf, "]", theme.hint);
-    put(buf, &right, theme.hint);
+            for _ in fill..inner {
+                put_str(
+                    buf,
+                    &mut x,
+                    base,
+                    width,
+                    y,
+                    menu.char_set.volume_empty,
+                    theme.volume_empty,
+                );
+            }
+            put_str(buf, &mut x, base, width, y, "]", theme.hint);
+            put_str(buf, &mut x, base, width, y, right.as_str(), theme.hint);
+        });
+    });
 }
 
 fn place_cursor(frame: &mut Frame, area: Rect, menu: &Menu, hidden: bool) {

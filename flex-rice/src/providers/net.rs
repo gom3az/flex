@@ -176,46 +176,52 @@ pub fn net_menu() -> Menu {
     providers::menu(PROVIDER, tabs)
 }
 
-/// Helper to locate row index in visible rows.
-fn visible_position(menu: &Menu, predicate: impl Fn(&Row) -> bool) -> Option<usize> {
-    let tab = menu.app.active_tab()?;
-    menu.app
-        .visible_rows()
-        .iter()
-        .position(|&index| tab.rows.get(index).is_some_and(&predicate))
-}
-
 /// Per-tick refresh for `flex-net`.
+///
+/// OPT-6: skips unless a `net` tab is active (throttling to 3 s lives in
+/// [`providers::tick_hook`]). OPT-9: reuses row allocations via
+/// [`providers::sync_rows_in_place`] with a single focus-restore pass.
 pub fn refresh(menu: &mut Menu) {
+    let active = menu.app.active_tab().is_some_and(|tab| {
+        tab.name == TAB_BANDWIDTH || tab.name == TAB_INTERFACES || tab.name == TAB_SPEEDTEST
+    });
+    if !active {
+        return;
+    }
     let previous = menu.app.focused_row().map(|row| row.id.clone());
 
-    if let Some(tab) = menu.app.tabs.get_mut(0) {
-        if tab.name == TAB_BANDWIDTH {
-            let procs = scan_top_talkers();
-            tab.rows = build_bandwidth_rows(&procs);
-        }
+    if let Some(tab) = menu
+        .app
+        .tabs
+        .iter_mut()
+        .find(|tab| tab.name == TAB_BANDWIDTH)
+    {
+        let procs = scan_top_talkers();
+        let fresh = build_bandwidth_rows(&procs);
+        super::sync_rows_in_place(&mut tab.rows, fresh);
     }
 
-    if let Some(tab) = menu.app.tabs.get_mut(1) {
-        if tab.name == TAB_INTERFACES {
-            let ifaces = scan_interfaces();
-            tab.rows = build_interface_rows(&ifaces);
-        }
+    if let Some(tab) = menu
+        .app
+        .tabs
+        .iter_mut()
+        .find(|tab| tab.name == TAB_INTERFACES)
+    {
+        let ifaces = scan_interfaces();
+        let fresh = build_interface_rows(&ifaces);
+        super::sync_rows_in_place(&mut tab.rows, fresh);
     }
 
-    if let Some(tab) = menu.app.tabs.get_mut(2) {
-        if tab.name == TAB_SPEEDTEST {
-            let snapshot = speedtest::get_snapshot();
-            tab.rows = build_speedtest_rows(&snapshot);
-        }
+    if let Some(tab) = menu
+        .app
+        .tabs
+        .iter_mut()
+        .find(|tab| tab.name == TAB_SPEEDTEST)
+    {
+        let snapshot = speedtest::get_snapshot();
+        let fresh = build_speedtest_rows(&snapshot);
+        super::sync_rows_in_place(&mut tab.rows, fresh);
     }
 
-    if let Some(id) = previous {
-        if let Some(position) = visible_position(menu, |row| row.id == id) {
-            if let Some(state) = menu.app.active_tab_mut().map(|tab| &mut tab.state) {
-                state.focus = position;
-            }
-        }
-    }
-    menu.app.clamp_focus();
+    super::restore_focus(menu, previous);
 }

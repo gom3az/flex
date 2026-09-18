@@ -31,6 +31,7 @@
 //! to the preview slot: no provider row, id, or filter ever depends on them,
 //! and everything degrades to "no image" when the pieces are missing.
 
+use std::cell::RefCell;
 use std::io::{self, Write};
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
@@ -112,21 +113,66 @@ impl ImageBackend for KittyBackend {
         let payload = base64(bytes);
         let (row, col) = (placement.y.saturating_add(1), placement.x.saturating_add(1));
         // Pixel offsets are only meaningful when non-zero, and must stay below
-        // one cell (protocol rule).
-        let offsets = match (placement.x_px, placement.y_px) {
-            (0, 0) => String::new(),
-            (x, 0) => format!(",X={x}"),
-            (0, y) => format!(",Y={y}"),
-            (x, y) => format!(",X={x},Y={y}"),
-        };
-        Some(format!(
-            "\x1b[{row};{col}H\x1b_Ga=T,f=100,t=f,i={image_id}{offsets},c={},r={},C=1,q=2;{payload}\x1b\\",
-            placement.cols, placement.rows
-        ))
+        // one cell (protocol rule). Integers append without `format!` (OPT-4).
+        let mut out = String::with_capacity(payload.len() + 64);
+        out.push_str("\x1b[");
+        push_u32(&mut out, u32::from(row));
+        out.push(';');
+        push_u32(&mut out, u32::from(col));
+        out.push_str("H\x1b_Ga=T,f=100,t=f,i=");
+        push_u32(&mut out, image_id);
+        match (placement.x_px, placement.y_px) {
+            (0, 0) => {}
+            (x, 0) => {
+                out.push_str(",X=");
+                push_u32(&mut out, u32::from(x));
+            }
+            (0, y) => {
+                out.push_str(",Y=");
+                push_u32(&mut out, u32::from(y));
+            }
+            (x, y) => {
+                out.push_str(",X=");
+                push_u32(&mut out, u32::from(x));
+                out.push_str(",Y=");
+                push_u32(&mut out, u32::from(y));
+            }
+        }
+        out.push_str(",c=");
+        push_u32(&mut out, u32::from(placement.cols));
+        out.push_str(",r=");
+        push_u32(&mut out, u32::from(placement.rows));
+        out.push_str(",C=1,q=2;");
+        out.push_str(&payload);
+        out.push_str("\x1b\\");
+        Some(out)
     }
 
     fn delete(&self, image_id: u32) -> String {
-        format!("\x1b_Ga=d,d=I,i={image_id},q=2\x1b\\")
+        let mut out = String::with_capacity(24);
+        out.push_str("\x1b_Ga=d,d=I,i=");
+        push_u32(&mut out, image_id);
+        out.push_str(",q=2\x1b\\");
+        out
+    }
+}
+
+/// Append a `u32` in decimal without `format!` (OPT-4/OPT-5 escape paths).
+fn push_u32(out: &mut String, mut value: u32) {
+    if value == 0 {
+        out.push('0');
+        return;
+    }
+    let mut digits = [0_u8; 10];
+    let mut len = 0;
+    while value > 0 {
+        digits[len] = (value % 10) as u8;
+        value /= 10;
+        len += 1;
+    }
+    while len > 0 {
+        len -= 1;
+        out.push((b'0' + digits[len]) as char);
     }
 }
 
@@ -299,28 +345,38 @@ pub fn fitted_box(pane: Rect, image: (u32, u32), cell: (f32, f32)) -> (u16, u16)
     // Preview images are never near 2^24 px; the cast is exact in practice.
     #[allow(clippy::cast_precision_loss)]
     let aspect = image.0 as f32 / image.1 as f32;
-    let mut candidates: Vec<(u16, u16, i64)> = Vec::with_capacity(usize::from(pane.width));
-    let mut best_error = f32::INFINITY;
-    for cols in 1..=pane.width {
-        let rows = (f32::from(cols) * cell_w / aspect / cell_h).round();
-        if rows < 1.0 || rows > f32::from(pane.height) {
-            continue;
+    FIT_BUF.with(|slot| {
+        let mut candidates = slot.borrow_mut();
+        candidates.clear();
+        candidates.reserve(usize::from(pane.width));
+        let mut best_error = f32::INFINITY;
+        for cols in 1..=pane.width {
+            let rows = (f32::from(cols) * cell_w / aspect / cell_h).round();
+            if rows < 1.0 || rows > f32::from(pane.height) {
+                continue;
+            }
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let rows = rows as u16;
+            let box_aspect = (f32::from(cols) * cell_w) / (f32::from(rows) * cell_h);
+            // Relative error: log-ratio, so 2:1 vs 1:2 is as wrong as 1:1 vs 0.5:1.
+            let error = (box_aspect / aspect).ln().abs();
+            best_error = best_error.min(error);
+            candidates.push((cols, rows, scale(error)));
         }
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let rows = rows as u16;
-        let box_aspect = (f32::from(cols) * cell_w) / (f32::from(rows) * cell_h);
-        // Relative error: log-ratio, so 2:1 vs 1:2 is as wrong as 1:1 vs 0.5:1.
-        let error = (box_aspect / aspect).ln().abs();
-        best_error = best_error.min(error);
-        candidates.push((cols, rows, scale(error)));
-    }
-    // `scale` is larger-is-better, so the tolerance band is `>= cutoff`.
-    let cutoff = scale(best_error + ASPECT_TOLERANCE);
-    candidates
-        .iter()
-        .filter(|(_, _, error)| *error >= cutoff)
-        .max_by_key(|(cols, rows, error)| (u32::from(*cols) * u32::from(*rows), *error))
-        .map_or((pane.width, pane.height), |(cols, rows, _)| (*cols, *rows))
+        // `scale` is larger-is-better, so the tolerance band is `>= cutoff`.
+        let cutoff = scale(best_error + ASPECT_TOLERANCE);
+        candidates
+            .iter()
+            .filter(|(_, _, error)| *error >= cutoff)
+            .max_by_key(|(cols, rows, error)| (u32::from(*cols) * u32::from(*rows), *error))
+            .map_or((pane.width, pane.height), |(cols, rows, _)| (*cols, *rows))
+    })
+}
+
+thread_local! {
+    /// Candidate fit boxes reused across frames instead of one `Vec` per
+    /// [`fitted_box`] call (OPT-5: zero `Vec` allocs per frame).
+    static FIT_BUF: RefCell<Vec<(u16, u16, i64)>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Aspect error we accept while trading up for a bigger preview (log-ratio).
@@ -393,11 +449,13 @@ pub fn delete_escape(image_id: u32) -> String {
 /// Escape sequence parking the cursor at a 0-based cell (1-based CUP).
 #[must_use]
 pub fn park_escape(pos: (u16, u16)) -> String {
-    format!(
-        "\x1b[{};{}H",
-        pos.1.saturating_add(1),
-        pos.0.saturating_add(1)
-    )
+    let mut out = String::with_capacity(10);
+    out.push_str("\x1b[");
+    push_u32(&mut out, u32::from(pos.1.saturating_add(1)));
+    out.push(';');
+    push_u32(&mut out, u32::from(pos.0.saturating_add(1)));
+    out.push('H');
+    out
 }
 
 /// Whether `path` starts with the PNG signature.
@@ -504,6 +562,23 @@ pub struct Preview {
     warned: bool,
     /// Terminal cell size in pixels, once measured.
     cell: Option<(f32, f32)>,
+    /// Transmit memo (OPT-5): last source → transmitted file + its PNG
+    /// size, so repeat frames skip `open`/`read`/`metadata` entirely.
+    memo: Option<TransmitMemo>,
+    /// Pane rect of the last placement (OPT-5): together with `shown` this
+    /// answers the unchanged check with no syscalls and no allocation.
+    last_rect: Option<Rect>,
+}
+
+/// Memoized `source → transmitted file → PNG size` (OPT-5).
+#[derive(Debug, Clone)]
+struct TransmitMemo {
+    /// Source path the memo was built for.
+    src: PathBuf,
+    /// Transmitted file for `src` (itself for PNGs, derived cache otherwise).
+    file: PathBuf,
+    /// PNG size of `file`, read once.
+    size: Option<(u32, u32)>,
 }
 
 /// One placed image (source, transmitted file, placement on screen).
@@ -576,6 +651,11 @@ impl Preview {
     /// image and pane are unchanged. Write failures are reported but never
     /// fatal to the TUI (the caller ignores them).
     ///
+    /// Steady state (OPT-5) is syscall-free and allocation-free: when the
+    /// shown source and the pane rect both match, this returns before any
+    /// `open`/`read`/`metadata` or `PathBuf` clone. A source file edited in
+    /// place refreshes once focus or the pane moves.
+    ///
     /// # Errors
     ///
     /// Returns the terminal write error, if any.
@@ -589,16 +669,43 @@ impl Preview {
         let Some((rect, src)) = pane.zip(source) else {
             return self.hide(out);
         };
-        let Some(file) = self.transmit_file(src) else {
-            self.warn_once(src);
-            return self.hide(out);
+        // Fast path: the same pane still shows the same source.
+        if self
+            .shown
+            .as_ref()
+            .is_some_and(|shown| shown.source == *src)
+            && self.last_rect == Some(rect)
+        {
+            return Ok(());
+        }
+        // Transmit memo: the same source reuses its file with no I/O.
+        // (A converted file evicted from the cache, or a source edited in
+        // place, is picked up once focus or the pane moves.)
+        let (file, size) = match self.memo.as_ref() {
+            Some(memo) if memo.src == *src => (memo.file.clone(), memo.size),
+            _ => {
+                let Some(file) = self.transmit_file(src) else {
+                    self.warn_once(src);
+                    return self.hide(out);
+                };
+                // `png_size` opens + reads the file, so it runs here — after
+                // the unchanged check above — and its result is memoized.
+                let size = png_size(&file);
+                self.memo = Some(TransmitMemo {
+                    src: src.to_path_buf(),
+                    file: file.clone(),
+                    size,
+                });
+                (file, size)
+            }
         };
         let cell = self.cell_size();
-        let placed = placement(rect, png_size(&file), cell);
+        let placed = placement(rect, size, cell);
         let unchanged = self.shown.as_ref().is_some_and(|shown| {
-            shown.source == src && shown.file == file && shown.placed == placed
+            shown.source == *src && shown.file == file && shown.placed == placed
         });
         if unchanged {
+            self.last_rect = Some(rect);
             return Ok(());
         }
         let Some(escape) = backend().place(IMAGE_ID, &file, placed) else {
@@ -609,6 +716,7 @@ impl Preview {
             out.write_all(park_escape(pos).as_bytes())?;
         }
         out.flush()?;
+        self.last_rect = Some(rect);
         self.shown = Some(Shown {
             source: src.to_path_buf(),
             file,
@@ -646,27 +754,31 @@ impl Preview {
     /// is converted once into [`Preview::cache_dir`] by
     /// [`Preview::converter`]. `None` means "no preview" (no converter, no
     /// cache directory, or a failed conversion) — never an error.
+    ///
+    /// The cache directory is borrowed, not cloned, per call (OPT-5).
     #[must_use]
     pub fn transmit_file(&mut self, src: &Path) -> Option<PathBuf> {
         if is_png(src) {
             return Some(src.to_path_buf());
         }
-        let dir = self.cache_dir.clone()?;
-        let cache = cache_path(&dir, src)?;
+        let cache = {
+            let dir = self.cache_dir.as_ref()?;
+            cache_path(dir, src)?
+        };
         if cache.is_file() {
             return Some(cache);
         }
         let command = self.converter()?;
-        if !convert(&command, src, &cache) {
+        if !convert(command, src, &cache) {
             return None;
         }
         Some(cache)
     }
 
-    /// Resolve (once) the converter command.
-    fn converter(&mut self) -> Option<String> {
+    /// Resolve (once) the converter command, borrowed (OPT-5: no clone).
+    fn converter(&mut self) -> Option<&str> {
         if self.converter_probed {
-            return self.converter.clone();
+            return self.converter.as_deref();
         }
         self.converter_probed = true;
         if let Ok(explicit) = std::env::var(CONVERTER_ENV) {
@@ -675,13 +787,13 @@ impl Preview {
             } else {
                 Some(explicit)
             };
-            return self.converter.clone();
+            return self.converter.as_deref();
         }
         self.converter = CONVERTERS
             .iter()
             .find(|command| available(command))
             .map(|command| (*command).to_string());
-        self.converter.clone()
+        self.converter.as_deref()
     }
 }
 

@@ -125,14 +125,30 @@ pub enum ExtractedEntity {
     HexColor(String),
 }
 
+/// File extensions that mark a word as a file path (OPT-8: hoisted `const`
+/// so the table is not rebuilt per word per tick).
+const KNOWN_FILE_EXTS: &[&str] = &[
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".pdf", ".txt", ".md", ".rs", ".py", ".js",
+    ".ts", ".json", ".yaml", ".toml", ".sh", ".csv", ".log", ".zip", ".tar.gz",
+];
+
+/// URL scheme prefixes checked byte-first (OPT-8: `starts_with` before any
+/// case folding; schemes are lowercase ASCII on the wire).
+const URL_SCHEMES: &[&str] = &["https://", "http://", "mailto:", "ftp://", "ssh://"];
+
 /// Extract actionable entities (OTP 2FA codes, URLs, file paths, hex color codes) from text.
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn extract_entities(text: &str) -> Vec<ExtractedEntity> {
     let mut entities = Vec::new();
 
+    // OPT-8: single `split_whitespace` pass feeds the URL + file-path
+    // scanners (was 2× passes); the hex + OTP passes stay separate because
+    // they need different trimming rules.
+    let words: Vec<&str> = text.split_whitespace().collect();
+
     // 1. Scan for URLs (https://, http://, mailto:, ftp://, www., or bare domain with path)
-    for word in text.split_whitespace() {
+    for word in &words {
         let trimmed = word.trim_matches(|c: char| {
             c == '('
                 || c == ')'
@@ -144,12 +160,9 @@ pub fn extract_entities(text: &str) -> Vec<ExtractedEntity> {
                 || c == '.'
                 || c == '`'
         });
-        if trimmed.starts_with("https://")
-            || trimmed.starts_with("http://")
-            || trimmed.starts_with("mailto:")
-            || trimmed.starts_with("ftp://")
-            || trimmed.starts_with("ssh://")
-        {
+        // OPT-8: byte-level scheme check first (no `to_lowercase` on the
+        // hot path; schemes are matched case-sensitively as emitted).
+        if URL_SCHEMES.iter().any(|s| trimmed.starts_with(s)) {
             entities.push(ExtractedEntity::Url(trimmed.to_string()));
         } else if trimmed.starts_with("www.")
             || (trimmed.contains('/')
@@ -166,11 +179,7 @@ pub fn extract_entities(text: &str) -> Vec<ExtractedEntity> {
     }
 
     // 2. Scan for File Paths (/..., ~/..., or known file extensions)
-    let known_exts = [
-        ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".pdf", ".txt", ".md", ".rs", ".py",
-        ".js", ".ts", ".json", ".yaml", ".toml", ".sh", ".csv", ".log", ".zip", ".tar.gz",
-    ];
-    for word in text.split_whitespace() {
+    for word in &words {
         let trimmed = word.trim_matches(|c: char| {
             c == '('
                 || c == ')'
@@ -186,7 +195,7 @@ pub fn extract_entities(text: &str) -> Vec<ExtractedEntity> {
             continue;
         }
         let is_abs_or_home = trimmed.starts_with('/') || trimmed.starts_with("~/");
-        let has_known_ext = known_exts.iter().any(|ext| trimmed.ends_with(ext));
+        let has_known_ext = KNOWN_FILE_EXTS.iter().any(|ext| trimmed.ends_with(ext));
 
         if is_abs_or_home || has_known_ext {
             let expanded = if let Some(rest) = trimmed.strip_prefix("~/") {
@@ -211,7 +220,7 @@ pub fn extract_entities(text: &str) -> Vec<ExtractedEntity> {
     }
 
     // 3. Scan for Hex color codes (#RRGGBB)
-    for word in text.split_whitespace() {
+    for word in &words {
         let trimmed = word.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '#');
         if trimmed.starts_with('#') && (trimmed.len() == 7 || trimmed.len() == 4) {
             let hex_part = &trimmed[1..];
@@ -222,17 +231,13 @@ pub fn extract_entities(text: &str) -> Vec<ExtractedEntity> {
     }
 
     // 4. Scan for OTP / 2FA verification codes (4 to 8 consecutive digits)
-    let words: Vec<&str> = text.split_whitespace().collect();
+    // OPT-8: `words` is reused from above (was a second `split_whitespace`
+    // collection); the previous-word context check runs byte-level first.
     for (i, &word) in words.iter().enumerate() {
         let clean = word.trim_matches(|c: char| !c.is_ascii_digit());
         if (4..=8).contains(&clean.len()) && clean.chars().all(|c| c.is_ascii_digit()) {
             let is_contextual = if i > 0 {
-                let prev = words[i - 1].to_lowercase();
-                prev.contains("code")
-                    || prev.contains("otp")
-                    || prev.contains("pin")
-                    || prev.contains("is")
-                    || prev.contains("verification")
+                contains_otp_context_ascii(words[i - 1])
             } else {
                 false
             };
@@ -247,6 +252,32 @@ pub fn extract_entities(text: &str) -> Vec<ExtractedEntity> {
     }
 
     entities
+}
+
+/// OPT-8 byte-level OTP context check: ASCII case-insensitive substring
+/// search for `code`/`otp`/`pin`/`is`/`verification` without the
+/// `to_lowercase` allocation (same predicate, no intermediate `String`).
+fn contains_otp_context_ascii(prev: &str) -> bool {
+    const NEEDLES: &[&[u8]] = &[b"code", b"otp", b"pin", b"is", b"verification"];
+    let bytes = prev.as_bytes();
+    for needle in NEEDLES {
+        if bytes.len() < needle.len() {
+            continue;
+        }
+        for window in bytes.windows(needle.len()) {
+            let mut hit = true;
+            for (a, b) in window.iter().zip(needle.iter()) {
+                if a.to_ascii_lowercase() != *b {
+                    hit = false;
+                    break;
+                }
+            }
+            if hit {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Open a URL using `xdg-open` detached via `setsid -f`.

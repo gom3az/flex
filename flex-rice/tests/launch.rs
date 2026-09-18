@@ -293,13 +293,13 @@ fn legacy_filter_mode_preserves_provider_order() {
     let mut menu = flex_rice::menu("launch", vec![tab]);
     menu.app.active_tab_mut().expect("tab").state.filter = "fir".to_string();
     assert_eq!(
-        menu.app.visible_rows(),
+        menu.app.visible_rows().to_vec(),
         vec![1, 2, 0],
         "spec reorders by tier"
     );
     menu.app.filter_mode = flex_core::filter::FilterMode::Legacy;
     assert_eq!(
-        menu.app.visible_rows(),
+        menu.app.visible_rows().to_vec(),
         vec![0, 1, 2],
         "legacy preserves provider order"
     );

@@ -1,6 +1,7 @@
-//! Shared runner for the nine flex entry points.
+//! Shared runner for the sixteen flex entry points.
 //!
-//! The eight per-provider binaries (`flex-power`, `flex-launch`, …) and the
+//! The thirteen per-provider binaries (`flex-power`, `flex-launch`, …), the
+//! two sync helpers (`flex-record`, `flex-mixer`) and the `flex` multicall
 //! `flex` compat dispatcher are all thin clap shells over this module, so
 //! the contracts live here exactly once:
 //!
@@ -25,12 +26,36 @@ use clap::Args;
 use flex_core::backend::{EXIT_CANCELLED, EXIT_ERROR, EXIT_OK};
 use flex_core::{CharSet, CharSetName, Menu, Outcome, Peaks, Theme, ThemeName};
 
-/// Initialize tracing/logging from `RUST_LOG`.
+/// Initialize tracing/logging from `RUST_LOG` (fmt-only, OPT-11).
+///
+/// `tracing-subscriber` ships without `env-filter` (which pulled `regex`),
+/// so the level comes from a small `RUST_LOG` scan instead: the first
+/// `trace`/`debug`/`info`/`warn`/`error` token wins, defaulting to `WARN`
+/// when unset or unrecognized (`off` silences down to `ERROR`).
 pub fn init_logging() {
     let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_max_level(level_from_env())
         .with_writer(std::io::stderr)
         .try_init();
+}
+
+/// `RUST_LOG` level without the `env-filter`/`regex` dependency.
+fn level_from_env() -> tracing::Level {
+    let value = std::env::var("RUST_LOG").unwrap_or_default().to_lowercase();
+    for token in value.split(|sep: char| !sep.is_ascii_alphanumeric()) {
+        match token {
+            "trace" => return tracing::Level::TRACE,
+            "debug" => return tracing::Level::DEBUG,
+            "info" => return tracing::Level::INFO,
+            "warn" | "warning" => return tracing::Level::WARN,
+            "error" => return tracing::Level::ERROR,
+            _ => {}
+        }
+    }
+    if value.contains("off") {
+        return tracing::Level::ERROR;
+    }
+    tracing::Level::WARN
 }
 
 use crate::{menu, popup, providers};

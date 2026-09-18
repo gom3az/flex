@@ -212,6 +212,11 @@ impl ItemGroup {
 }
 
 fn sort_procs(procs: &mut [RawProc], sort: SortBy) {
+    // OPT-8: fold each name once instead of `to_lowercase` per compare.
+    if sort == SortBy::Name {
+        procs.sort_by_cached_key(|p| (p.comm.to_lowercase(), std::cmp::Reverse(p.rss_kb)));
+        return;
+    }
     procs.sort_by(|a, b| match sort {
         SortBy::Mem => b
             .rss_kb
@@ -229,11 +234,8 @@ fn sort_procs(procs: &mut [RawProc], sort: SortBy) {
             .then_with(|| b.rss_kb.cmp(&a.rss_kb))
             .then_with(|| a.pid.cmp(&b.pid)),
         SortBy::Pid => a.pid.cmp(&b.pid),
-        SortBy::Name => a
-            .comm
-            .to_lowercase()
-            .cmp(&b.comm.to_lowercase())
-            .then_with(|| b.rss_kb.cmp(&a.rss_kb)),
+        // `Name` returns early via `sort_by_cached_key` above.
+        SortBy::Name => std::cmp::Ordering::Equal,
     });
 }
 
@@ -394,29 +396,32 @@ pub fn scan() -> Vec<Row> {
     let mut groups = group_processes(collected);
 
     let sort = sort_order();
-    groups.sort_by(|a, b| match sort {
-        SortBy::Mem => b
-            .total_rss_kb()
-            .cmp(&a.total_rss_kb())
-            .then_with(|| {
-                b.total_cpu()
-                    .partial_cmp(&a.total_cpu())
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .then_with(|| a.primary_pid().cmp(&b.primary_pid())),
-        SortBy::Cpu => b
-            .total_cpu()
-            .partial_cmp(&a.total_cpu())
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| b.total_rss_kb().cmp(&a.total_rss_kb()))
-            .then_with(|| a.primary_pid().cmp(&b.primary_pid())),
-        SortBy::Pid => a.primary_pid().cmp(&b.primary_pid()),
-        SortBy::Name => a
-            .name()
-            .to_lowercase()
-            .cmp(&b.name().to_lowercase())
-            .then_with(|| b.total_rss_kb().cmp(&a.total_rss_kb())),
-    });
+    // OPT-8: fold group names once for the `Name` order instead of
+    // `to_lowercase` per comparison.
+    if sort == SortBy::Name {
+        groups
+            .sort_by_cached_key(|g| (g.name().to_lowercase(), std::cmp::Reverse(g.total_rss_kb())));
+    } else {
+        groups.sort_by(|a, b| match sort {
+            SortBy::Mem => b
+                .total_rss_kb()
+                .cmp(&a.total_rss_kb())
+                .then_with(|| {
+                    b.total_cpu()
+                        .partial_cmp(&a.total_cpu())
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| a.primary_pid().cmp(&b.primary_pid())),
+            SortBy::Cpu => b
+                .total_cpu()
+                .partial_cmp(&a.total_cpu())
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.total_rss_kb().cmp(&a.total_rss_kb()))
+                .then_with(|| a.primary_pid().cmp(&b.primary_pid())),
+            SortBy::Pid => a.primary_pid().cmp(&b.primary_pid()),
+            SortBy::Name => std::cmp::Ordering::Equal,
+        });
+    }
 
     let mut rows = Vec::new();
     for group in groups {
@@ -428,21 +433,25 @@ pub fn scan() -> Vec<Row> {
 
 /// Per-tick refresh: rebuild the rows and keep the cursor on the same pid
 /// (matched by row id through the filter, like the Wi-Fi scan).
+///
+/// OPT-6: skips unless the `Processes` tab is active. OPT-9: reuses existing
+/// row allocations via [`super::sync_rows_in_place`] and restores focus in a
+/// single pass, so filter/scroll survive the tick.
 pub fn refresh(menu: &mut Menu) {
+    let active = menu
+        .app
+        .active_tab()
+        .is_some_and(|tab| tab.name == TAB_NAME);
+    if !active {
+        return;
+    }
     let previous = menu.app.focused_row().map(|row| row.id.clone());
     let fresh = scan();
     let Some(tab) = menu.app.tabs.iter_mut().find(|tab| tab.name == TAB_NAME) else {
         return;
     };
-    tab.rows = fresh;
-    if let Some(id) = previous {
-        if let Some(position) = visible_position(menu, |row| row.id == id) {
-            if let Some(state) = menu.app.active_tab_mut().map(|tab| &mut tab.state) {
-                state.focus = position;
-            }
-        }
-    }
-    menu.app.clamp_focus();
+    super::sync_rows_in_place(&mut tab.rows, fresh);
+    super::restore_focus(menu, previous);
 }
 
 /// The process state character (`R`/`S`/`T`/`Z`/…) for `pid`, if readable.
@@ -451,16 +460,6 @@ pub fn process_state(pid: u32) -> Option<char> {
     let data = std::fs::read_to_string(proc_path(pid, "stat")).ok()?;
     let rest = stat_after_comm(&data)?;
     rest.split_whitespace().next()?.chars().next()
-}
-
-/// Position of the first row matching `pred` in the **filtered** view (what
-/// `TabState::focus` indexes), or `None`.
-fn visible_position(menu: &Menu, pred: impl Fn(&Row) -> bool) -> Option<usize> {
-    let rows = &menu.app.active_tab()?.rows;
-    menu.app
-        .visible_rows()
-        .into_iter()
-        .position(|index| rows.get(index).is_some_and(&pred))
 }
 
 /// CPU% from the jiffy deltas; `0.0` when there is no baseline.

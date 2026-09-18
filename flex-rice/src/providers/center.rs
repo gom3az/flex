@@ -132,7 +132,7 @@ pub(crate) fn snapshot(file_env: &str, cmd: &str, args: &[&str]) -> Option<Strin
         .output_retrying()
         .ok()?;
     if output.status.success() {
-        Some(String::from_utf8_lossy(&output.stdout).into_owned())
+        Some(crate::tools::decode_stdout(output.stdout))
     } else {
         None
     }
@@ -220,14 +220,33 @@ pub fn parse_nmcli_devices(text: &str) -> Option<String> {
 /// Undo nmcli `-t` escaping (`\\` → `\`, `\:` → `:`), bash-exact via the
 /// `\x01` placeholder so an escaped backslash before a colon survives.
 ///
+/// OPT-8: single pass over bytes (no 3× `replace` allocation storm).
+///
 /// Shared with the [`wifi`](super::wifi) provider, which reads profile names
 /// out of `nmcli … connection show` (same escaping rules).
 pub(crate) fn unescape_ssid(escaped: &str) -> String {
-    const PLACEHOLDER: char = '\x01';
-    escaped
-        .replace("\\\\", &PLACEHOLDER.to_string())
-        .replace("\\:", ":")
-        .replace(PLACEHOLDER, "\\")
+    // OPT-8: byte-level `strip_prefix` pre-checks, single pass, one
+    // allocation sized to the input.
+    let mut out = String::with_capacity(escaped.len());
+    let mut rest = escaped;
+    while !rest.is_empty() {
+        if let Some(tail) = rest.strip_prefix("\\\\") {
+            out.push('\\');
+            rest = tail;
+        } else if let Some(tail) = rest.strip_prefix("\\:") {
+            out.push(':');
+            rest = tail;
+        } else {
+            let mut chars = rest.chars();
+            if let Some(c) = chars.next() {
+                out.push(c);
+                rest = chars.as_str();
+            } else {
+                break;
+            }
+        }
+    }
+    out
 }
 
 /// Parse `nmcli -t -f IN-USE,SSID,SIGNAL,SECURITY device wifi list`.
@@ -276,12 +295,19 @@ pub fn parse_nmcli_wifi(text: &str) -> Vec<WifiNet> {
 /// `◇ ` would be meaningless: both surfaces share this body.
 #[must_use]
 pub fn wifi_meta_body(net: &WifiNet) -> String {
-    let lock = if net.security.is_empty() || net.security == "--" {
-        "🔓 Open".to_string()
+    // OPT-8: `&str` lock text, single `format!` (no intermediate `String`).
+    let lock: &str = if net.security.is_empty() || net.security == "--" {
+        "🔓 Open"
     } else {
-        format!("🔒 {}", net.security)
+        net.security.as_str()
     };
-    let mut meta = format!("{}% {} {lock}", net.signal, bar(net.signal, 100, 8));
+    let mut meta = format!("{}% {} ", net.signal, bar(net.signal, 100, 8));
+    if lock == "🔓 Open" {
+        meta.push_str(lock);
+    } else {
+        meta.push_str("🔒 ");
+        meta.push_str(lock);
+    }
     if net.connected {
         meta.push_str("  Connected");
     }
@@ -460,14 +486,15 @@ pub const TAB_THEMES: &str = "Themes";
 
 #[must_use]
 pub fn power_tab() -> Tab {
-    let plain = |id: &str, label: &str, meta: &str| Row {
-        meta: Some(meta.to_string()),
-        ..Row::new(RowId::new(id), label)
+    let plain = |id: &str, label: &str, meta: &str| {
+        let mut row = Row::new(RowId::new(id), label);
+        row.meta = Some(meta.to_string());
+        row
     };
-    let confirmable = |id: &str, label: &str, meta: &str| Row {
-        confirmable: true,
-        meta: Some(meta.to_string()),
-        ..Row::new(RowId::new(id), label)
+    let confirmable = |id: &str, label: &str, meta: &str| {
+        let mut row = Row::confirmable(RowId::new(id), label);
+        row.meta = Some(meta.to_string());
+        row
     };
     Tab::with_rows(
         TAB_POWER,

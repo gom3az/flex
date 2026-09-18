@@ -117,6 +117,7 @@ use anyhow::Result;
 use crate::exec::center::NotifyWhen;
 use crate::providers::{center, wifi};
 use crate::spawn::RetryExec as _;
+use crate::tools;
 
 /// A validated wifi action id (`flex-wifi.sh:174-185` arms; the SSID travels
 /// in the label, never in the whitespace-split id token).
@@ -430,7 +431,7 @@ pub fn notify_cmd() -> String {
 /// The ambient `PATH`, empty when unset (tool resolution then fails cleanly
 /// instead of inheriting a surprising default).
 fn ambient_path() -> String {
-    std::env::var("PATH").unwrap_or_default()
+    tools::ambient_path()
 }
 
 /// Resolve `name` against `path_env` (`:`-separated, shell-style).
@@ -440,16 +441,22 @@ fn ambient_path() -> String {
 /// `name` (the usual override shape) resolves to itself, exactly like the
 /// wrapper's `"$nmcli_cmd" …` direct invocation.
 fn resolve_tool(name: &str, path_env: &str) -> Option<PathBuf> {
-    path_env
-        .split(':')
-        .map(|dir| std::path::Path::new(dir).join(name))
-        .find(|candidate| candidate.is_file())
+    tools::resolve_tool(name, path_env)
 }
+
+/// Fixed `nmcli` argv shapes (OPT-11): `&'static` consts, no per-call `Vec<String>`.
+const DEVICE_TYPE_ARGS: &[&str] = &["-t", "-f", "DEVICE,TYPE", "device"];
+/// Fixed `nmcli connection show` argv shape.
+const CONNECTION_SHOW_ARGS: &[&str] = &["-t", "-f", "NAME,TYPE", "connection", "show"];
+/// Fixed `nmcli radio wifi` prefix; the trailing `on`/`off` appends.
+const RADIO_WIFI_ARGS: &[&str] = &["radio", "wifi"];
+/// Fixed `nmcli device wifi connect` head (`ssid`/`password`/`ifname` append).
+const CONNECT_HEAD_ARGS: &[&str] = &["device", "wifi", "connect"];
 
 /// Run one tool with `args` (quiet): stdio nulled, failures swallowed —
 /// the wrapper's `… 2>/dev/null || true`. Returns whether it exited `0`; a
 /// missing tool or failed spawn counts as failure, never an error.
-fn tool_quiet(path_env: &str, name: &str, args: &[String]) -> bool {
+fn tool_quiet(path_env: &str, name: &str, args: &[&str]) -> bool {
     let Some(bin) = resolve_tool(name, path_env) else {
         return false;
     };
@@ -465,7 +472,7 @@ fn tool_quiet(path_env: &str, name: &str, args: &[String]) -> bool {
 /// Capture one tool's stdout (query): stderr nulled, stdin nulled, like the
 /// wrapper's `$(… 2>/dev/null || true)` — stdout is captured even on a
 /// non-zero exit. `None` only when the tool is missing or the spawn fails.
-fn tool_captured(path_env: &str, name: &str, args: &[String]) -> Option<String> {
+fn tool_captured(path_env: &str, name: &str, args: &[&str]) -> Option<String> {
     let bin = resolve_tool(name, path_env)?;
     let output = Command::new(&bin)
         .args(args)
@@ -473,20 +480,14 @@ fn tool_captured(path_env: &str, name: &str, args: &[String]) -> Option<String> 
         .stderr(Stdio::null())
         .output_retrying()
         .ok()?;
-    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+    Some(tools::decode_stdout(output.stdout))
 }
 
 /// First Wi-Fi interface from `nmcli -t -f DEVICE,TYPE device` (the
 /// wrapper's `wifi_iface` verbatim: the first `*:wifi` device).
 /// `None` when the interface vanished since the snapshot.
 fn wifi_iface(nmcli: &str, path_env: &str) -> Option<String> {
-    let args = vec![
-        String::from("-t"),
-        String::from("-f"),
-        String::from("DEVICE,TYPE"),
-        String::from("device"),
-    ];
-    let out = tool_captured(path_env, nmcli, &args)?;
+    let out = tool_captured(path_env, nmcli, DEVICE_TYPE_ARGS)?;
     center::parse_nmcli_devices(&out)
 }
 
@@ -496,17 +497,17 @@ fn wifi_iface(nmcli: &str, path_env: &str) -> Option<String> {
 /// (its background rescan), and triggering another scan would add ~3 s
 /// between Enter and the connect (`flex-wifi.sh:114-117`).
 fn wifi_list(nmcli: &str, path_env: &str, iface: &str) -> Option<String> {
-    let args = vec![
-        String::from("-t"),
-        String::from("-f"),
-        String::from("IN-USE,SSID,SIGNAL,SECURITY"),
-        String::from("device"),
-        String::from("wifi"),
-        String::from("list"),
-        String::from("ifname"),
-        iface.to_string(),
-        String::from("--rescan"),
-        String::from("no"),
+    let args = [
+        "-t",
+        "-f",
+        "IN-USE,SSID,SIGNAL,SECURITY",
+        "device",
+        "wifi",
+        "list",
+        "ifname",
+        iface,
+        "--rescan",
+        "no",
     ];
     tool_captured(path_env, nmcli, &args)
 }
@@ -516,14 +517,7 @@ fn wifi_list(nmcli: &str, path_env: &str, iface: &str) -> Option<String> {
 /// picker rows use: split against the last colon, `802-11-wireless` only,
 /// names unescaped before compare — `flex-wifi.sh:75-84`).
 fn is_saved(nmcli: &str, path_env: &str, ssid: &str) -> bool {
-    let args = vec![
-        String::from("-t"),
-        String::from("-f"),
-        String::from("NAME,TYPE"),
-        String::from("connection"),
-        String::from("show"),
-    ];
-    tool_captured(path_env, nmcli, &args).is_some_and(|out| {
+    tool_captured(path_env, nmcli, CONNECTION_SHOW_ARGS).is_some_and(|out| {
         wifi::parse_saved_profiles(&out)
             .iter()
             .any(|saved| saved == ssid)
@@ -534,13 +528,13 @@ fn is_saved(nmcli: &str, path_env: &str, ssid: &str) -> bool {
 /// `connect_without_password`: open networks and the saved-profile
 /// attempt share it — `flex-wifi.sh:87-89`).
 fn connect_without_password(nmcli: &str, path_env: &str, ssid: &str, iface: &str) -> bool {
-    let args = vec![
-        String::from("device"),
-        String::from("wifi"),
-        String::from("connect"),
-        ssid.to_string(),
-        String::from("ifname"),
-        iface.to_string(),
+    let args = [
+        CONNECT_HEAD_ARGS[0],
+        CONNECT_HEAD_ARGS[1],
+        CONNECT_HEAD_ARGS[2],
+        ssid,
+        "ifname",
+        iface,
     ];
     tool_quiet(path_env, nmcli, &args)
 }
@@ -863,33 +857,25 @@ pub fn execute_with(
 fn run_step(path_env: &str, step: Step, last_ok: &mut bool) {
     match step {
         Step::NmcliRadioOn { nmcli } => {
-            let args = vec![
-                String::from("radio"),
-                String::from("wifi"),
-                String::from("on"),
-            ];
+            let args = [RADIO_WIFI_ARGS[0], RADIO_WIFI_ARGS[1], "on"];
             tool_quiet(path_env, &nmcli, &args);
         }
         Step::NmcliRadioOff { nmcli } => {
-            let args = vec![
-                String::from("radio"),
-                String::from("wifi"),
-                String::from("off"),
-            ];
+            let args = [RADIO_WIFI_ARGS[0], RADIO_WIFI_ARGS[1], "off"];
             tool_quiet(path_env, &nmcli, &args);
         }
         Step::NmcliDisconnect { nmcli, iface } => {
-            let args = vec![String::from("device"), String::from("disconnect"), iface];
+            let args = ["device", "disconnect", iface.as_str()];
             tool_quiet(path_env, &nmcli, &args);
         }
         Step::NmcliConnect { nmcli, ssid, iface } => {
-            let args = vec![
-                String::from("device"),
-                String::from("wifi"),
-                String::from("connect"),
-                ssid,
-                String::from("ifname"),
-                iface,
+            let args = [
+                CONNECT_HEAD_ARGS[0],
+                CONNECT_HEAD_ARGS[1],
+                CONNECT_HEAD_ARGS[2],
+                ssid.as_str(),
+                "ifname",
+                iface.as_str(),
             ];
             *last_ok = tool_quiet(path_env, &nmcli, &args);
         }
@@ -899,15 +885,15 @@ fn run_step(path_env: &str, step: Step, last_ok: &mut bool) {
             password,
             iface,
         } => {
-            let args = vec![
-                String::from("device"),
-                String::from("wifi"),
-                String::from("connect"),
-                ssid,
-                String::from("password"),
-                password,
-                String::from("ifname"),
-                iface,
+            let args = [
+                CONNECT_HEAD_ARGS[0],
+                CONNECT_HEAD_ARGS[1],
+                CONNECT_HEAD_ARGS[2],
+                ssid.as_str(),
+                "password",
+                password.as_str(),
+                "ifname",
+                iface.as_str(),
             ];
             *last_ok = tool_quiet(path_env, &nmcli, &args);
         }
@@ -923,7 +909,7 @@ fn run_step(path_env: &str, step: Step, last_ok: &mut bool) {
                 NotifyWhen::Failure => !*last_ok,
             };
             if run {
-                let args = vec![String::from("-a"), String::from("Wi-Fi"), summary, body];
+                let args = ["-a", "Wi-Fi", summary.as_str(), body.as_str()];
                 tool_quiet(path_env, &notify, &args);
             }
         }

@@ -18,5 +18,6 @@ pub mod providers;
 pub mod runner;
 mod spawn;
 pub mod terminal;
+pub mod tools;
 
 pub use providers::{menu, tick_hook};

@@ -115,46 +115,6 @@ impl RetryExec for Command {
     }
 }
 
-#[allow(dead_code)]
-pub(crate) trait AsyncRetryExec {
-    async fn status_retrying(&mut self) -> io::Result<ExitStatus>;
-    async fn output_retrying(&mut self) -> io::Result<Output>;
-}
-
-impl AsyncRetryExec for tokio::process::Command {
-    async fn status_retrying(&mut self) -> io::Result<ExitStatus> {
-        tracing::debug!("AsyncRetryExec::status_retrying: {:?}", self);
-        let mut last = None;
-        for _ in 0..ATTEMPTS {
-            match self.status().await {
-                Ok(value) => return Ok(value),
-                Err(err) if err.kind() == io::ErrorKind::ExecutableFileBusy => {
-                    last = Some(err);
-                    tokio::time::sleep(BACKOFF).await;
-                }
-                Err(err) => return Err(err),
-            }
-        }
-        Err(last.unwrap_or_else(|| io::Error::other("spawn: exec stayed busy")))
-    }
-
-    async fn output_retrying(&mut self) -> io::Result<Output> {
-        tracing::debug!("AsyncRetryExec::output_retrying: {:?}", self);
-        let mut last = None;
-        for _ in 0..ATTEMPTS {
-            match self.output().await {
-                Ok(value) => return Ok(value),
-                Err(err) if err.kind() == io::ErrorKind::ExecutableFileBusy => {
-                    last = Some(err);
-                    tokio::time::sleep(BACKOFF).await;
-                }
-                Err(err) => return Err(err),
-            }
-        }
-        Err(last.unwrap_or_else(|| io::Error::other("spawn: exec stayed busy")))
-    }
-}
-
 /// Non-blocking background worker thread helper with a lock-free result mailbox.
 ///
 /// Spawns `f` on a background worker thread and deposits the result into a shared mailbox.

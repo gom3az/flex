@@ -94,9 +94,10 @@ pub const PROFILE_ROWS: [PowerRow; 3] = [
 
 fn to_rows(rows: &[PowerRow]) -> Vec<Row> {
     rows.iter()
-        .map(|row| Row {
-            confirmable: row.confirmable,
-            ..Row::with_meta(RowId::new(row.id), row.label, row.meta)
+        .map(|row| {
+            let mut out = Row::with_meta(RowId::new(row.id), row.label, row.meta);
+            out.confirmable = row.confirmable;
+            out
         })
         .collect()
 }

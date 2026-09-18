@@ -1,11 +1,20 @@
-//! `flex` binary: compat dispatcher over the eight `flex-<provider>` binaries.
+//! `flex` binary: multicall dispatcher over the `flex-<provider>` binaries.
 //!
-//! `flex <provider> [flags]` re-execs the matching `flex-<provider>` binary
-//! with flags reconstructed in canonical order (so `flex -t nocolor launch`
-//! ≡ `flex launch -t nocolor`); `flex popup <menu|menu-wide> <cmd…>`
-//! toggles the popup for dotfiles `kill-menu.sh`. All providers run the
-//! full TUI event loop and execute the selected row in-process
-//! (`exec/*.rs`); the wrappers are retired.
+//! Two spellings reach the same provider, both without duplicating provider
+//! logic (OPT-10 single-binary install):
+//!
+//! - `flex <provider> [flags]` parses the provider subcommand below and
+//!   re-execs the matching `flex-<provider>` binary with flags reconstructed
+//!   in canonical order (so `flex -t nocolor launch` ≡ `flex launch -t nocolor`);
+//! - `flex-<provider> [flags]` (the installed symlink farm: every
+//!   `~/.local/bin/flex-*` name points at this binary) resolves `argv[0]`
+//!   and re-execs the sibling `flex-<provider>` binary with the original
+//!   arguments intact (so `--help`/`--version` answer as the provider
+//!   binary itself).
+//!
+//! `flex popup <menu|menu-wide> <cmd…>` toggles the popup for dotfiles
+//! `kill-menu.sh`. All providers run the full TUI event loop and execute
+//! the selected row in-process (`exec/*.rs`); the wrappers are retired.
 
 use std::path::PathBuf;
 
@@ -219,12 +228,18 @@ fn main() {
 /// Parse args and dispatch: `popup` toggles, anything else re-execs the
 /// provider binary with canonical flags.
 ///
+/// When invoked under a `flex-*` name (the symlink farm), `argv[0]`
+/// selects the tool and the original arguments forward untouched.
+///
 /// # Errors
 ///
 /// Returns an error when the popup toggle fails, the sibling provider
 /// binary cannot be located, or its spawn fails. Messages carry no `flex:`
 /// prefix; `main` adds it via the runner.
 fn run() -> Result<()> {
+    if let Some(tool) = multicall_tool() {
+        return reexec_argv0(&tool);
+    }
     let cli = Cli::parse();
     let style = cli.style.options();
     match &cli.command {
@@ -317,6 +332,80 @@ fn sibling_binary(name: &str) -> Result<PathBuf> {
         anyhow::bail!("cannot locate {name} next to the flex binary");
     };
     Ok(dir.join(name))
+}
+
+/// Basename of `argv[0]` (`flex-power` when run through the symlink farm).
+fn argv0_name() -> Option<String> {
+    std::env::args().next().as_deref().and_then(|argv0| {
+        std::path::Path::new(argv0)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_string)
+    })
+}
+
+/// Multicall tool name when invoked as `flex-*` (`None` for `flex` itself
+/// or any unknown name, which keeps the `flex <provider>` parse path).
+///
+/// Matches exactly the sixteen names `setup.sh` installs, so the single
+/// `flex` binary serves the whole farm through `argv[0]`.
+fn multicall_tool() -> Option<String> {
+    const TOOLS: &[&str] = &[
+        "flex",
+        "flex-power",
+        "flex-profile",
+        "flex-launch",
+        "flex-shot",
+        "flex-theme",
+        "flex-clip",
+        "flex-center",
+        "flex-wallpaper",
+        "flex-wifi",
+        "flex-proc",
+        "flex-record",
+        "flex-mixer",
+        "flex-net",
+        "flex-bt",
+        "flex-notify",
+    ];
+    let name = argv0_name()?;
+    if name == "flex" || !TOOLS.contains(&name.as_str()) {
+        return None;
+    }
+    Some(name)
+}
+
+/// Whether `candidate` and the running executable are the same file.
+///
+/// Compares canonicalized paths (`false` when either path cannot be
+/// resolved). A match means re-exec would recurse, so the caller must not
+/// spawn.
+fn is_self_binary(candidate: &PathBuf) -> bool {
+    let current = std::env::current_exe().ok();
+    match (current, std::fs::canonicalize(candidate)) {
+        (Some(exe), Ok(resolved)) => std::fs::canonicalize(exe).is_ok_and(|own| own == resolved),
+        _ => false,
+    }
+}
+
+/// Forward the original arguments to the sibling `flex-*` binary selected
+/// by `argv[0]` and exit with its code (the multicall half of [`reexec`]).
+///
+/// # Errors
+///
+/// When the sibling binary cannot be located (or is the running binary
+/// itself, which would recurse) or its spawn fails. A running child that
+/// exits (any code) never returns an error: its code becomes ours.
+fn reexec_argv0(tool: &str) -> Result<()> {
+    let bin = sibling_binary(tool)?;
+    if is_self_binary(&bin) {
+        anyhow::bail!("cannot resolve {tool}: sibling binary is the flex binary itself");
+    }
+    let status = std::process::Command::new(&bin)
+        .args(std::env::args().skip(1))
+        .status()
+        .with_context(|| format!("cannot spawn {}", bin.display()))?;
+    std::process::exit(status.code().unwrap_or(EXIT_ERROR));
 }
 
 /// Re-exec the provider binary with canonical flags (plus any verb tokens)

@@ -55,6 +55,18 @@ pub const EMPTY_NEEDLE_SCORE: u16 = u16::MAX;
 pub trait Ranker {
     /// Rank one pair; see [`score`] for the default semantics.
     fn rank(&self, needle: &str, haystack: &str) -> Option<(u16, Vec<u32>)>;
+
+    /// Rank one pair against a pre-folded needle.
+    ///
+    /// [`rank_all_with`] folds the needle once per query and calls this per
+    /// row, so implementors must not re-fold `needle` here. The default
+    /// unfolds back into a `String` and delegates to [`Ranker::rank`]
+    /// (correct, but slow); the built-in rankers override this with
+    /// streaming matchers that never materialize the haystack fold.
+    fn rank_folded(&self, needle: &[char], haystack: &str) -> Option<(u16, Vec<u32>)> {
+        let unfolded: String = needle.iter().collect();
+        self.rank(&unfolded, haystack)
+    }
 }
 
 /// Which ranking engine backs [`rank_all`] (see [`App::visible_rows`]).
@@ -81,6 +93,10 @@ impl Ranker for FuzzyRanker {
     fn rank(&self, needle: &str, haystack: &str) -> Option<(u16, Vec<u32>)> {
         score(needle, haystack)
     }
+
+    fn rank_folded(&self, needle: &[char], haystack: &str) -> Option<(u16, Vec<u32>)> {
+        score_folded(needle, haystack)
+    }
 }
 
 /// Legacy ordered-subsequence ranker (R1 escape hatch).
@@ -97,6 +113,17 @@ impl Ranker for LegacyRanker {
             return Some((EMPTY_NEEDLE_SCORE, Vec::new()));
         }
         if is_subsequence(needle, haystack) {
+            Some((0, Vec::new()))
+        } else {
+            None
+        }
+    }
+
+    fn rank_folded(&self, needle: &[char], haystack: &str) -> Option<(u16, Vec<u32>)> {
+        if needle.is_empty() {
+            return Some((EMPTY_NEEDLE_SCORE, Vec::new()));
+        }
+        if is_subsequence_folded(needle, haystack) {
             Some((0, Vec::new()))
         } else {
             None
@@ -121,32 +148,58 @@ pub fn score(needle: &str, haystack: &str) -> Option<(u16, Vec<u32>)> {
         return Some((EMPTY_NEEDLE_SCORE, Vec::new()));
     }
     let folded_needle: Vec<char> = lowercase_chars(needle);
-    let folded_hay: Vec<char> = lowercase_chars(haystack);
-    if folded_needle.len() > folded_hay.len() {
+    score_folded(&folded_needle, haystack)
+}
+
+/// [`score`] against a pre-folded needle (see [`Ranker::rank_folded`]).
+///
+/// The haystack fold streams (`chars().flat_map(to_lowercase)`) straight
+/// into a buffer instead of the old `String` + `Vec<char>` double alloc;
+/// tiers, penalties and positions match [`score`] exactly.
+fn score_folded(needle: &[char], haystack: &str) -> Option<(u16, Vec<u32>)> {
+    if needle.is_empty() {
+        return Some((EMPTY_NEEDLE_SCORE, Vec::new()));
+    }
+    let folded_hay: Vec<char> = haystack.chars().flat_map(char::to_lowercase).collect();
+    if needle.len() > folded_hay.len() {
         return None;
     }
+    let mut positions: Vec<u32> = Vec::with_capacity(needle.len());
+    let tier_score = score_into(needle, &folded_hay, &mut positions)?;
+    Some((tier_score, positions))
+}
+
+/// Tier core over pre-folded slices; fills `positions` on success.
+///
+/// `needle` is the once-per-query fold; `hay` is the streamed haystack fold.
+/// Tier/penalty semantics are unchanged: prefix 100 > prefix-word 80 >
+/// run>=3 60 > boundary 40 > scattered 10, subsequence required, gap/offset
+/// penalties saturating at zero.
+fn score_into(needle: &[char], hay: &[char], positions: &mut Vec<u32>) -> Option<u16> {
+    debug_assert!(!needle.is_empty(), "empty needle is handled by the caller");
+    positions.clear();
     // Tier 1: full prefix.
-    if folded_hay.starts_with(&folded_needle[..]) {
-        return Some(finish(TIER_PREFIX, 0, folded_needle.len()));
+    if hay.starts_with(needle) {
+        positions.extend((0..needle.len()).map(|i| u32::try_from(i).unwrap_or(u32::MAX)));
+        return Some(apply_penalties(TIER_PREFIX, 0, 0));
     }
     // Tier 2: prefix of a non-first word (leftmost wins: lowest penalty).
-    if let Some(word_start) = prefix_word_start(&folded_needle, &folded_hay) {
-        return Some(finish(
-            TIER_PREFIX_WORD,
-            word_start,
-            word_start + folded_needle.len(),
-        ));
+    if let Some(word_start) = prefix_word_start(needle, hay) {
+        positions.extend(
+            (word_start..word_start + needle.len()).map(|i| u32::try_from(i).unwrap_or(u32::MAX)),
+        );
+        return Some(apply_penalties(TIER_PREFIX_WORD, word_start, 0));
     }
     // Greedy leftmost ordered-subsequence alignment. This is the acceptance
     // predicate: every pair matched here is `Some`; tiers only reorder.
     // (Known limit: greedy can miss a higher-tier alignment, e.g. needle
     // `"fir"` vs `"ffir"` scores scattered instead of prefix. Acceptance is
     // unaffected — only the tier is conservative.)
-    let mut positions: Vec<u32> = Vec::with_capacity(folded_needle.len());
+    positions.reserve(needle.len());
     let mut cursor = 0_usize;
-    for &wanted in &folded_needle {
+    for &wanted in needle {
         let mut found = None;
-        for (index, &got) in folded_hay.iter().enumerate().skip(cursor) {
+        for (index, &got) in hay.iter().enumerate().skip(cursor) {
             if got == wanted {
                 found = Some(index);
                 cursor = index + 1;
@@ -155,17 +208,17 @@ pub fn score(needle: &str, haystack: &str) -> Option<(u16, Vec<u32>)> {
         }
         positions.push(u32::try_from(found?).unwrap_or(u32::MAX));
     }
-    let tier = if longest_run(&positions) >= MIN_RUN {
+    let tier = if longest_run(positions) >= MIN_RUN {
         TIER_RUN
-    } else if is_word_start(&folded_hay, positions[0] as usize) {
+    } else if is_word_start(hay, positions[0] as usize) {
         TIER_WORD_BOUNDARY
     } else {
         TIER_SCATTERED
     };
     let first = positions[0] as usize;
     let last = positions[positions.len() - 1] as usize;
-    let gaps = last - first + 1 - folded_needle.len();
-    Some((apply_penalties(tier, first, gaps), positions))
+    let gaps = last - first + 1 - needle.len();
+    Some(apply_penalties(tier, first, gaps))
 }
 
 /// One ranked row: provider index, score, and match positions.
@@ -184,31 +237,53 @@ pub struct RankedHit {
 /// - Empty needle: every row in provider order (no scoring).
 /// - Otherwise: matches ordered by score descending, ties broken by the
 ///   original provider index ascending (stable, deterministic).
+///
+/// Fast path (OPT-1): the needle folds once per query and the haystack fold
+/// plus the `positions` scratch are reused across rows, so per-row work is
+/// matching only — no `String`/`Vec` allocs except the per-hit positions.
 #[must_use]
 pub fn rank_all(needle: &str, rows: &[Row]) -> Vec<RankedHit> {
-    rank_all_with(&FuzzyRanker, needle, rows)
+    if needle.is_empty() {
+        return empty_hits(rows);
+    }
+    let folded_needle: Vec<char> = lowercase_chars(needle);
+    let mut hits: Vec<RankedHit> = Vec::new();
+    let mut folded_hay: Vec<char> = Vec::new();
+    let mut positions: Vec<u32> = Vec::new();
+    for (index, row) in rows.iter().enumerate() {
+        folded_hay.clear();
+        folded_hay.extend(row.label.chars().flat_map(char::to_lowercase));
+        if folded_needle.len() > folded_hay.len() {
+            continue;
+        }
+        if let Some(tier_score) = score_into(&folded_needle, &folded_hay, &mut positions) {
+            hits.push(RankedHit {
+                index,
+                score: tier_score,
+                positions: positions.clone(),
+            });
+        }
+    }
+    hits.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.index.cmp(&b.index)));
+    hits
 }
 
 /// [`rank_all`] over an explicit [`Ranker`] (the `nucleo` seam).
+///
+/// The needle folds once per query and goes into the ranker as `&[char]`
+/// (see [`Ranker::rank_folded`]); per-row work never re-folds it.
 #[must_use]
 pub fn rank_all_with<R: Ranker>(ranker: &R, needle: &str, rows: &[Row]) -> Vec<RankedHit> {
     if needle.is_empty() {
-        return rows
-            .iter()
-            .enumerate()
-            .map(|(index, _)| RankedHit {
-                index,
-                score: EMPTY_NEEDLE_SCORE,
-                positions: Vec::new(),
-            })
-            .collect();
+        return empty_hits(rows);
     }
+    let folded_needle: Vec<char> = lowercase_chars(needle);
     let mut hits: Vec<RankedHit> = rows
         .iter()
         .enumerate()
         .filter_map(|(index, row)| {
             ranker
-                .rank(needle, &row.label)
+                .rank_folded(&folded_needle, &row.label)
                 .map(|(score, positions)| RankedHit {
                     index,
                     score,
@@ -229,6 +304,18 @@ pub fn rank_all_legacy(needle: &str, rows: &[Row]) -> Vec<RankedHit> {
     rank_all_with(&LegacyRanker, needle, rows)
 }
 
+/// Empty-needle hits: every row in provider order (no scoring).
+fn empty_hits(rows: &[Row]) -> Vec<RankedHit> {
+    rows.iter()
+        .enumerate()
+        .map(|(index, _)| RankedHit {
+            index,
+            score: EMPTY_NEEDLE_SCORE,
+            positions: Vec::new(),
+        })
+        .collect()
+}
+
 fn lowercase_chars(text: &str) -> Vec<char> {
     text.to_lowercase().chars().collect()
 }
@@ -239,26 +326,29 @@ fn lowercase_chars(text: &str) -> Vec<char> {
 /// agree on *whether* a pair matches and differ only in scoring.
 #[must_use]
 pub fn is_subsequence(needle: &str, haystack: &str) -> bool {
-    let folded_needle = lowercase_chars(needle);
-    let folded_hay = lowercase_chars(haystack);
-    if folded_needle.len() > folded_hay.len() {
-        return false;
-    }
-    let mut cursor = 0_usize;
-    for wanted in folded_needle {
-        let mut found = false;
-        for (index, got) in folded_hay.iter().enumerate().skip(cursor) {
-            if *got == wanted {
-                cursor = index + 1;
-                found = true;
-                break;
+    is_subsequence_folded(&lowercase_chars(needle), haystack)
+}
+
+/// [`is_subsequence`] against a pre-folded needle.
+///
+/// Streams the haystack fold (`chars().flat_map(to_lowercase)`) with no
+/// allocation; the predicate matches [`score`] exactly.
+fn is_subsequence_folded(needle: &[char], haystack: &str) -> bool {
+    let mut wanted = needle.iter();
+    let Some(first) = wanted.next() else {
+        return true;
+    };
+    let mut current = *first;
+    for got in haystack.chars().flat_map(char::to_lowercase) {
+        if got == current {
+            if let Some(next) = wanted.next() {
+                current = *next;
+            } else {
+                return true;
             }
         }
-        if !found {
-            return false;
-        }
     }
-    true
+    false
 }
 
 /// Leftmost non-first word start where `needle` matches contiguously.
@@ -292,14 +382,6 @@ fn longest_run(positions: &[u32]) -> usize {
         }
     }
     best
-}
-
-/// Build `(score, positions)` for a contiguous `[start, end)` match.
-fn finish(tier: u16, start: usize, end: usize) -> (u16, Vec<u32>) {
-    let positions: Vec<u32> = (start..end)
-        .map(|i| u32::try_from(i).unwrap_or(u32::MAX))
-        .collect();
-    (apply_penalties(tier, start, 0), positions)
 }
 
 /// Subtract gap/leading penalties, saturating at zero.

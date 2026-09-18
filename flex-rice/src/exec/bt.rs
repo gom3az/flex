@@ -12,13 +12,14 @@
 //! - Default Audio Sink selection via `wpctl set-default` / `pactl set-default-sink`
 //! - Audio Profile switching (A2DP / HFP) via `pactl set-card-profile` / `wpctl set-profile`
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use anyhow::Result;
 
 use crate::exec::center::NotifyWhen;
 use crate::spawn::RetryExec as _;
+use crate::tools;
 
 /// What [`execute`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,20 +154,11 @@ pub fn notify_cmd() -> String {
 }
 
 fn ambient_path() -> String {
-    std::env::var("PATH").unwrap_or_default()
+    tools::ambient_path()
 }
 
 fn resolve_tool(name: &str, path_env: &str) -> Option<PathBuf> {
-    if name.contains('/') {
-        let p = PathBuf::from(name);
-        if p.is_file() {
-            return Some(p);
-        }
-    }
-    path_env
-        .split(':')
-        .map(|dir| Path::new(dir).join(name))
-        .find(|candidate| candidate.is_file())
+    tools::resolve_tool(name, path_env)
 }
 
 fn tool_quiet(path_env: &str, name: &str, args: &[&str]) -> bool {
@@ -190,7 +182,7 @@ fn tool_captured(path_env: &str, name: &str, args: &[&str]) -> Option<String> {
         .stderr(Stdio::null())
         .output_retrying()
         .ok()?;
-    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+    Some(tools::decode_stdout(output.stdout))
 }
 
 #[allow(dead_code)]

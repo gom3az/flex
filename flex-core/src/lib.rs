@@ -22,7 +22,9 @@ pub mod width;
 pub use charset::{CharSet, CharSetName};
 pub use theme::{Theme, ThemeName};
 
+use std::cell::{Ref, RefCell};
 use std::collections::BTreeSet;
+use std::sync::Arc;
 use std::time::Instant;
 
 /// Stable identifier for a [`Row`]'s action.
@@ -59,12 +61,65 @@ pub fn content_hash_hex(content: &str) -> String {
     format!("{hash:016x}")
 }
 
+/// Memoized sanitize+measure of one optional text field (OPT-3).
+///
+/// Rows mutate their `String` fields directly, so the cache validates by
+/// content: a hit does no work, a miss re-sanitizes once. Draw paths hold
+/// the owning row guard while rendering, so a frame costs at most one
+/// sanitize per changed field and zero per unchanged field.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct CachedText {
+    /// Last-seen raw content (`None` = the field was `None`).
+    pub(crate) src: Option<String>,
+    /// Sanitized text for `src` (what the draw paths render).
+    pub(crate) sanitized: String,
+    /// Measure over [`CachedText::sanitized`] (byte ranges index it).
+    pub(crate) measured: width::Measured,
+}
+
+impl CachedText {
+    /// Refresh from `current`, returning the cached pair.
+    fn refresh(&mut self, current: Option<&str>) -> Option<(&str, &width::Measured)> {
+        if self.src.as_deref() != current {
+            if let Some(text) = current {
+                let sanitized = width::sanitize_measured(text);
+                self.src = Some(text.to_owned());
+                self.sanitized = sanitized.text;
+                self.measured = sanitized.measured;
+            } else {
+                self.src = None;
+                self.sanitized.clear();
+                self.measured = width::Measured::default();
+            }
+        }
+        if self.src.is_some() {
+            Some((&self.sanitized, &self.measured))
+        } else {
+            None
+        }
+    }
+}
+
+/// Memoized sanitized texts of a [`Row`] (OPT-3).
+///
+/// One guard covers a whole `draw_node`: every label/meta/config/detail/
+/// sublabel borrow comes from it, so there is no per-cell sanitize or
+/// measure on the draw path.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RowTextCache {
+    pub(crate) label: CachedText,
+    pub(crate) meta: CachedText,
+    pub(crate) config: CachedText,
+    pub(crate) detail: CachedText,
+    pub(crate) sublabel: CachedText,
+}
+
 /// A row's selectable target (wiremix `view::Target` + its title).
 ///
 /// Shown right-aligned in the header (with the `default_stream` marker `◇`
 /// when [`Target::is_default`]) and listed in the row's dropdown
 /// (`Enter`/`c`), mirroring upstream `node_targets` + `DropdownWidget`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Target {
     /// Opaque id reported on the `ACTION:TARGET` line.
     pub id: RowId,
@@ -72,7 +127,17 @@ pub struct Target {
     pub title: String,
     /// Upstream `Target::Default`: prefix the header title with `◇`.
     pub is_default: bool,
+    /// Memoized sanitize+measure of [`Target::title`] (OPT-3).
+    title_cache: RefCell<CachedText>,
 }
+
+impl PartialEq for Target {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id && self.title == other.title && self.is_default == other.is_default
+    }
+}
+
+impl Eq for Target {}
 
 impl Target {
     #[must_use]
@@ -81,6 +146,7 @@ impl Target {
             id,
             title: title.into(),
             is_default: false,
+            title_cache: RefCell::default(),
         }
     }
 
@@ -91,7 +157,20 @@ impl Target {
             id,
             title: title.into(),
             is_default: true,
+            title_cache: RefCell::default(),
         }
+    }
+
+    /// Borrow the sanitized title, refreshing the memo first (OPT-3).
+    ///
+    /// Hold the guard while rendering: the header and the dropdown share
+    /// it, so a title is sanitized at most once per content change.
+    pub(crate) fn title_texts(&self) -> Ref<'_, CachedText> {
+        {
+            let mut cache = self.title_cache.borrow_mut();
+            cache.refresh(Some(&self.title));
+        }
+        self.title_cache.borrow()
     }
 }
 
@@ -121,7 +200,7 @@ pub enum Peaks {
 ///
 /// The bool fields are independent row attributes (danger, offline, default,
 /// muted), not a flag bag: they mirror distinct upstream `Node` properties.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct Row {
     /// Opaque action id handed to wrappers via the `ACTION:` line.
@@ -175,6 +254,30 @@ pub struct Row {
     pub hide_target_in_header: bool,
     /// Compact 1-line node rendering with 0 spacing (e.g. child notification thread rows).
     pub compact: bool,
+    /// Memoized sanitized texts (OPT-3); ignored by `PartialEq`.
+    text_cache: RefCell<RowTextCache>,
+}
+
+impl PartialEq for Row {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.label == other.label
+            && self.meta == other.meta
+            && self.confirmable == other.confirmable
+            && self.offline == other.offline
+            && self.is_default == other.is_default
+            && self.volume == other.volume
+            && self.muted == other.muted
+            && self.peaks == other.peaks
+            && self.config == other.config
+            && self.detail == other.detail
+            && self.sublabel == other.sublabel
+            && self.targets == other.targets
+            && self.target_index == other.target_index
+            && self.preview_image == other.preview_image
+            && self.hide_target_in_header == other.hide_target_in_header
+            && self.compact == other.compact
+    }
 }
 
 impl Row {
@@ -199,6 +302,7 @@ impl Row {
             preview_image: None,
             hide_target_in_header: false,
             compact: false,
+            text_cache: RefCell::default(),
         }
     }
 
@@ -287,6 +391,23 @@ impl Row {
         self.targets.get(index)
     }
 
+    /// Borrow this row's sanitized texts, refreshing stale entries (OPT-3).
+    ///
+    /// Hold the guard while rendering the row: every label/meta/config/
+    /// detail/sublabel borrow comes from it, so one guard covers a whole
+    /// `draw_node` with no per-cell sanitize or measure.
+    pub(crate) fn texts(&self) -> Ref<'_, RowTextCache> {
+        {
+            let mut cache = self.text_cache.borrow_mut();
+            cache.label.refresh(Some(&self.label));
+            cache.meta.refresh(self.meta.as_deref());
+            cache.config.refresh(self.config.as_deref());
+            cache.detail.refresh(self.detail.as_deref());
+            cache.sublabel.refresh(self.sublabel.as_deref());
+        }
+        self.text_cache.borrow()
+    }
+
     /// Mark the row as the default one (`◇` marker).
     #[must_use]
     pub fn default_marked(mut self) -> Self {
@@ -360,9 +481,20 @@ pub struct TabState {
 }
 
 /// Composite cache key for fuzzy filter memoization.
+///
+/// Cache-invalidation rule (OPT-2, frozen): the key is `(mode, filter,
+/// rows_ptr, rows_len, first_id)`. A `Vec` reallocation changes the pointer
+/// and therefore misses even when the content is identical — this is
+/// deliberate. In-place row mutation that keeps pointer/len/first-id must
+/// call [`TabState::invalidate_filter_cache`]; never silently broaden the
+/// key to content hashing.
 pub type FilterCacheKey = (filter::FilterMode, String, usize, usize, Option<RowId>);
-/// Memoized filter cache payload: `(cache_key, matching_indices)`.
-pub type FilterCache = Option<(FilterCacheKey, Vec<usize>)>;
+/// Memoized filter cache payload: `(cache_key, shared matching indices)`.
+///
+/// Hits share one `Arc<[usize]>` instead of cloning the index `Vec` on every
+/// cache hit and on every store (OPT-2). `Arc` (not `Rc`): tabs cross
+/// threads via `spawn_blocking`, so the cache must stay `Send`.
+pub type FilterCache = Option<(FilterCacheKey, Arc<[usize]>)>;
 
 impl TabState {
     pub fn invalidate_filter_cache(&self) {
@@ -401,6 +533,22 @@ pub struct Tab {
     pub deletable: bool,
     /// Independent interaction state (preserved across tab switches).
     pub state: TabState,
+    /// Memoized sanitize+measure of [`Tab::name`] (OPT-3).
+    name_cache: RefCell<CachedText>,
+}
+
+impl Tab {
+    /// Borrow the sanitized tab name, refreshing the memo first (OPT-3).
+    ///
+    /// The tab bar holds these guards while rendering, so tab titles are
+    /// sanitized at most once per content change instead of per frame.
+    pub(crate) fn name_texts(&self) -> Ref<'_, CachedText> {
+        {
+            let mut cache = self.name_cache.borrow_mut();
+            cache.refresh(Some(&self.name));
+        }
+        self.name_cache.borrow()
+    }
 }
 
 impl Tab {
@@ -413,6 +561,7 @@ impl Tab {
             filterable: true,
             deletable: false,
             state: TabState::default(),
+            name_cache: RefCell::default(),
         }
     }
 
@@ -425,6 +574,7 @@ impl Tab {
             filterable: true,
             deletable: false,
             state: TabState::default(),
+            name_cache: RefCell::default(),
         }
     }
 }
@@ -721,35 +871,53 @@ impl App {
     /// with original-index tie-break (see [`filter::rank_all`]). In
     /// [`filter::FilterMode::Legacy`] every hit scores equally, so the
     /// tie-break keeps provider order (no score reordering).
+    ///
+    /// Cache (OPT-2): hits return a shared `Arc<[usize]>` — no index `Vec`
+    /// is cloned on hit or on store. The probe compares against the stored
+    /// key with borrows only (`filter` as `&str`, first id by reference),
+    /// so hits allocate nothing; only a miss clones the filter `String`
+    /// and the first `RowId` for the stored key. See [`FilterCacheKey`] for
+    /// the frozen invalidation rule.
     #[must_use]
-    pub fn visible_rows(&self) -> Vec<usize> {
-        match self.active_tab() {
-            None => Vec::new(),
-            Some(tab) => {
-                let filter = &tab.state.filter;
-                let mode = self.filter_mode;
-                let key = (
-                    mode,
-                    filter.clone(),
-                    tab.rows.as_ptr() as usize,
-                    tab.rows.len(),
-                    tab.rows.first().map(|r| r.id.clone()),
-                );
-                let mut cache = tab.state.cached_hits.borrow_mut();
-                if let Some((old_key, old_hits)) = cache.as_ref() {
-                    if *old_key == key {
-                        return old_hits.clone();
-                    }
+    pub fn visible_rows(&self) -> Arc<[usize]> {
+        let Some(tab) = self.active_tab() else {
+            return Arc::from(Vec::<usize>::new());
+        };
+        let filter = &tab.state.filter;
+        let mode = self.filter_mode;
+        let rows_ptr = tab.rows.as_ptr() as usize;
+        let rows_len = tab.rows.len();
+        {
+            let cache = tab.state.cached_hits.borrow();
+            if let Some((old_key, old_hits)) = cache.as_ref() {
+                let hit = old_key.0 == mode
+                    && old_key.1.as_str() == filter.as_str()
+                    && old_key.2 == rows_ptr
+                    && old_key.3 == rows_len
+                    && old_key.4.as_ref() == tab.rows.first().map(|row| &row.id);
+                if hit {
+                    return Arc::clone(old_hits);
                 }
-                let hits = match mode {
-                    filter::FilterMode::Spec => filter::rank_all(filter, &tab.rows),
-                    filter::FilterMode::Legacy => filter::rank_all_legacy(filter, &tab.rows),
-                };
-                let result: Vec<usize> = hits.into_iter().map(|hit| hit.index).collect();
-                *cache = Some((key, result.clone()));
-                result
             }
         }
+        let hits = match mode {
+            filter::FilterMode::Spec => filter::rank_all(filter, &tab.rows),
+            filter::FilterMode::Legacy => filter::rank_all_legacy(filter, &tab.rows),
+        };
+        let result: Arc<[usize]> = hits
+            .into_iter()
+            .map(|hit| hit.index)
+            .collect::<Vec<usize>>()
+            .into();
+        let key = (
+            mode,
+            filter.clone(),
+            rows_ptr,
+            rows_len,
+            tab.rows.first().map(|row| row.id.clone()),
+        );
+        *tab.state.cached_hits.borrow_mut() = Some((key, Arc::clone(&result)));
+        result
     }
 
     /// Number of rows in the active filtered view.
@@ -781,6 +949,14 @@ impl App {
     /// Clamp the active focus into its filtered view.
     pub fn clamp_focus(&mut self) {
         let len = self.visible_len();
+        self.clamp_focus_with(len);
+    }
+
+    /// Clamp the active focus into a view of `len` rows.
+    ///
+    /// Render-path variant (OPT-2): the frame already computed the visible
+    /// view once, so callers pass `visible.len()` instead of recomputing it.
+    pub fn clamp_focus_with(&mut self, len: usize) {
         if let Some(state) = self.active_tab_mut().map(|tab| &mut tab.state) {
             state.focus = if len == 0 {
                 0
@@ -829,7 +1005,17 @@ impl App {
     /// Scroll the active tab so focus is visible.
     /// `entries_visible` is the number of entries that fit in the viewport.
     pub fn ensure_visible(&mut self, entries_visible: usize) {
-        self.clamp_focus();
+        let len = self.visible_len();
+        self.ensure_visible_with(entries_visible, len);
+    }
+
+    /// Scroll the active tab so focus is visible, given a precomputed view.
+    ///
+    /// Render-path variant (OPT-2): the frame already computed the visible
+    /// view once, so callers pass `visible.len()` instead of recomputing it.
+    /// `visible_len` is the length of that same view.
+    pub fn ensure_visible_with(&mut self, entries_visible: usize, visible_len: usize) {
+        self.clamp_focus_with(visible_len);
         if let Some(state) = self.active_tab_mut().map(|tab| &mut tab.state) {
             if entries_visible == 0 {
                 state.scroll = 0;
