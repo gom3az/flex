@@ -46,7 +46,6 @@ pub fn segments(peak: f32, width: usize) -> (usize, usize, usize) {
     let total_chars = width;
     let lit = ((meter * total_chars as f32).round() as usize).min(total_chars);
 
-    // Values above 0.0 will be colored differently
     let zero_char = (normalize(0.0) * total_chars as f32).round() as usize;
 
     let active_size = lit.min(zero_char);

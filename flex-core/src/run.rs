@@ -115,7 +115,6 @@ pub async fn run_capture(mut menu: Menu) -> Result<Outcome> {
             let _ = images.sync(tty, pane, source.as_deref().map(std::path::Path::new), park);
         }
 
-        // Wait for next event or 1s tick
         tokio::select! {
             event = reader.next() => {
                 match event {

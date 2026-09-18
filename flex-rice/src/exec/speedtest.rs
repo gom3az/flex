@@ -537,7 +537,6 @@ pub fn run_benchmark() -> SpeedtestSnapshot {
         s.timestamp_ms = now_ms;
     });
 
-    // 1. TCP Latency & Jitter Probes
     let (ping_res, jitter_res) = measure_tcp_ping(
         DEFAULT_PING_HOST,
         DEFAULT_PING_PORT,
@@ -551,7 +550,6 @@ pub fn run_benchmark() -> SpeedtestSnapshot {
         s.phase = SpeedtestPhase::TestingDownload;
     });
 
-    // 2. Download Throughput
     let download_res = measure_download(DEFAULT_DOWNLOAD_URL, |bytes, elapsed, speed| {
         update_snapshot(|s| {
             s.download_bytes = bytes;
@@ -575,7 +573,6 @@ pub fn run_benchmark() -> SpeedtestSnapshot {
         s.phase = SpeedtestPhase::TestingUpload;
     });
 
-    // 3. Upload Throughput
     let upload_res = measure_upload(
         DEFAULT_UPLOAD_URL,
         UPLOAD_TARGET_BYTES,

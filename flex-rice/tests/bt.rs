@@ -162,17 +162,15 @@ fn devices_tab_exact_wiremix_contract() {
     assert!(tab.filterable);
     assert_eq!(tab.rows.len(), 4);
 
-    // Row 0: Top power toggle
     assert_eq!(tab.rows[0].id.as_str(), bt::POWER_OFF_ID);
     assert_eq!(tab.rows[0].label, "Turn Bluetooth Off");
     assert_eq!(tab.rows[0].meta.as_deref(), Some("bluetoothctl power off"));
 
-    // Row 1: Connected headphones
     let r1 = &tab.rows[1];
     assert_eq!(r1.label, "WH-1000XM4 F4:4E:FC:21:40:48");
     assert_eq!(r1.meta.as_deref(), Some("Connected (85%) · Audio"));
-    assert!(r1.is_default); // marker ◇
-    assert_eq!(r1.volume, Some(0.85)); // 85% battery bar
+    assert!(r1.is_default);
+    assert_eq!(r1.volume, Some(0.85));
     assert_eq!(r1.targets.len(), 6);
     assert_eq!(r1.targets[0].title, "Connect");
     assert_eq!(r1.targets[1].title, "Disconnect");
@@ -182,14 +180,12 @@ fn devices_tab_exact_wiremix_contract() {
     assert_eq!(r1.targets[4].title, "Switch to Headset Mode (HFP)");
     assert_eq!(r1.targets[5].title, "Unpair (Forget Device)");
 
-    // Row 2: Available mouse with RSSI
     let r2 = &tab.rows[2];
     assert_eq!(r2.label, "MX Master 3S 00:1B:66:81:28:B4");
     assert_eq!(r2.meta.as_deref(), Some("Available (-64 dBm)"));
     assert!(!r2.is_default);
     assert_eq!(r2.volume, None);
 
-    // Row 3: Paired keyboard
     let r3 = &tab.rows[3];
     assert_eq!(r3.label, "Keychron K2 14:3F:A6:49:12:DF");
     assert_eq!(r3.meta.as_deref(), Some("Paired"));
@@ -245,7 +241,7 @@ fn golden_80x24_rendering_wiremix_detail() {
 
     // Pitch for 3-line nodes with detail: Entry 1 header is at y = 6 (1 + 5)
     let e1_header = buffer_line(&buf, 6, 80);
-    assert!(e1_header.contains("◇")); // default sink marker
+    assert!(e1_header.contains("◇"));
     assert!(e1_header.contains("WH-1000XM4"));
     assert!(e1_header.contains("Disconnect"));
 
@@ -254,7 +250,6 @@ fn golden_80x24_rendering_wiremix_detail() {
     assert!(e1_detail.contains("85%"));
     assert!(e1_detail.contains("━"));
 
-    // Switch tab to Adapters
     menu.app.switch_tab(1);
     let buf_adapters = draw(&mut menu, 80, 24);
     let tab_bar_2 = buffer_line(&buf_adapters, 23, 80);
@@ -275,17 +270,14 @@ fn tick_refresh_preserves_focus_and_updates_rows() {
 
     let mut menu = flex_rice::menu(bt::PROVIDER, vec![devices_tab, adapters_tab]);
 
-    // Focus on WH-1000XM4 (index 1)
     menu.app.active_tab_mut().unwrap().state.focus = 1;
     assert_eq!(
         menu.app.focused_row().map(|r| r.label.as_str()),
         Some("WH-1000XM4 F4:4E:FC:21:40:48")
     );
 
-    // Call tick hook
     bt::refresh(&mut menu);
 
-    // Focus index remains valid and in range
     let active_tab = menu.app.active_tab().unwrap();
     assert!(active_tab.state.focus < active_tab.rows.len());
 }

@@ -663,7 +663,6 @@ pub fn execute(action_id: &str, label: &str, path_override: Option<&str>) -> Res
     }
 
     if let Some(mac) = action_id.strip_prefix("device:") {
-        // Probe connection state
         let bt = bluetoothctl_cmd();
         let is_connected = tool_captured(path, &bt, &["info", mac])
             .is_some_and(|info| info.contains("Connected: yes"));

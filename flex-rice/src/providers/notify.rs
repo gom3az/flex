@@ -191,20 +191,17 @@ fn notification_row_from(item: &NotificationItem, now: u64, _is_child: bool) -> 
     row.is_default = item.is_pinned || item.urgency == Urgency::Critical;
     row.hide_target_in_header = true;
 
-    // Body text preview in detail row
     if !item.body.is_empty() {
         let clean_body = item.body.replace('\n', " ");
         row.detail = Some(clean_body);
     }
 
-    // Attached image preview in Kitty/Ghostty pane
     if let Some(img) = &item.image_path {
         if std::path::Path::new(img).is_file() {
             row.preview_image = Some(img.clone());
         }
     }
 
-    // Progress bar for in-flight tasks
     if let Some(prog) = item.progress {
         row.volume = Some(prog.clamp(0.0, 1.0));
     }
@@ -738,7 +735,6 @@ pub fn focus_tab_from(state: &NotifyState, now: u64) -> Tab {
     }
     rows.push(status_row);
 
-    // Presets
     let mut p1 = Row::with_meta(
         RowId::new("preset:pomodoro"),
         "Pomodoro Sprint (25m)",
@@ -1122,17 +1118,14 @@ mod tests {
         assert!(!tab.bare_rows);
         assert!(!tab.filterable, "No search prompt in notification drawer");
 
-        // Row 0: Quick Controls Shelf
         assert_eq!(tab.rows[0].id.as_str(), ACTION_QUICK_CONTROLS);
         assert_eq!(tab.rows[0].label, "Quick Controls");
 
-        // Row 1: Critical Low Battery alert (sticky at top, pinned with marker)
         let r1 = &tab.rows[1];
         assert_eq!(r1.label, "System");
         assert_eq!(r1.sublabel.as_deref(), Some("Low Battery Warning"));
-        assert!(r1.is_default); // Pinned marker ◇
+        assert!(r1.is_default);
 
-        // Row 2: Discord notification with OTP & URL targets
         let r2 = &tab.rows[2];
         assert_eq!(r2.label, "Discord");
         assert_eq!(r2.sublabel.as_deref(), Some("#dev-team"));

@@ -124,7 +124,6 @@ pub(crate) trait AsyncRetryExec {
 impl AsyncRetryExec for tokio::process::Command {
     async fn status_retrying(&mut self) -> io::Result<ExitStatus> {
         tracing::debug!("AsyncRetryExec::status_retrying: {:?}", self);
-        // Note: we just loop natively, since we don't block the thread.
         let mut last = None;
         for _ in 0..ATTEMPTS {
             match self.status().await {

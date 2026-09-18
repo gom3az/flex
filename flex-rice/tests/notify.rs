@@ -123,16 +123,13 @@ fn feed_tab_contract_and_wiremix_rows() {
     );
     assert_eq!(tab.rows.len(), 5);
 
-    // Row 0: Quick Controls Shelf
     assert_eq!(tab.rows[0].id.as_str(), provider::ACTION_QUICK_CONTROLS);
     assert_eq!(tab.rows[0].label, "Quick Controls");
 
-    // Row 1: MPRIS Track Card with volume bar
     assert_eq!(tab.rows[1].id.as_str(), provider::ACTION_MPRIS_TRACK);
     assert!(tab.rows[1].label.contains("Get Lucky"));
     assert!(tab.rows[1].volume.is_some());
 
-    // Row 2: Critical alert pinned with marker
     let r2 = &tab.rows[2];
     assert_eq!(r2.id.as_str(), "notif:1");
     assert!(
@@ -142,12 +139,10 @@ fn feed_tab_contract_and_wiremix_rows() {
     assert_eq!(r2.label, "System");
     assert_eq!(r2.sublabel.as_deref(), Some("Low Battery Warning (8%)"));
 
-    // Row 3: In-flight progress notification with volume bar
     let r3 = &tab.rows[3];
     assert_eq!(r3.id.as_str(), "notif:2");
     assert_eq!(r3.volume, Some(0.64));
 
-    // Row 4: Discord with extracted targets
     let r4 = &tab.rows[4];
     assert_eq!(r4.id.as_str(), "notif:3");
     assert!(r4.targets.iter().any(|t| t.title.contains("849201")));
@@ -198,12 +193,6 @@ fn feed_tab_groups_multi_notification_apps() {
     n5.timestamp = 900;
     state.notifications.push(n5);
 
-    // Collapsed by default:
-    // Row 0: Quick Controls
-    // Row 1: MPRIS
-    // Row 2: Critical Low Battery
-    // Row 3: Discord Parent Row (2 notifications, latest preview)
-    // Row 4: PackageKit
     let tab = provider::feed_tab_from(&state, 1000);
     assert_eq!(tab.rows.len(), 5);
 
@@ -223,7 +212,6 @@ fn feed_tab_groups_multi_notification_apps() {
         .iter()
         .any(|t| t.title.contains("Dismiss All (2)")));
 
-    // Test expanding thread:
     provider::toggle_thread_expanded("Discord");
     let expanded_tab = provider::feed_tab_from(&state, 1000);
     assert_eq!(expanded_tab.rows.len(), 6);
@@ -238,7 +226,6 @@ fn feed_tab_groups_multi_notification_apps() {
     let child_row = &expanded_tab.rows[5];
     assert!(child_row.label.contains("└─ #dev-team"));
 
-    // Reset toggle
     provider::toggle_thread_expanded("Discord");
 }
 
@@ -421,7 +408,6 @@ fn executor_dismiss_and_dnd_dispatch() {
 
 #[test]
 fn mpris_parser_handles_twitch_livestreams_and_youtube() {
-    // 1. Twitch stream
     let twitch_line = "brave;;Playing;;Caliathlol;;CoC Comet Oracle - Grand Expeditions;;;;14798847;;9223372036854775807;;file:///tmp/.org.chromium.Chromium.Ir95Tl";
     let twitch = notify::parse_mpris_line(twitch_line).expect("parses twitch");
     assert_eq!(twitch.player, "brave");
@@ -436,7 +422,6 @@ fn mpris_parser_handles_twitch_livestreams_and_youtube() {
         Some("/tmp/.org.chromium.Chromium.Ir95Tl")
     );
 
-    // 2. Standard Spotify track
     let spotify_line = "spotify;;Paused;;Daft Punk;;Get Lucky;;RAM;;134000000;;248000000;;";
     let spotify = notify::parse_mpris_line(spotify_line).expect("parses spotify");
     assert_eq!(spotify.player, "spotify");
@@ -506,7 +491,6 @@ fn toast_header_alignment_and_truncation() {
     assert!(header.starts_with("  󰂚  \x1b[1mDiscord\x1b[0m · #dev-team"));
     assert!(header.ends_with("\x1b[2m10s\x1b[0m"));
 
-    // Long summary truncation
     let long_summary = "A".repeat(100);
     let header_truncated = notify::format_toast_header("󰂚", "System", &long_summary, "2m", 48);
     assert!(header_truncated.contains('…'));
@@ -551,17 +535,14 @@ fn toast_boxed_card_rendering() {
 
     let card = notify::format_toast_card(&item, "now", 50, 0);
 
-    // Verify Wiremix box borders
     assert!(card.contains("╭─"));
     assert!(card.contains("─╮"));
     assert!(card.contains("╰"));
     assert!(card.contains("╯"));
 
-    // Verify Critical badge & icon
     assert!(card.contains("󰀦"));
     assert!(card.contains("[CRITICAL]"));
 
-    // Helper to strip ANSI codes and measure visible display width
     let strip_ansi = |s: &str| -> String {
         let mut out = String::new();
         let mut in_esc = false;

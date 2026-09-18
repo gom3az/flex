@@ -143,8 +143,6 @@ fn run_toast(id: u32, state_path: Option<&std::path::Path>) {
 
     let rel = notify::format_relative_time(item.timestamp, now);
 
-    // ── Render Boxed Toast Card ─────────────────────────────────────────────
-    // Detect terminal column width dynamically (default to 50 if query fails)
     let width = crossterm::terminal::size().map_or(50, |(cols, _)| (cols as usize).clamp(36, 120));
 
     let card = notify::format_toast_card(item, &rel, width, timeout_secs);
@@ -153,10 +151,8 @@ fn run_toast(id: u32, state_path: Option<&std::path::Path>) {
     }
     let _ = std::io::stdout().flush();
 
-    // ── Auto-dismiss timeout ────────────────────────────────────────────────
     std::thread::sleep(std::time::Duration::from_secs(timeout_secs));
 
-    // Show cursor on exit
     print!("\x1b[?25h");
     let _ = std::io::stdout().flush();
 }
@@ -368,7 +364,6 @@ async fn run() -> anyhow::Result<()> {
     }
 
     if cli.menu {
-        // Interactive popup drawer mode
         runner::popup_guard(Provider::Notify)?;
 
         if cli.print_action {
