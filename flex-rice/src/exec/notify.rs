@@ -326,6 +326,111 @@ pub fn open_dir(path_str: &str) {
     );
 }
 
+/// Expand a leading `~/` against `$HOME` (the same rule as [`open_file`]).
+fn expand_home(path_str: &str) -> String {
+    if let Some(rest) = path_str.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return format!("{home}/{rest}");
+        }
+    }
+    path_str.to_string()
+}
+
+/// Read up to the first 16 bytes of a file (`None` when it cannot be read).
+fn read_head(path: &Path) -> Option<Vec<u8>> {
+    use std::io::Read as _;
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut head = vec![0u8; 16];
+    let mut len = 0;
+    while len < head.len() {
+        match file.read(&mut head[len..]) {
+            Ok(0) => break,
+            Ok(n) => len += n,
+            Err(_) => return None,
+        }
+    }
+    head.truncate(len);
+    Some(head)
+}
+
+/// Sniff the image MIME type of a file: magic bytes first (PNG, JPEG, GIF,
+/// WebP, BMP), then the extension (covers SVG, which has no magic). Returns
+/// `None` for unreadable files and non-images — any `image/*`, never text.
+///
+/// A readable file with an image extension but unrecognized contents still
+/// resolves by extension: `wl-copy` just offers the bytes and the pasting
+/// app decides what to do with them.
+#[must_use]
+pub fn image_mime(path: &Path) -> Option<&'static str> {
+    let head = read_head(path)?;
+    if head.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Some("image/png");
+    }
+    if head.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return Some("image/jpeg");
+    }
+    if head.starts_with(b"GIF87a") || head.starts_with(b"GIF89a") {
+        return Some("image/gif");
+    }
+    if head.len() >= 12 && head[..4] == *b"RIFF" && head[8..12] == *b"WEBP" {
+        return Some("image/webp");
+    }
+    if head.starts_with(b"BM") {
+        return Some("image/bmp");
+    }
+    match path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("png") => Some("image/png"),
+        Some("jpg" | "jpeg") => Some("image/jpeg"),
+        Some("gif") => Some("image/gif"),
+        Some("webp") => Some("image/webp"),
+        Some("bmp") => Some("image/bmp"),
+        Some("svg") => Some("image/svg+xml"),
+        _ => None,
+    }
+}
+
+/// Copy an image file's bytes to the Wayland clipboard with its MIME type
+/// (`wl-copy --type <mime> < file`, `xclip -t <mime>` fallback).
+///
+/// Fire-and-forget like the drawer's text copy: `wl-copy` reads stdin fully,
+/// forks, and serves from memory, so the paste survives the drawer exiting.
+/// Returns whether the copy was handed off; `false` for missing files,
+/// non-images, or a failed spawn (the caller reports it).
+#[must_use]
+pub fn copy_image_file(path_str: &str, mime: &str) -> bool {
+    let expanded = expand_home(path_str);
+    let path = Path::new(&expanded);
+    if !path.is_file() || image_mime(path).is_none() {
+        return false;
+    }
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    if Command::new("wl-copy")
+        .args(["--type", mime])
+        .stdin(Stdio::from(file))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .is_ok()
+    {
+        return true;
+    }
+    Command::new("xclip")
+        .args(["-selection", "clipboard", "-t", mime])
+        .arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .is_ok()
+}
+
 /// Persistent trace logger for debugging notify focus and application launch execution steps.
 pub fn log_notify_trace(msg: &str) {
     if let Ok(mut file) = std::fs::OpenOptions::new()
@@ -1597,6 +1702,130 @@ mod tests {
         assert_eq!(s2.notifications[0].summary, "Build Complete");
         assert_eq!(s2.notifications[0].progress, Some(1.0));
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn image_mime_sniffs_magic_bytes() {
+        let dir = std::env::temp_dir().join(format!("flex-notify-img-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let fixture = |name: &str, bytes: &[u8]| {
+            let path = dir.join(name);
+            std::fs::write(&path, bytes).expect("fixture");
+            path
+        };
+
+        assert_eq!(
+            image_mime(&fixture("a.bin", b"\x89PNG\r\n\x1a\nrest")),
+            Some("image/png")
+        );
+        assert_eq!(
+            image_mime(&fixture("b.bin", &[0xFF, 0xD8, 0xFF, 0xE0])),
+            Some("image/jpeg")
+        );
+        assert_eq!(
+            image_mime(&fixture("c.bin", b"GIF89a...")),
+            Some("image/gif")
+        );
+        assert_eq!(
+            image_mime(&fixture("d.bin", b"RIFF\x00\x00\x00\x00WEBP")),
+            Some("image/webp")
+        );
+        assert_eq!(image_mime(&fixture("e.bin", b"BM....")), Some("image/bmp"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn image_mime_falls_back_to_extension_and_rejects_text() {
+        let dir = std::env::temp_dir().join(format!("flex-notify-ext-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let fixture = |name: &str, bytes: &[u8]| {
+            let path = dir.join(name);
+            std::fs::write(&path, bytes).expect("fixture");
+            path
+        };
+
+        // SVG has no magic: extension-only.
+        assert_eq!(
+            image_mime(&fixture("v.svg", b"<svg></svg>")),
+            Some("image/svg+xml")
+        );
+        // Readable file, image extension, unrecognized contents: extension wins.
+        assert_eq!(
+            image_mime(&fixture("w.png", b"not really a png")),
+            Some("image/png")
+        );
+        // Plain text is never an image.
+        assert_eq!(image_mime(&fixture("t.txt", b"hello")), None);
+        assert_eq!(image_mime(&fixture("noext", b"hello")), None);
+        // Missing files resolve to nothing (no target emitted).
+        assert_eq!(image_mime(&dir.join("ghost.png")), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn notify_ingests_image_path_hint_for_existing_files() {
+        let dir = std::env::temp_dir().join(format!("flex-notify-hint-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("hint-state.json");
+        let shot = dir.join("shot.png");
+        std::fs::write(&shot, b"\x89PNG\r\n\x1a\npixels").expect("fixture");
+
+        let srv = NotificationServer::new(Some(path.clone()));
+        let mut hints = std::collections::HashMap::new();
+        hints.insert(
+            "image-path".to_string(),
+            zbus::zvariant::Value::Str(format!("file://{}", shot.display()).into()),
+        );
+        srv.notify(
+            "Shots".to_string(),
+            0,
+            String::new(),
+            "Screenshot saved".to_string(),
+            shot.display().to_string(),
+            vec![],
+            hints,
+            -1,
+        );
+        let loaded = load_state(Some(&path));
+        assert_eq!(
+            loaded.notifications[0].image_path.as_deref(),
+            Some(shot.to_str().expect("utf8 path"))
+        );
+
+        // Missing file: no image attached (the drawer's preview/target gate).
+        let mut bad_hints = std::collections::HashMap::new();
+        bad_hints.insert(
+            "image-path".to_string(),
+            zbus::zvariant::Value::Str("/nonexistent/ghost.png".into()),
+        );
+        srv.notify(
+            "Shots".to_string(),
+            0,
+            String::new(),
+            "Screenshot saved".to_string(),
+            "gone".to_string(),
+            vec![],
+            bad_hints,
+            -1,
+        );
+        let reloaded = load_state(Some(&path));
+        assert_eq!(reloaded.notifications.len(), 2);
+        assert_eq!(reloaded.notifications[1].image_path, None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn copy_image_file_refuses_missing_and_non_image() {
+        assert!(!copy_image_file("/nonexistent/ghost.png", "image/png"));
+        let dir = std::env::temp_dir().join(format!("flex-notify-ref-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let text = dir.join("note.txt");
+        std::fs::write(&text, b"hello").expect("fixture");
+        assert!(!copy_image_file(&text.to_string_lossy(), "image/png"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

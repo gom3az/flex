@@ -13,6 +13,15 @@ longer consumed by anything — each binary selects a row and runs its effect
 directly.
 
 ### Added
+- Notification Center copies images: any drawer row referencing an image
+  file (body-text paths and `image-path` hint thumbnails, feed/threads/
+  history) offers `Copy Image`, which puts the file bytes on the clipboard
+  with their MIME type (`wl-copy --type <mime>`, magic-byte sniff for
+  PNG/JPEG/GIF/WebP/BMP plus extension fallback incl. SVG). The paste
+  survives the drawer exiting (`wl-copy` serves forked from memory); a file
+  lost since listing time reports `Image not found` instead of failing
+  silent. Screenshots now copy as typed `image/png` and their notification
+  carries an `image-path` hint (preview + Copy Image target).
 - Clip retention: `flex-clip add` keeps the history within 200 entries
   (newest win) and drops unpinned lines older than 7 days, enforced on every
   append (the `watch` daemon inherits it). Pinned entries are exempt. Ages

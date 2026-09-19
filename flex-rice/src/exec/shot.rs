@@ -136,12 +136,14 @@ pub enum Step {
         /// Output file.
         file: String,
     },
-    /// `wl-copy < FILE`.
+    /// `wl-copy --type image/png < FILE` (typed offer so image-aware
+    /// targets paste pixels, not text).
     WlCopy {
         /// File piped to `wl-copy`'s stdin.
         file: String,
     },
-    /// `notify-send "Screenshot saved" FILE`.
+    /// `notify-send -h string:image-path:FILE "Screenshot saved" FILE` (the
+    /// hint gives the drawer a graphic preview plus the Copy Image target).
     Notify {
         /// Saved file named in the notification.
         file: String,
@@ -229,7 +231,7 @@ pub fn plan(id: ShotId, file: &str, rec: &str) -> Vec<Step> {
 }
 
 /// Render one [`Step`] as a single snapshot line: `argv` joined by spaces,
-/// stdin-file steps as `wl-copy < FILE`.
+/// stdin-file steps as `wl-copy --type image/png < FILE`.
 ///
 /// This is the template snapshot convention: unit tests pin these lines per
 /// id (pure, no spawn), and the integration tests diff the stub-`PATH` call
@@ -243,8 +245,10 @@ pub fn describe(step: &Step) -> String {
             None => format!("grim {file}"),
             Some(geom) => format!("grim -g {} {file}", geom.describe()),
         },
-        Step::WlCopy { file } => format!("wl-copy < {file}"),
-        Step::Notify { file } => format!("notify-send Screenshot saved {file}"),
+        Step::WlCopy { file } => format!("wl-copy --type image/png < {file}"),
+        Step::Notify { file } => {
+            format!("notify-send -h string:image-path:{file} Screenshot saved {file}")
+        }
         Step::Record {
             rec,
             audio,
@@ -381,6 +385,17 @@ fn tool(path_env: &str, name: &str, args: &[String], stdin_file: Option<&Path>) 
         ok: output.status.success(),
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
     })
+}
+
+/// `notify-send` argv for a saved screenshot: the `image-path` hint (drawer
+/// graphic preview + Copy Image target) plus the human-readable line.
+fn notify_args(file: String) -> Vec<String> {
+    vec![
+        String::from("-h"),
+        format!("string:image-path:{file}"),
+        String::from("Screenshot saved"),
+        file,
+    ]
 }
 
 /// First line of `text`, trimmed (geometry/`date` output convention).
@@ -565,13 +580,14 @@ pub fn run_worker(
                 }
             }
             Step::WlCopy { file } => {
-                let out = tool(&path_env, "wl-copy", &[], Some(Path::new(&file)))?;
+                let args = vec![String::from("--type"), String::from("image/png")];
+                let out = tool(&path_env, "wl-copy", &args, Some(Path::new(&file)))?;
                 if !out.ok {
                     anyhow::bail!("shot: wl-copy failed");
                 }
             }
             Step::Notify { file } => {
-                let args = vec![String::from("Screenshot saved"), file];
+                let args = notify_args(file);
                 let out = tool(&path_env, "notify-send", &args, None)?;
                 if !out.ok {
                     anyhow::bail!("shot: notify-send failed");
@@ -817,8 +833,8 @@ mod tests {
             vec![
                 "slurp",
                 "grim -g <slurp> /shots/f.png",
-                "wl-copy < /shots/f.png",
-                "notify-send Screenshot saved /shots/f.png",
+                "wl-copy --type image/png < /shots/f.png",
+                "notify-send -h string:image-path:/shots/f.png Screenshot saved /shots/f.png",
             ],
         );
     }
@@ -830,8 +846,8 @@ mod tests {
             describe_plan(&plan(ShotId::FullShot, &file, &rec)),
             vec![
                 "grim /shots/f.png",
-                "wl-copy < /shots/f.png",
-                "notify-send Screenshot saved /shots/f.png",
+                "wl-copy --type image/png < /shots/f.png",
+                "notify-send -h string:image-path:/shots/f.png Screenshot saved /shots/f.png",
             ],
         );
     }
@@ -844,8 +860,8 @@ mod tests {
             vec![
                 "hyprctl -j activewindow",
                 "grim -g <window> /shots/f.png",
-                "wl-copy < /shots/f.png",
-                "notify-send Screenshot saved /shots/f.png",
+                "wl-copy --type image/png < /shots/f.png",
+                "notify-send -h string:image-path:/shots/f.png Screenshot saved /shots/f.png",
             ],
         );
     }

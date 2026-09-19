@@ -143,6 +143,22 @@ fn is_system_app_name(name: &str) -> bool {
         || name.eq_ignore_ascii_case("wiremix")
 }
 
+/// Append a `Copy Image` target when `path` is a readable image file (any
+/// `image/*` by magic bytes, extension fallback). Missing files and
+/// non-images add nothing, so text paths keep their current targets.
+fn push_copy_image_target(targets: &mut Vec<Target>, path: &str) {
+    if notify::image_mime(std::path::Path::new(path)).is_some() {
+        let file_name = std::path::Path::new(path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(path);
+        targets.push(Target::new(
+            RowId::new(format!("copy_image:{path}")),
+            format!("Copy Image ({file_name})"),
+        ));
+    }
+}
+
 /// Helper to construct a notification Row with body text preview, graphic image preview, and actions.
 #[allow(clippy::too_many_lines)]
 fn notification_row_from(item: &NotificationItem, now: u64, _is_child: bool) -> Row {
@@ -187,6 +203,7 @@ fn notification_row_from(item: &NotificationItem, now: u64, _is_child: bool) -> 
                     RowId::new(format!("copy_path:{path}")),
                     format!("Copy Path ({file_name})"),
                 ));
+                push_copy_image_target(&mut targets, path);
             }
             ExtractedEntity::HexColor(hex) => {
                 targets.push(Target::new(
@@ -215,6 +232,12 @@ fn notification_row_from(item: &NotificationItem, now: u64, _is_child: bool) -> 
             RowId::new(format!("action:{}:{}", item.id, action.id)),
             format!("Action: {}", action.title),
         ));
+    }
+
+    // 3b. Image-hint copy target (before the row takes `targets`): the
+    // `image-path` file gets the same Copy Image treatment as body paths.
+    if let Some(img) = item.image_path.as_deref() {
+        push_copy_image_target(&mut targets, img);
     }
 
     // 3. Primary management targets
@@ -339,6 +362,7 @@ fn grouped_parent_row_from(
                     RowId::new(format!("copy_path:{path}")),
                     format!("Copy Path ({file_name})"),
                 ));
+                push_copy_image_target(&mut targets, path);
             }
             ExtractedEntity::HexColor(hex) => {
                 targets.push(Target::new(
@@ -364,6 +388,11 @@ fn grouped_parent_row_from(
             RowId::new(format!("action:{}:{}", latest.id, action.id)),
             format!("Action: {}", action.title),
         ));
+    }
+
+    // 4b. Image-hint copy target (before the row takes `targets`).
+    if let Some(img) = latest.image_path.as_deref() {
+        push_copy_image_target(&mut targets, img);
     }
 
     // 5. Thread and notification management targets
@@ -842,7 +871,7 @@ pub fn history_tab_from(state: &NotifyState, now: u64) -> Tab {
 
     for item in dismissed_items.iter().take(30) {
         let rel_time = cached_rel_time(item.timestamp, now);
-        let targets = vec![
+        let mut targets = vec![
             Target::new(
                 RowId::new(format!("restore:{}", item.id)),
                 "Restore Notification",
@@ -852,6 +881,9 @@ pub fn history_tab_from(state: &NotifyState, now: u64) -> Tab {
                 "Copy Message Text",
             ),
         ];
+        if let Some(img) = item.image_path.as_deref() {
+            push_copy_image_target(&mut targets, img);
+        }
 
         let mut row = Row::with_targets(
             RowId::new(format!("hist:{}", item.id)),
@@ -1124,6 +1156,19 @@ pub fn execute(
         should_close = true;
     } else if let Some(path) = action_id.strip_prefix("copy_path:") {
         copy_to_clipboard(path);
+    } else if let Some(path) = action_id.strip_prefix("copy_image:") {
+        // Image bytes with their MIME type (not the path text). Like the
+        // other `copy_*` targets this stays open for repeated copies; a
+        // file lost since listing time reports instead of failing silent.
+        let mime = notify::image_mime(std::path::Path::new(path)).unwrap_or("image/png");
+        if !notify::copy_image_file(path, mime) {
+            let _ = std::process::Command::new("notify-send")
+                .args(["-a", "flex-notify", "Image not found", path])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
     } else if let Some(app) = action_id.strip_prefix("open_app:") {
         notify::open_application(app);
         should_close = true;
@@ -1203,6 +1248,112 @@ mod tests {
             .targets
             .iter()
             .any(|t| t.title.contains("https://github.com")));
+    }
+
+    #[test]
+    fn feed_row_offers_copy_image_for_image_paths_only() {
+        let dir = std::env::temp_dir().join(format!("flex-notify-imgrow-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let shot = dir.join("shot.png");
+        std::fs::write(&shot, b"\x89PNG\r\n\x1a\npixels").expect("fixture");
+        let note = dir.join("note.txt");
+        std::fs::write(&note, b"hello").expect("fixture");
+
+        let mut state = NotifyState::default();
+        // Ids 101+: the entity cache is process-global keyed by
+        // `(id, timestamp)`, so fixture ids must not collide with other
+        // tests stamping the same second.
+        state.notifications.push(NotificationItem::new(
+            101,
+            "Shots",
+            "Screenshot saved",
+            format!("{} {}", shot.display(), note.display()),
+            Urgency::Normal,
+        ));
+        let tab = feed_tab_from(&state, 1000);
+        let row = tab
+            .rows
+            .iter()
+            .find(|r| r.id.as_str() == "notif:101")
+            .expect("notif row");
+        let ids: Vec<&str> = row.targets.iter().map(|t| t.id.as_str()).collect();
+        assert!(
+            ids.iter()
+                .any(|id| id.starts_with("copy_image:") && id.ends_with("shot.png")),
+            "image path gets a Copy Image target: {ids:?}"
+        );
+        assert!(
+            !ids.iter()
+                .any(|id| id.starts_with("copy_image:") && id.ends_with("note.txt")),
+            "text path keeps text-only targets: {ids:?}"
+        );
+        assert!(
+            ids.iter().any(|id| id.starts_with("copy_path:")),
+            "existing Copy Path target stays: {ids:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn feed_row_offers_copy_image_for_hint_images() {
+        let dir = std::env::temp_dir().join(format!("flex-notify-hintrow-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let shot = dir.join("hint.png");
+        std::fs::write(&shot, b"\x89PNG\r\n\x1a\npixels").expect("fixture");
+
+        let mut state = NotifyState::default();
+        state.notifications.push(
+            NotificationItem::new(102, "Shots", "Screenshot saved", "", Urgency::Normal)
+                .with_image(shot.to_string_lossy().into_owned()),
+        );
+        let tab = feed_tab_from(&state, 1000);
+        let row = tab
+            .rows
+            .iter()
+            .find(|r| r.id.as_str() == "notif:102")
+            .expect("notif row");
+        assert!(
+            row.targets
+                .iter()
+                .any(|t| t.id.as_str().starts_with("copy_image:")),
+            "hint image gets a Copy Image target"
+        );
+        assert!(
+            row.preview_image.is_some(),
+            "graphic preview still attached"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn execute_copy_image_reports_without_closing() {
+        let dir = std::env::temp_dir().join(format!("flex-notify-imgexec-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("state.json");
+
+        let mut state = NotifyState::default();
+        state.notifications.push(NotificationItem::new(
+            103,
+            "Shots",
+            "Screenshot saved",
+            "Text",
+            Urgency::Normal,
+        ));
+        notify::save_state(&state, Some(&path)).unwrap();
+
+        // Missing file: reports the miss instead of erroring; drawer stays open.
+        let report = execute(
+            "copy_image:/nonexistent/ghost.png",
+            "Copy Image (ghost.png)",
+            Some(&path),
+        )
+        .unwrap();
+        assert_eq!(report.action_id, "copy_image:/nonexistent/ghost.png");
+        assert!(!report.should_close);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

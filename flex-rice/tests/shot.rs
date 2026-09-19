@@ -335,7 +335,7 @@ fn worker_matrix_runs_the_wrapper_pipeline_per_id() {
         let shot_tail = vec![
             format!("grim -g {geometry} {painted}"),
             String::from("wl-copy <0 bytes>"),
-            format!("notify-send Screenshot saved {painted}"),
+            format!("notify-send -h string:image-path:{painted} Screenshot saved {painted}"),
         ];
         // The `grim`/`rec` stubs log their fixed tool word plus `$@`, so the
         // expected lines name the stub (`rec …`), not the helper path.
