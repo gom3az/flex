@@ -28,7 +28,8 @@
 //!   popup concurrently, so the worker waits (bounded, the same 1 s cap) for
 //!   the popup to disappear before `slurp`/`activewindow`/`grim` — otherwise
 //!   a fullscreen shot photographs the flex TUI itself (and a window shot
-//!   measures the popup).
+//!   measures the popup). A 500 ms settle follows the wait: the compositor's
+//!   close animation keeps fading the dead surface for a few frames.
 //!
 //! [`MENU_CLASS`]: crate::popup::MENU_CLASS
 //! [`popup::match_pattern`]: crate::popup::match_pattern
@@ -678,17 +679,23 @@ fn spawn_detached_worker(id: ShotId, filepath: &Path, rec: &Path, path_env: &str
     Ok(())
 }
 
+/// Settle after the popup disappears: the compositor's close animation keeps
+/// fading the (already dead) surface for a few frames, and a `grim` fired
+/// into the fade photographs a dimmed ghost of the TUI.
+const POPUP_SETTLE_MS: u64 = 500;
+
 /// Wait for the popup to disappear (bounded 20 × 50 ms, the wrapper's 1 s
 /// cap): the parent closes it concurrently with the detach, so the worker
 /// must not capture or query the active window until it is gone — otherwise
 /// a fullscreen `grim` photographs the flex TUI itself (and a window `grim`
 /// measures the popup). A missing `pgrep` or an already-gone popup proceeds
-/// immediately.
+/// immediately with no settle.
 fn wait_popup_gone(path_env: &str) {
     let Some(pgrep) = resolve_tool("pgrep", path_env) else {
         return;
     };
     let pattern = popup::match_pattern(popup::MENU_CLASS);
+    let mut saw_open = false;
     for _ in 0..20_u32 {
         let open = Command::new(&pgrep)
             .arg("-f")
@@ -701,7 +708,11 @@ fn wait_popup_gone(path_env: &str) {
         if !open {
             break;
         }
+        saw_open = true;
         std::thread::sleep(Duration::from_millis(50));
+    }
+    if saw_open {
+        std::thread::sleep(Duration::from_millis(POPUP_SETTLE_MS));
     }
 }
 
@@ -946,6 +957,28 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("shot-nopgrep-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("fixture dir");
         wait_popup_gone(&dir.to_string_lossy());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn popup_wait_returns_promptly_when_already_gone() {
+        // `pgrep` present but reporting gone: one probe, no poll cap, no
+        // animation settle (bound is 100x the cost of a single spawn).
+        let dir = std::env::temp_dir().join(format!("shot-gonepgrep-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        std::fs::write(dir.join("pgrep"), "#!/usr/bin/env bash\nexit 1\n").expect("stub");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(dir.join("pgrep"), std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+        }
+        let start = std::time::Instant::now();
+        wait_popup_gone(&dir.to_string_lossy());
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "already-gone popup must not hit the poll cap"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
