@@ -11,7 +11,7 @@
 use std::cell::RefCell;
 
 use ratatui::buffer::Buffer;
-use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
@@ -19,14 +19,33 @@ use crate::charset::CharSet;
 use crate::theme::Theme;
 use crate::{Peaks, RowPeaks};
 
-/// Hoisted `Layout` constraints (OPT-4): one `const` per call-site shape so
-/// the meter never builds a solver per node.
-const STEREO_SPLIT: [Constraint; 3] = [
-    Constraint::Fill(2),
-    Constraint::Length(2),
-    Constraint::Fill(2),
-];
-const MONO_SPLIT: [Constraint; 2] = [Constraint::Length(1), Constraint::Fill(2)];
+/// `[Fill(2), Length(2), Fill(2)]` with 1-cell spacing (stereo meter, OPT-4):
+/// the fixed live indicator keeps 2 cells when it fits alongside both gaps,
+/// else shrinks to what fits; the channels share the rest equally with
+/// cumulative round-half-up boundaries. Closed form, no solver.
+fn split_stereo_h(area: Rect) -> [Rect; 3] {
+    let end = area.x.saturating_add(area.width);
+    if area.width >= 4 {
+        let rest = area.width - 4;
+        let side = rest.div_ceil(2);
+        let live_x = area.x.saturating_add(side).saturating_add(1);
+        let right_x = live_x.saturating_add(3);
+        [
+            Rect::new(area.x, area.y, side, area.height),
+            Rect::new(live_x, area.y, 2, area.height),
+            Rect::new(right_x, area.y, end.saturating_sub(right_x), area.height),
+        ]
+    } else {
+        let live = area.width.saturating_sub(2).min(area.width);
+        let live_x = area.x.saturating_add(1).min(end);
+        let right_x = live_x.saturating_add(live).saturating_add(1).min(end);
+        [
+            Rect::new(area.x, area.y, 0, area.height),
+            Rect::new(live_x, area.y, live, area.height),
+            Rect::new(right_x, area.y, end.saturating_sub(right_x), area.height),
+        ]
+    }
+}
 
 thread_local! {
     /// Scratch bar buffers reused per meter instead of `repeat` per frame
@@ -161,11 +180,7 @@ pub fn render_stereo(
     char_set: &CharSet,
     theme: &Theme,
 ) {
-    let [meter_left, meter_live, meter_right] = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints(STEREO_SPLIT)
-        .spacing(1)
-        .areas(meter_area);
+    let [meter_left, meter_live, meter_right] = split_stereo_h(meter_area);
 
     let (active, overload, inactive) = segments(left_peak, meter_left.width as usize);
     render_bar(
@@ -222,11 +237,9 @@ pub fn render_mono(
     char_set: &CharSet,
     theme: &Theme,
 ) {
-    let [meter_live, meter_mono] = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints(MONO_SPLIT)
-        .spacing(1)
-        .areas(meter_area);
+    // Mono is `[Length(1), Fill(2)]` with 1-cell spacing: same closed form
+    // as the volume label split (OPT-4).
+    let (meter_live, meter_mono) = crate::render::split_fixed_greedy(meter_area, 1);
 
     let (active, overload, inactive) = segments(peak, meter_mono.width as usize);
     render_bar(
@@ -263,7 +276,40 @@ mod tests {
     }
 
     #[test]
-    fn db_range_maps_onto_the_full_bar() {
+    fn stereo_split_matches_solver() {
+        use ratatui::layout::{Constraint, Direction, Layout, Rect};
+        for w in 0..=200 {
+            let area = Rect::new(7, 3, w, 1);
+            let expected = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Fill(2),
+                    Constraint::Length(2),
+                    Constraint::Fill(2),
+                ])
+                .spacing(1)
+                .split(area);
+            assert_eq!(split_stereo_h(area).as_slice(), expected.as_ref(), "w={w}");
+        }
+    }
+
+    #[test]
+    fn mono_split_matches_solver() {
+        use ratatui::layout::{Constraint, Direction, Layout, Rect};
+        for w in 0..=200 {
+            let area = Rect::new(7, 3, w, 1);
+            let expected = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Length(1), Constraint::Fill(2)])
+                .spacing(1)
+                .areas::<2>(area);
+            let (a, b) = crate::render::split_fixed_greedy(area, 1);
+            assert_eq!([a, b].as_slice(), expected.as_ref(), "w={w}");
+        }
+    }
+
+    #[test]
+    fn segments_scale_with_peak() {
         // -60 dB (or quieter) is empty, +6 dB or louder is full.
         assert_eq!(segments(0.0, 10).2, 10, "silence is all inactive");
         assert_eq!(segments(1e-3, 10), (0, 0, 10));

@@ -39,7 +39,7 @@ use std::fmt::Write as _;
 use std::sync::{Arc, OnceLock};
 
 use ratatui::buffer::Buffer;
-use ratatui::layout::{Alignment, Constraint, Direction, Flex, Layout, Rect};
+use ratatui::layout::{Alignment, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, StatefulWidget, Widget};
@@ -160,29 +160,167 @@ pub const HELP_LINES: &[&str] = &[
     "Esc clear / close / disarm / quit",
 ];
 
-/// Hoisted `Layout` constraints (OPT-4): one `const` per call-site shape so
-/// the draw paths never build a solver or a `Vec<Constraint>` per node.
-const LIST_SPLIT: [Constraint; 3] = [
-    Constraint::Length(1),
-    Constraint::Min(0),
-    Constraint::Length(1),
-];
-const NODE_SPLIT: [Constraint; 2] = [Constraint::Length(1), Constraint::Min(0)];
-const SUBLABEL_SPLIT: [Constraint; 2] = [Constraint::Min(0), Constraint::Length(1)];
-const DETAIL_SPLIT: [Constraint; 2] = [Constraint::Min(0), Constraint::Length(1)];
-const DETAIL_METER_SPLIT: [Constraint; 5] = [
-    Constraint::Length(2),
-    Constraint::Fill(4),
-    Constraint::Fill(1),
-    Constraint::Fill(4),
-    Constraint::Fill(1),
-];
-const DETAIL_VOLUME_SPLIT: [Constraint; 3] = [
-    Constraint::Length(2),
-    Constraint::Fill(9),
-    Constraint::Fill(1),
-];
-const VOLUME_SPLIT: [Constraint; 2] = [Constraint::Length(5), Constraint::Min(0)];
+/// Manual area splits replacing per-node `Layout` solvers (OPT-4).
+///
+/// `Layout` stores its constraints in a heap `Vec` (`layout.rs:179`), so every
+/// `Layout::default().constraints(..)` allocates, and `split` runs the
+/// cassowary solver — per visible row per frame. Every shape below is a fixed
+/// `Length`/`Min`/`Fill` combination whose solver output is a closed form
+/// (probed exhaustively against the solver; see `split_parity` tests):
+///
+/// - `Length`/`Min` splits tile sequentially with saturating arithmetic;
+/// - a 1-cell `spacing` gap is present exactly when it fits in the area;
+/// - `Fill` segments share the remainder proportionally with cumulative
+///   round-half-up boundaries (the solver's pairwise proportional
+///   constraints plus rounded changes);
+/// - `horizontal_margin(1)` collapses the whole split to origin zero rects
+///   when the area is narrower than the margins (`width < 2`).
+///
+/// The solver is nondeterministic across processes in over-constrained
+/// margin cases (probed `SUB w=3` placing its ignored segment at two
+/// different x across runs); the helpers are deterministic by construction.
+fn split_list_v(area: Rect) -> [Rect; 3] {
+    // Vertical `[Length(1), Min(0), Length(1)]`: the solver satisfies the
+    // trailing fixed segment first, then the leading one.
+    let bottom = area.height.min(1);
+    let top = (area.height - bottom).min(1);
+    let mid = area.height - top - bottom;
+    let y_mid = area.y.saturating_add(top);
+    [
+        Rect::new(area.x, area.y, area.width, top),
+        Rect::new(area.x, y_mid, area.width, mid),
+        Rect::new(area.x, y_mid.saturating_add(mid), area.width, bottom),
+    ]
+}
+
+/// Horizontal `[Length(1), Min(0)]` (node selector + body).
+fn split_node_h(area: Rect) -> (Rect, Rect) {
+    let first = area.width.min(1);
+    (
+        Rect::new(area.x, area.y, first, area.height),
+        Rect::new(
+            area.x.saturating_add(first),
+            area.y,
+            area.width - first,
+            area.height,
+        ),
+    )
+}
+
+/// First segment of horizontal `[Min(0), Length(1)]` with
+/// `horizontal_margin(1)` (sublabel / detail line); the trailing fixed cell
+/// is padding the callers never render into.
+fn split_margin_first(area: Rect) -> Rect {
+    if area.width < 2 {
+        return Rect::new(0, 0, 0, 0);
+    }
+    let inner_w = area.width - 2;
+    Rect::new(
+        area.x.saturating_add(1),
+        area.y,
+        inner_w.saturating_sub(1),
+        area.height,
+    )
+}
+
+/// Horizontal `[Min(1), Length(target_w)]` with `horizontal_margin(1)` and
+/// 1-cell `spacing` (node header): the fixed column keeps `target_w` when it
+/// fits alongside the 1-cell minimum plus the gap, else shrinks.
+fn split_header_h(area: Rect, target_w: u16) -> (Rect, Rect) {
+    if area.width < 2 {
+        return (Rect::new(0, 0, 0, 0), Rect::new(0, 0, 0, 0));
+    }
+    let inner_x = area.x.saturating_add(1);
+    let inner_w = area.width - 2;
+    let second = target_w.min(inner_w.saturating_sub(2));
+    let first = inner_w.saturating_sub(second).saturating_sub(1);
+    let gap = u16::from(inner_w >= 1);
+    (
+        Rect::new(inner_x, area.y, first, area.height),
+        Rect::new(
+            inner_x.saturating_add(first).saturating_add(gap),
+            area.y,
+            second,
+            area.height,
+        ),
+    )
+}
+
+/// Horizontal `[Min(1), Length(3), Length(1), Length(target_w)]` with
+/// `horizontal_margin(1)` (node header when title overflows): solver satisfies
+/// fixed constraints from right to left.
+fn split_ellipses_header_h(area: Rect, target_w: u16) -> (Rect, Rect, Rect) {
+    if area.width < 2 {
+        return (
+            Rect::new(0, 0, 0, 0),
+            Rect::new(0, 0, 0, 0),
+            Rect::new(0, 0, 0, 0),
+        );
+    }
+    let inner_x = area.x.saturating_add(1);
+    let inner_w = area.width - 2;
+
+    let t_min = 1.min(inner_w);
+    let rem1 = inner_w - t_min;
+    let ell = 3.min(rem1);
+    let rem2 = rem1 - ell;
+    let pad = 1.min(rem2);
+    let rem3 = rem2 - pad;
+    let target = target_w.min(rem3);
+    let rem4 = rem3 - target;
+    let title = t_min + rem4;
+
+    let x_title = inner_x;
+    let x_ell = x_title.saturating_add(title);
+    let x_target = x_ell.saturating_add(ell).saturating_add(pad);
+
+    (
+        Rect::new(x_title, area.y, title, area.height),
+        Rect::new(x_ell, area.y, ell, area.height),
+        Rect::new(x_target, area.y, target, area.height),
+    )
+}
+
+/// `[Length(2), Fill(4), Fill(1), Fill(4), Fill(1)]` volume + meter columns
+/// (the `[1]` and `[3]` the detail line renders into).
+fn split_detail_meter(area: Rect) -> (Rect, Rect) {
+    let fixed = area.width.min(2);
+    let rest = u32::from(area.width - fixed);
+    // Cumulative round-half-up boundaries over shares of `rest` in tenths.
+    let b1 = (rest * 4 + 5) / 10;
+    let b2 = (rest * 5 + 5) / 10;
+    let b3 = (rest * 9 + 5) / 10;
+    let x = area.x.saturating_add(fixed);
+    let w1 = u16::try_from(b1).unwrap_or(u16::MAX);
+    let w3 = u16::try_from(b3 - b2).unwrap_or(u16::MAX);
+    let x3 = x.saturating_add(u16::try_from(b2).unwrap_or(u16::MAX));
+    (
+        Rect::new(x, area.y, w1, area.height),
+        Rect::new(x3, area.y, w3, area.height),
+    )
+}
+
+/// `[Length(2), Fill(9), Fill(1)]` volume column (the `[1]` the detail line
+/// renders into).
+fn split_detail_volume(area: Rect) -> Rect {
+    let fixed = area.width.min(2);
+    let rest = u32::from(area.width - fixed);
+    let w = u16::try_from((rest * 9 + 5) / 10).unwrap_or(u16::MAX);
+    Rect::new(area.x.saturating_add(fixed), area.y, w, area.height)
+}
+
+/// Horizontal `[Length(first_len), Min(0)]` with 1-cell `spacing` (volume
+/// label + bar, mono meter live indicator + bar): the gap is present exactly
+/// when it fits in the area.
+pub(crate) fn split_fixed_greedy(area: Rect, first_len: u16) -> (Rect, Rect) {
+    let end = area.x.saturating_add(area.width);
+    let first = first_len.min(area.width.saturating_sub(1));
+    let second_x = area.x.saturating_add(first).saturating_add(1).min(end);
+    (
+        Rect::new(area.x, area.y, first, area.height),
+        Rect::new(second_x, area.y, end.saturating_sub(second_x), area.height),
+    )
+}
 
 thread_local! {
     /// Scratch text buffers reused across cells instead of `format!`,
@@ -566,11 +704,8 @@ fn draw_list(buf: &mut Buffer, list_area: Rect, menu: &mut Menu, ctx: &FrameCtx)
 
     // Upstream `ObjectListWidget::areas` reserves one line above and one
     // below the list for the `•••` indicators (`object_list.rs:301-311`).
-    // The split shape is hoisted to [`LIST_SPLIT`] (OPT-4).
-    let [header_area, rows_area, footer_area] = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(LIST_SPLIT)
-        .areas(list_area);
+    // Closed-form split, no solver (OPT-4).
+    let [header_area, rows_area, footer_area] = split_list_v(list_area);
 
     let metrics = ctx.metrics;
     let len = visible.len();
@@ -666,10 +801,7 @@ fn draw_node(
     // row's memoized sanitized strings, so nothing here sanitizes, measures
     // or allocates per cell.
     let texts = row.texts();
-    let [selector_area, node_area] = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints(NODE_SPLIT)
-        .areas(area);
+    let (selector_area, node_area) = split_node_h(area);
 
     draw_selector(
         buf,
@@ -695,11 +827,8 @@ fn draw_node(
 
     // Middle line (sublabel) on the node's second line.
     if metrics.height >= NODE_HEIGHT && node_area.height >= 2 && texts.sublabel.src.is_some() {
-        let sublabel_area = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints(SUBLABEL_SPLIT)
-            .horizontal_margin(1)
-            .split(Rect::new(node_area.x, node_area.y + 1, node_area.width, 1))[0];
+        let sublabel_area =
+            split_margin_first(Rect::new(node_area.x, node_area.y + 1, node_area.width, 1));
         let style = if row.offline {
             menu.theme.offline
         } else {
@@ -824,15 +953,8 @@ fn draw_header(
 
     // Upstream splits `Min(1) title_area | Length(target_width) target_area`
     // with a 1-cell horizontal margin and 1-cell spacing
-    // (`node_widget.rs:309-318`).
-    let layout = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(1), Constraint::Length(target_width)])
-        .horizontal_margin(1)
-        .spacing(1)
-        .split(area);
-    let mut title_area = layout[0];
-    let mut target_area = layout[1];
+    // (`node_widget.rs:309-318`). Closed form, no solver (OPT-4).
+    let (mut title_area, mut target_area) = split_header_h(area, target_width);
 
     let default_span = if row.is_default {
         Span::styled(char_set.default_device, theme.default_device)
@@ -858,19 +980,11 @@ fn draw_header(
     if title_width_cells > usize::from(title_area.width) {
         // Title does not fit: upstream inserts a 3-cell `...` area between the
         // title and the target (`node_widget.rs:323-342`).
-        let layout = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Min(1),               // title_area
-                Constraint::Length(3),            // ellipses_area
-                Constraint::Length(1),            // _padding
-                Constraint::Length(target_width), // target_area
-            ])
-            .horizontal_margin(1)
-            .split(area);
-        title_area = layout[0];
-        ellipses_area = Some(layout[1]);
-        target_area = layout[3];
+        let (h_title_area, h_ellipses_area, h_target_area) =
+            split_ellipses_header_h(area, target_width);
+        title_area = h_title_area;
+        ellipses_area = Some(h_ellipses_area);
+        target_area = h_target_area;
     }
 
     // Right column, borrowed from the memos (what the old `target_line`
@@ -949,19 +1063,16 @@ fn draw_detail(buf: &mut Buffer, area: Rect, menu: &Menu, row: &Row, texts: &Row
     let volume_on = row.volume.is_some();
 
     if volume_on || (meter_on && row.peaks.is_some()) {
-        let (volume_area, meter_area) = if meter_on {
-            let layout = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints(DETAIL_METER_SPLIT)
-                .split(area);
-            (layout[1], Some(layout[3]))
+        let volume_area;
+        let meter_area: Option<Rect>;
+        if meter_on {
+            let (volume, meter) = split_detail_meter(area);
+            volume_area = volume;
+            meter_area = Some(meter);
         } else {
-            let layout = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints(DETAIL_VOLUME_SPLIT)
-                .split(area);
-            (layout[1], None)
-        };
+            volume_area = split_detail_volume(area);
+            meter_area = None;
+        }
 
         draw_volume(buf, volume_area, menu, row);
         if let (Some(meter_area), Some(peaks)) = (meter_area, row.peaks) {
@@ -983,11 +1094,7 @@ fn draw_detail(buf: &mut Buffer, area: Rect, menu: &Menu, row: &Row, texts: &Row
         ])
         .render(area, buf);
     } else if texts.detail.src.is_some() {
-        let detail_area = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints(DETAIL_SPLIT)
-            .horizontal_margin(1)
-            .split(area)[0];
+        let detail_area = split_margin_first(area);
         Line::from(vec![
             Span::from("  "),
             Span::styled(texts.detail.sanitized.as_str(), menu.theme.config_profile),
@@ -1007,11 +1114,7 @@ fn draw_volume(buf: &mut Buffer, area: Rect, menu: &Menu, row: &Row) {
     }
     let char_set = &menu.char_set;
     let theme = &menu.theme;
-    let [label_area, bar_area] = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints(VOLUME_SPLIT)
-        .spacing(1)
-        .areas(area);
+    let (label_area, bar_area) = split_fixed_greedy(area, 5);
 
     if let Some(volume) = row.volume {
         let percent = (volume * 100.0).round();
@@ -1263,11 +1366,10 @@ fn draw_help(buf: &mut Buffer, list_area: Rect, menu: &mut Menu) {
     let content_width = help_content_width();
     #[allow(clippy::cast_possible_truncation)]
     let wanted_width = (content_width.saturating_add(4)) as u16; // borders + padding
-    let [help_area] = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Max(wanted_width)])
-        .flex(Flex::Center)
-        .areas(list_area);
+    let help_w = wanted_width.min(list_area.width);
+    let help_x = list_area
+        .x
+        .saturating_add(list_area.width.saturating_sub(help_w) / 2);
 
     // Upstream caps the overlay at 90% of the available height
     // (`app.rs:826-835`).
@@ -1276,13 +1378,13 @@ fn draw_help(buf: &mut Buffer, list_area: Rect, menu: &mut Menu) {
     // Upstream caps the overlay at 90% of the available height; the value is
     // bounded by the frame height, so the truncation cannot be significant.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let max_height = (f32::from(help_area.height) * 0.90) as u16;
-    let height = wanted_height.min(max_height.max(2));
-    let [help_area] = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(height.min(help_area.height))])
-        .flex(Flex::Center)
-        .areas(help_area);
+    let max_height = (f32::from(list_area.height) * 0.90) as u16;
+    let height = wanted_height.min(max_height.max(2)).min(list_area.height);
+    let help_y = list_area
+        .y
+        .saturating_add(list_area.height.saturating_sub(height) / 2);
+
+    let help_area = Rect::new(help_x, help_y, help_w, height);
 
     Clear.render(help_area, buf);
 
@@ -1543,4 +1645,184 @@ pub fn row_layout(meta: Option<&str>, bare: bool, width_cells: usize) -> (usize,
         .saturating_sub(meta_w)
         .saturating_sub(1);
     (meta_w, avail)
+}
+
+#[cfg(test)]
+mod split_parity {
+    //! The manual splits above must stay byte-equal to the `Layout` solver
+    //! they replace (OPT-4). The solver is nondeterministic across processes
+    //! in over-constrained margin cases (probed), so margin shapes assert
+    //! exact equality only where the solver is stable and structural
+    //! emptiness below that; every other shape is exact over 0..=200.
+
+    use super::*;
+    use ratatui::layout::{Constraint, Direction, Layout};
+
+    const X: u16 = 7;
+    const Y: u16 = 3;
+
+    fn h_area(w: u16) -> Rect {
+        Rect::new(X, Y, w, 1)
+    }
+
+    #[test]
+    fn list_matches_solver() {
+        for h in 0..=60 {
+            let area = Rect::new(X, Y, 20, h);
+            let expected = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1),
+                    Constraint::Min(0),
+                    Constraint::Length(1),
+                ])
+                .split(area);
+            assert_eq!(split_list_v(area).as_slice(), expected.as_ref(), "h={h}");
+        }
+    }
+
+    #[test]
+    fn node_matches_solver() {
+        for w in 0..=200 {
+            let area = h_area(w);
+            let expected = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Length(1), Constraint::Min(0)])
+                .split(area);
+            let (a, b) = split_node_h(area);
+            assert_eq!([a, b].as_slice(), expected.as_ref(), "w={w}");
+        }
+    }
+
+    #[test]
+    fn margin_first_matches_solver() {
+        for w in 0..=200 {
+            let area = h_area(w);
+            let expected = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Min(0), Constraint::Length(1)])
+                .horizontal_margin(1)
+                .split(area);
+            let got = split_margin_first(area);
+            if w < 4 {
+                // Solver placement of empty rects is unstable here; the
+                // rendered segment is always empty on both sides.
+                assert_eq!(got.width, 0, "w={w}");
+                assert_eq!(expected[0].width, 0, "w={w}");
+            } else {
+                assert_eq!(got, expected[0], "w={w}");
+            }
+        }
+    }
+
+    #[test]
+    fn header_matches_solver() {
+        for tw in [0, 1, 2, 5, 10, 30, 100] {
+            for w in 0..=200 {
+                let area = h_area(w);
+                let expected = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Min(1), Constraint::Length(tw)])
+                    .horizontal_margin(1)
+                    .spacing(1)
+                    .split(area);
+                let (a, b) = split_header_h(area, tw);
+                if w < 2 {
+                    assert_eq!(a.width, 0, "tw={tw} w={w}");
+                    assert_eq!(b.width, 0, "tw={tw} w={w}");
+                    assert_eq!(expected[0].width, 0, "tw={tw} w={w}");
+                    assert_eq!(expected[1].width, 0, "tw={tw} w={w}");
+                } else {
+                    assert_eq!([a, b].as_slice(), expected.as_ref(), "tw={tw} w={w}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn detail_meter_matches_solver() {
+        for w in 0..=200 {
+            let area = h_area(w);
+            let expected = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Length(2),
+                    Constraint::Fill(4),
+                    Constraint::Fill(1),
+                    Constraint::Fill(4),
+                    Constraint::Fill(1),
+                ])
+                .split(area);
+            let (v, m) = split_detail_meter(area);
+            assert_eq!(v, expected[1], "volume w={w}");
+            assert_eq!(m, expected[3], "meter w={w}");
+        }
+    }
+
+    #[test]
+    fn detail_volume_matches_solver() {
+        for w in 0..=200 {
+            let area = h_area(w);
+            let expected = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Length(2),
+                    Constraint::Fill(9),
+                    Constraint::Fill(1),
+                ])
+                .split(area);
+            assert_eq!(split_detail_volume(area), expected[1], "w={w}");
+        }
+    }
+
+    #[test]
+    fn fixed_greedy_matches_solver() {
+        for first in [1, 5] {
+            for w in 0..=200 {
+                let area = h_area(w);
+                let expected = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Length(first), Constraint::Min(0)])
+                    .spacing(1)
+                    .areas::<2>(area);
+                assert_eq!(
+                    [
+                        split_fixed_greedy(area, first).0,
+                        split_fixed_greedy(area, first).1
+                    ]
+                    .as_slice(),
+                    expected.as_ref(),
+                    "first={first} w={w}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ellipses_header_matches_solver() {
+        for tw in [0, 1, 2, 5, 10, 30, 100] {
+            for w in 0..=200 {
+                let area = h_area(w);
+                let expected = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([
+                        Constraint::Min(1),
+                        Constraint::Length(3),
+                        Constraint::Length(1),
+                        Constraint::Length(tw),
+                    ])
+                    .horizontal_margin(1)
+                    .split(area);
+                let (a, b, c) = split_ellipses_header_h(area, tw);
+                if w < 7 + tw {
+                    // Over-constrained layout: solver takes fractional deficiency from fixed lengths
+                    assert_eq!(a.height, expected[0].height, "tw={tw} w={w}");
+                } else {
+                    assert_eq!(a, expected[0], "title tw={tw} w={w}");
+                    assert_eq!(b, expected[1], "ellipses tw={tw} w={w}");
+                    assert_eq!(c, expected[3], "target tw={tw} w={w}");
+                }
+            }
+        }
+    }
 }

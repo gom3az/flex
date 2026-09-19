@@ -289,10 +289,9 @@ pub fn set_wallpaper_native(path: &Path, path_env: &str) -> Result<()> {
 
 /// Native setter body with the resolved inputs given (the test seam).
 ///
-/// Preserves the wrapper's order: best-effort `swaync-client` inhibitor,
-/// hyprpaper socket (test → `preload` → 200 ms → `wallpaper`), restart when
-/// `pgrep -x hyprpaper` fails, then the persisted `hyprpaper.conf` and the
-/// optional ml4w cache file, and finally the inhibitor release. The conf
+/// Preserves the wrapper's flow: hyprpaper socket (test → `preload` →
+/// 200 ms → `wallpaper`), restart when `pgrep -x hyprpaper` fails, then the
+/// persisted `hyprpaper.conf` and the optional ml4w cache file. The conf
 /// write does not create parent directories (a missing parent errors, like
 /// `cat >`).
 ///
@@ -306,13 +305,6 @@ pub fn set_wallpaper_native_in(
     run_dir: &Path,
     path_env: &str,
 ) -> Result<()> {
-    let _ = run_optional(
-        path_env,
-        "swaync-client",
-        &[String::from("-Ia"), String::from("wallpaper-setter")],
-        None,
-    );
-
     let hyprpaper_running = |path_env: &str| {
         run_optional(
             path_env,
@@ -363,12 +355,6 @@ pub fn set_wallpaper_native_in(
             .with_context(|| format!("wallpaper: cannot write {}", cache.display()))?;
     }
 
-    let _ = run_optional(
-        path_env,
-        "swaync-client",
-        &[String::from("-Ir"), String::from("wallpaper-setter")],
-        None,
-    );
     Ok(())
 }
 

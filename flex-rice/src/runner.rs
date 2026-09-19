@@ -1,8 +1,8 @@
 //! Shared runner for the sixteen flex entry points.
 //!
 //! The thirteen per-provider binaries (`flex-power`, `flex-launch`, …), the
-//! two sync helpers (`flex-record`, `flex-mixer`) and the `flex` multicall
-//! `flex` compat dispatcher are all thin clap shells over this module, so
+//! two sync helpers (`flex-record`, `flex-mixer`) and the `flex` compat
+//! dispatcher are all thin clap shells over this module, so
 //! the contracts live here exactly once:
 //!
 //! - [`fail`] is the single owner of the `flex: error:` prefix plus

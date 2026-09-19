@@ -4,7 +4,7 @@
 //! stub seams), this suite asserts the machine state that `release and restart
 //! services` produces:
 //!   - `cargo build --release` + `./setup.sh` links all 16 `~/.local/bin` names
-//!     to the single `target/release/flex` multicall binary;
+//!     to their respective `target/release/flex-*` binaries;
 //!   - `./setup.sh --check` (the CI gate) passes;
 //!   - the `flex-notify.service` user unit is active;
 //!   - the installed dispatcher re-execs providers and non-interactive verbs
@@ -92,25 +92,27 @@ fn farm_available() -> Option<(PathBuf, PathBuf)> {
 }
 
 #[test]
-fn installed_farm_resolves_to_single_release_binary_and_answers_help() {
-    let Some((farm, release_flex)) = farm_available() else {
+fn installed_farm_resolves_to_release_binaries_and_answers_help() {
+    let Some((farm, _release_flex)) = farm_available() else {
         eprintln!("e2e: no release farm (cargo build --release + ./setup.sh first), skipping");
         return;
     };
-    let expected = std::fs::canonicalize(&release_flex).expect("canonicalize release flex");
     for name in INSTALLED {
         let link = farm.join(name);
         let meta = std::fs::symlink_metadata(&link)
             .unwrap_or_else(|_| panic!("installed name missing: {}", link.display()));
         assert!(
             meta.file_type().is_symlink(),
-            "{} must be a symlink (single-binary farm)",
+            "{} must be a symlink",
             link.display()
         );
         let resolved = std::fs::canonicalize(&link).expect("resolve installed symlink");
+        let expected_bin = workspace_root().join("target/release").join(name);
+        let expected = std::fs::canonicalize(&expected_bin)
+            .unwrap_or_else(|_| panic!("missing release binary: {}", expected_bin.display()));
         assert_eq!(
             resolved, expected,
-            "{link:?} resolves to {resolved:?}, not the single binary {expected:?}",
+            "{link:?} resolves to {resolved:?}, not the standalone release binary {expected:?}",
         );
         let out = run(Command::new(&link).arg("--help"));
         assert!(

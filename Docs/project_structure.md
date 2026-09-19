@@ -9,7 +9,7 @@ dependencies.
 | Half | Carried by | Publishable |
 |---|---|---|
 | **`flex-core`** — the engine: menu rendering, fuzzy filtering, key handling, the design system, kitty-graphics previews | this repo, `flex-core/` | Yes |
-| **`flex-rice`** — this rice's 13 providers, their executors, the `flex` multicall dispatcher, the `flex-<provider>` binaries and the `flex-record`/`flex-mixer` helpers (16 binaries total, installed as one binary + shims) | this repo, `flex-rice/` | No (`publish = false`) |
+| **`flex-rice`** — this rice's 13 providers, their executors, the `flex` dispatcher, the `flex-<provider>` binaries and the `flex-record`/`flex-mixer` helpers (16 standalone binaries total) | this repo, `flex-rice/` | No (`publish = false`) |
 
 Dependencies run one way (`flex-rice` → `flex-core`, a **path** dependency —
 no tags, no `[patch]` overrides). `flex-core` must never gain a
@@ -40,9 +40,9 @@ flex/                        # cargo workspace root (two members)
     benches/rerank.rs        # criterion rerank regression
 
   flex-rice/                 # this rice's glue — machine-specific, never published
-    Cargo.toml               # publish = false; [[bin]] flex (multicall) + 15 provider/helper binaries
-                             # (OPT-10: installed as one binary + symlinks; all 16 names work via
-                             # argv[0] or `flex <provider>`; `flex-record`/`flex-mixer` are sync-only,
+    Cargo.toml               # publish = false; [[bin]] flex dispatcher + 15 provider/helper binaries
+                             # (16 standalone binaries installed directly into ~/.local/bin/;
+                             # `flex-record`/`flex-mixer` are sync-only,
                              # no tokio runtime — see OPT-11)
     src/
       lib.rs                 # pub mod exec/providers/runner/popup/terminal/spawn; menu()/tick_hook()
@@ -161,8 +161,7 @@ publishable.
 - `cargo fmt --all --check`
 - `cargo clippy --all-targets -- -D warnings`
 - `cargo test` — the whole workspace
-- `cargo build --release` → `target/release/{flex,flex-power,…}` (the sixteen binaries;
-  OPT-10: the installed farm links all sixteen names to the single `flex` multicall binary)
+- `cargo build --release` → `target/release/{flex,flex-power,…}` (the sixteen binaries installed into `~/.local/bin/`)
 - `cargo tree -i crossterm` (single-major check)
 - `cargo bench -p flex-core --bench rerank`
 
@@ -172,12 +171,9 @@ The live machine consumes this repo, not the other way round. The checkout
 lives at `~/projects/flex`; dotfiles references it through a stable
 `~/.local/bin` symlink farm so the next move touches symlinks, not configs:
 
-- `~/.local/bin/flex` → `<checkout>/target/release/flex` (the multicall dispatcher).
-- `~/.local/bin/flex-<provider>` → `<checkout>/target/release/flex`
-  (one shim per provider, plus `flex-record`/`flex-mixer`; every Hyprland bind, Waybar on-click
+- `~/.local/bin/flex` → `<checkout>/target/release/flex` (the dispatcher).
+- `~/.local/bin/flex-<provider>` → `<checkout>/target/release/flex-<provider>`
+  (one binary per provider, plus `flex-record`/`flex-mixer`; every Hyprland bind, Waybar on-click
   and delegating script references the farm, never the checkout path).
-  `flex` resolves `argv[0]` (`flex-power`, …) or `flex <provider>` and re-execs the
-  matching sibling `target/release/flex-<provider>` binary, so all sixteen names work
-  from the single installed binary.
   `setup.sh` creates the sixteen links and `setup.sh --check` asserts they
-  resolve to the single binary.
+  resolve into `target/release/`.

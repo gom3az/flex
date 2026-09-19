@@ -315,12 +315,39 @@ fn group_processes(collected: Vec<RawProc>) -> Vec<ItemGroup> {
     groups
 }
 
+use std::fmt::Write as _;
+
+fn format_comm_pid(comm: &str, pid: u32) -> String {
+    let mut s = String::with_capacity(comm.len() + 1 + 10);
+    s.push_str(comm);
+    s.push(' ');
+    let _ = write!(s, "{pid}");
+    s
+}
+
+fn format_target_label(comm: &str, pid: u32, mem_str: &str) -> String {
+    let mut s = String::with_capacity(comm.len() + 1 + 10 + 3 + mem_str.len());
+    s.push_str(comm);
+    s.push(' ');
+    let _ = write!(s, "{pid} ({mem_str})");
+    s
+}
+
+fn format_child_label(prefix: &str, comm: &str, pid: u32) -> String {
+    let mut s = String::with_capacity(prefix.len() + comm.len() + 1 + 10);
+    s.push_str(prefix);
+    s.push_str(comm);
+    s.push(' ');
+    let _ = write!(s, "{pid}");
+    s
+}
+
 /// Build rows for a single item group.
 fn push_group_rows(group: ItemGroup, sort: SortBy, rows: &mut Vec<Row>) {
     match group {
         ItemGroup::Single(p) => {
             let mem_str = format_memory_kb(p.rss_kb);
-            let label = format!("{} {}", p.comm, p.pid);
+            let label = format_comm_pid(&p.comm, p.pid);
             let meta = format!("{mem_str:>7} {:5.1}% {}", p.cpu, p.user);
             let mut row = Row::with_meta(RowId::new(p.pid.to_string()), label, meta);
             row.confirmable = true;
@@ -342,7 +369,7 @@ fn push_group_rows(group: ItemGroup, sort: SortBy, rows: &mut Vec<Row>) {
                     let p_mem = format_memory_kb(p.rss_kb);
                     Target::new(
                         RowId::new(p.pid.to_string()),
-                        format!("{} {} ({p_mem})", p.comm, p.pid),
+                        format_target_label(&p.comm, p.pid, &p_mem),
                     )
                 })
                 .collect();
@@ -369,7 +396,7 @@ fn push_group_rows(group: ItemGroup, sort: SortBy, rows: &mut Vec<Row>) {
                     } else {
                         "  ├─ "
                     };
-                    let p_label = format!("{prefix}{} {}", p.comm, p.pid);
+                    let p_label = format_child_label(prefix, &p.comm, p.pid);
                     let mut child = Row::with_meta(RowId::new(p.pid.to_string()), p_label, p_meta);
                     child.confirmable = true;
                     rows.push(child);

@@ -1,13 +1,12 @@
-//! `flex` binary: multicall dispatcher over the `flex-<provider>` binaries.
+//! `flex` binary: dispatcher over the `flex-<provider>` binaries.
 //!
 //! Two spellings reach the same provider, both without duplicating provider
-//! logic (OPT-10 single-binary install):
+//! logic:
 //!
 //! - `flex <provider> [flags]` parses the provider subcommand below and
 //!   re-execs the matching `flex-<provider>` binary with flags reconstructed
 //!   in canonical order (so `flex -t nocolor launch` ≡ `flex launch -t nocolor`);
-//! - `flex-<provider> [flags]` (the installed symlink farm: every
-//!   `~/.local/bin/flex-*` name points at this binary) resolves `argv[0]`
+//! - `flex-<provider> [flags]` (the installed symlink farm) resolves `argv[0]`
 //!   and re-execs the sibling `flex-<provider>` binary with the original
 //!   arguments intact (so `--help`/`--version` answer as the provider
 //!   binary itself).

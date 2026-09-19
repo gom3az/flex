@@ -722,8 +722,8 @@ fn executor_setter_seam_prefers_override_then_home_default() {
 }
 
 /// Native socket path: a real `.hyprpaper.sock` gets the connection test,
-/// `preload`, and `wallpaper` socat calls in order, the conf and ml4w cache
-/// are written byte-exact, and the swaync inhibitor brackets the flow.
+/// `preload`, and `wallpaper` socat calls in order, and the conf and ml4w cache
+/// are written byte-exact.
 #[test]
 fn executor_native_sets_via_the_hyprpaper_socket_and_cache() {
     let _env = env_lock();
@@ -740,8 +740,6 @@ fn executor_native_sets_via_the_hyprpaper_socket_and_cache() {
     install_stub(&dir, "pgrep", "#!/usr/bin/env bash\nexit 0\n");
     let socat_log = dir.join("socat.log");
     install_socat(&dir, &socat_log);
-    let swaync_log = dir.join("swaync.log");
-    install_argv_logger(&dir, "swaync-client", &swaync_log);
 
     let image = dir.join("wall sun.jpg");
     write_image(&image);
@@ -781,11 +779,6 @@ fn executor_native_sets_via_the_hyprpaper_socket_and_cache() {
         format!("{}\n", image.display()).as_bytes(),
     );
 
-    let swaync = std::fs::read_to_string(&swaync_log).expect("swaync log");
-    assert_eq!(
-        swaync.lines().collect::<Vec<_>>(),
-        vec!["[-Ia][wallpaper-setter]", "[-Ir][wallpaper-setter]"],
-    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -824,8 +817,6 @@ fn executor_native_restarts_hyprpaper_when_not_running() {
             dir.join("hyprpaper").display()
         ),
     );
-    let swaync_log = dir.join("swaync.log");
-    install_argv_logger(&dir, "swaync-client", &swaync_log);
 
     let image = dir.join("night.png");
     write_image(&image);

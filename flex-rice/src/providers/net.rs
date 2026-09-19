@@ -37,15 +37,19 @@ pub fn bandwidth_tab() -> Tab {
 
 /// Convert process bandwidth records into wiremix `Row` objects.
 fn build_bandwidth_rows(procs: &[ProcessBandwidth]) -> Vec<Row> {
+    use std::fmt::Write as _;
+
     if procs.is_empty() {
         return vec![providers::empty_row("— no active network processes —")];
     }
-
     procs
         .iter()
         .map(|p| {
             let id = RowId::new(format!("proc:{}", p.pid));
-            let label = format!("{} {}", p.comm, p.pid);
+            let mut label = String::with_capacity(p.comm.len() + 1 + 10);
+            label.push_str(&p.comm);
+            label.push(' ');
+            let _ = write!(label, "{}", p.pid);
             let meta = format!(
                 "⬇ {}  ⬆ {}",
                 format_speed(p.rx_rate),
