@@ -25,8 +25,10 @@ directly.
 - `flex-shot` waits for the popup to disappear (bounded 1 s, plus a 500 ms
   settle for the compositor close animation) before capturing: the worker
   ran concurrently with the popup close, so a fullscreen shot photographed
-  the flex TUI itself (and a window shot could measure the popup as the
-  active window).
+  the flex TUI itself, its fade, or the blank-restored window (and a window
+  shot could measure the popup as the active window). The wait is gated on
+  the inherited `POPUP_KITTY=1` marker, so it always applies in real flows
+  even when the first probe already finds the popup gone.
 - Clip retention: `flex-clip add` keeps the history within 200 entries
   (newest win) and drops unpinned lines older than 7 days, enforced on every
   append (the `watch` daemon inherits it). Pinned entries are exempt. Ages

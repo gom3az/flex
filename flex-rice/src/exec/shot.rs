@@ -25,11 +25,12 @@
 //!   `wl-copy`/`notify-send` on cancel; the port treats a failed `slurp` as
 //!   user-cancelled and stops before `grim`.
 //! - Worker-side popup wait: the parent detaches the worker and closes the
-//!   popup concurrently, so the worker waits (bounded, the same 1 s cap) for
-//!   the popup to disappear before `slurp`/`activewindow`/`grim` — otherwise
-//!   a fullscreen shot photographs the flex TUI itself (and a window shot
-//!   measures the popup). A 500 ms settle follows the wait: the compositor's
-//!   close animation keeps fading the dead surface for a few frames.
+//!   popup concurrently, so the worker waits (bounded, the same 1 s cap)
+//!   plus a 500 ms compositor settle before `slurp`/`activewindow`/`grim` —
+//!   otherwise a fullscreen shot photographs the flex TUI itself, its fade,
+//!   or the blank-restored window (and a window shot measures the popup).
+//!   Gated on the inherited `POPUP_KITTY=1` marker rather than probe luck,
+//!   so CLI/test runs stay instant.
 //!
 //! [`MENU_CLASS`]: crate::popup::MENU_CLASS
 //! [`popup::match_pattern`]: crate::popup::match_pattern
@@ -685,17 +686,25 @@ fn spawn_detached_worker(id: ShotId, filepath: &Path, rec: &Path, path_env: &str
 const POPUP_SETTLE_MS: u64 = 500;
 
 /// Wait for the popup to disappear (bounded 20 × 50 ms, the wrapper's 1 s
-/// cap): the parent closes it concurrently with the detach, so the worker
-/// must not capture or query the active window until it is gone — otherwise
-/// a fullscreen `grim` photographs the flex TUI itself (and a window `grim`
-/// measures the popup). A missing `pgrep` or an already-gone popup proceeds
-/// immediately with no settle.
+/// cap) plus an animation settle: the parent closes the popup concurrently
+/// with the detach, so the worker must not capture or query the active
+/// window until the surface is really gone — otherwise a fullscreen `grim`
+/// photographs the flex TUI itself, its fade, or the blank-restored window
+/// (and a window `grim` measures the popup).
+///
+/// Gated on the popup marker, not on probe luck: the worker inherits
+/// `POPUP_KITTY=1` from the parent, so a popup existed moments ago even
+/// when the first probe already finds it gone (the common case — the
+/// parent's `pkill` usually lands first). Outside a popup (CLI, tests) this
+/// is a no-op and the suite stays fast.
 fn wait_popup_gone(path_env: &str) {
+    if !popup::in_popup() {
+        return;
+    }
     let Some(pgrep) = resolve_tool("pgrep", path_env) else {
         return;
     };
     let pattern = popup::match_pattern(popup::MENU_CLASS);
-    let mut saw_open = false;
     for _ in 0..20_u32 {
         let open = Command::new(&pgrep)
             .arg("-f")
@@ -708,12 +717,12 @@ fn wait_popup_gone(path_env: &str) {
         if !open {
             break;
         }
-        saw_open = true;
         std::thread::sleep(Duration::from_millis(50));
     }
-    if saw_open {
-        std::thread::sleep(Duration::from_millis(POPUP_SETTLE_MS));
-    }
+    // The compositor's close animation keeps fading the (already dead)
+    // surface for a few frames after both process and window list report it
+    // gone; neither signal observes render-end, so settle by time.
+    std::thread::sleep(Duration::from_millis(POPUP_SETTLE_MS));
 }
 
 /// Close the popup and wait for its window to disappear (best-effort, never
@@ -962,8 +971,12 @@ mod tests {
 
     #[test]
     fn popup_wait_returns_promptly_when_already_gone() {
-        // `pgrep` present but reporting gone: one probe, no poll cap, no
-        // animation settle (bound is 100x the cost of a single spawn).
+        // Inside a popup (`POPUP_KITTY=1`, as the detached worker inherits)
+        // with `pgrep` reporting gone: one probe plus the animation settle,
+        // still well under the 1 s poll cap.
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let saved = std::env::var("POPUP_KITTY").ok();
+        std::env::set_var("POPUP_KITTY", "1");
         let dir = std::env::temp_dir().join(format!("shot-gonepgrep-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("fixture dir");
         std::fs::write(dir.join("pgrep"), "#!/usr/bin/env bash\nexit 1\n").expect("stub");
@@ -980,6 +993,10 @@ mod tests {
             "already-gone popup must not hit the poll cap"
         );
         std::fs::remove_dir_all(&dir).ok();
+        match saved {
+            Some(value) => std::env::set_var("POPUP_KITTY", value),
+            None => std::env::remove_var("POPUP_KITTY"),
+        }
     }
 
     static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
