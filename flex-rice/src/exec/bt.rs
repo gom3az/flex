@@ -12,13 +12,14 @@
 //! - Default Audio Sink selection via `wpctl set-default` / `pactl set-default-sink`
 //! - Audio Profile switching (A2DP / HFP) via `pactl set-card-profile` / `wpctl set-profile`
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use anyhow::Result;
 
-use crate::exec::center::NotifyWhen;
+use crate::exec::NotifyWhen;
 use crate::spawn::RetryExec as _;
+use crate::tools;
 
 /// What [`execute`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -152,26 +153,14 @@ pub fn notify_cmd() -> String {
         .unwrap_or_else(|| String::from("notify-send"))
 }
 
-/// Ambient `PATH` or empty string.
 fn ambient_path() -> String {
-    std::env::var("PATH").unwrap_or_default()
+    tools::ambient_path()
 }
 
-/// Resolve `name` against `path_env`.
 fn resolve_tool(name: &str, path_env: &str) -> Option<PathBuf> {
-    if name.contains('/') {
-        let p = PathBuf::from(name);
-        if p.is_file() {
-            return Some(p);
-        }
-    }
-    path_env
-        .split(':')
-        .map(|dir| Path::new(dir).join(name))
-        .find(|candidate| candidate.is_file())
+    tools::resolve_tool(name, path_env)
 }
 
-/// Run a command quietly, swallowing failures.
 fn tool_quiet(path_env: &str, name: &str, args: &[&str]) -> bool {
     let Some(bin) = resolve_tool(name, path_env) else {
         return false;
@@ -185,7 +174,6 @@ fn tool_quiet(path_env: &str, name: &str, args: &[&str]) -> bool {
         .is_ok_and(|status| status.success())
 }
 
-/// Capture standard output from a command.
 fn tool_captured(path_env: &str, name: &str, args: &[&str]) -> Option<String> {
     let bin = resolve_tool(name, path_env)?;
     let output = Command::new(&bin)
@@ -194,10 +182,9 @@ fn tool_captured(path_env: &str, name: &str, args: &[&str]) -> Option<String> {
         .stderr(Stdio::null())
         .output_retrying()
         .ok()?;
-    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+    Some(tools::decode_stdout(output.stdout))
 }
 
-/// Execute a single step.
 #[allow(dead_code)]
 #[must_use]
 pub fn execute_step(step: &Step, path_env: &str) -> bool {

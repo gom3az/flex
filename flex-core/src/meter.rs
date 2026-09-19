@@ -8,14 +8,102 @@
 //! `Fill(2)` with spacing 1); mono draws `live │ meter`
 //! (`Length(1)`, `Fill(2)`).
 
+use std::cell::RefCell;
+
 use ratatui::buffer::Buffer;
-use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
 use crate::charset::CharSet;
 use crate::theme::Theme;
 use crate::{Peaks, RowPeaks};
+
+/// `[Fill(2), Length(2), Fill(2)]` with 1-cell spacing (stereo meter, OPT-4):
+/// the fixed live indicator keeps 2 cells when it fits alongside both gaps,
+/// else shrinks to what fits; the channels share the rest equally with
+/// cumulative round-half-up boundaries. Closed form, no solver.
+fn split_stereo_h(area: Rect) -> [Rect; 3] {
+    let end = area.x.saturating_add(area.width);
+    if area.width >= 4 {
+        let rest = area.width - 4;
+        let side = rest.div_ceil(2);
+        let live_x = area.x.saturating_add(side).saturating_add(1);
+        let right_x = live_x.saturating_add(3);
+        [
+            Rect::new(area.x, area.y, side, area.height),
+            Rect::new(live_x, area.y, 2, area.height),
+            Rect::new(right_x, area.y, end.saturating_sub(right_x), area.height),
+        ]
+    } else {
+        let live = area.width.saturating_sub(2).min(area.width);
+        let live_x = area.x.saturating_add(1).min(end);
+        let right_x = live_x.saturating_add(live).saturating_add(1).min(end);
+        [
+            Rect::new(area.x, area.y, 0, area.height),
+            Rect::new(live_x, area.y, live, area.height),
+            Rect::new(right_x, area.y, end.saturating_sub(right_x), area.height),
+        ]
+    }
+}
+
+thread_local! {
+    /// Scratch bar buffers reused per meter instead of `repeat` per frame
+    /// (OPT-4). Borrowed spans over these live only for the `render` call
+    /// that draws them.
+    static BAR_A: RefCell<String> = const { RefCell::new(String::new()) };
+    static BAR_B: RefCell<String> = const { RefCell::new(String::new()) };
+    static BAR_C: RefCell<String> = const { RefCell::new(String::new()) };
+}
+
+/// Fill `BAR_A/B/C` with `glyph` × `count` and render the three spans.
+///
+/// The buffers are borrowed for the `render` call only; content is
+/// byte-identical to the old `repeat` strings.
+fn render_bar(
+    buf: &mut Buffer,
+    area: Rect,
+    glyphs: (&'static str, &'static str, &'static str),
+    counts: (usize, usize, usize),
+    styles: (
+        ratatui::style::Style,
+        ratatui::style::Style,
+        ratatui::style::Style,
+    ),
+    align_right: bool,
+) {
+    BAR_A.with(|a_slot| {
+        BAR_B.with(|b_slot| {
+            BAR_C.with(|c_slot| {
+                let mut a = a_slot.borrow_mut();
+                let mut b = b_slot.borrow_mut();
+                let mut c = c_slot.borrow_mut();
+                a.clear();
+                b.clear();
+                c.clear();
+                for _ in 0..counts.0 {
+                    a.push_str(glyphs.0);
+                }
+                for _ in 0..counts.1 {
+                    b.push_str(glyphs.1);
+                }
+                for _ in 0..counts.2 {
+                    c.push_str(glyphs.2);
+                }
+                let line = Line::from(vec![
+                    Span::styled(a.as_str(), styles.0),
+                    Span::styled(b.as_str(), styles.1),
+                    Span::styled(c.as_str(), styles.2),
+                ]);
+                if align_right {
+                    line.alignment(Alignment::Right).render(area, buf);
+                } else {
+                    line.render(area, buf);
+                }
+            });
+        });
+    });
+}
 
 /// Split a peak into `(active, overload, inactive)` cell counts
 /// (upstream `meter.rs:11-39`).
@@ -92,59 +180,52 @@ pub fn render_stereo(
     char_set: &CharSet,
     theme: &Theme,
 ) {
-    let [meter_left, meter_live, meter_right] = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Fill(2),   // meter_left
-            Constraint::Length(2), // meter_live
-            Constraint::Fill(2),   // meter_right
-        ])
-        .spacing(1)
-        .areas(meter_area);
+    let [meter_left, meter_live, meter_right] = split_stereo_h(meter_area);
 
     let (active, overload, inactive) = segments(left_peak, meter_left.width as usize);
-    Line::from(vec![
-        Span::styled(
-            char_set.meter_left_inactive.repeat(inactive),
+    render_bar(
+        buf,
+        meter_left,
+        (
+            char_set.meter_left_inactive,
+            char_set.meter_left_overload,
+            char_set.meter_left_active,
+        ),
+        (inactive, overload, active),
+        (
             theme.meter_inactive,
-        ),
-        Span::styled(
-            char_set.meter_left_overload.repeat(overload),
             theme.meter_overload,
-        ),
-        Span::styled(
-            char_set.meter_left_active.repeat(active),
             theme.meter_active,
         ),
-    ])
-    .alignment(Alignment::Right)
-    .render(meter_left, buf);
+        true,
+    );
 
     let (active, overload, inactive) = segments(right_peak, meter_right.width as usize);
-    Line::from(vec![
-        Span::styled(
-            char_set.meter_right_active.repeat(active),
+    render_bar(
+        buf,
+        meter_right,
+        (
+            char_set.meter_right_active,
+            char_set.meter_right_overload,
+            char_set.meter_right_inactive,
+        ),
+        (active, overload, inactive),
+        (
             theme.meter_active,
-        ),
-        Span::styled(
-            char_set.meter_right_overload.repeat(overload),
             theme.meter_overload,
-        ),
-        Span::styled(
-            char_set.meter_right_inactive.repeat(inactive),
             theme.meter_inactive,
         ),
-    ])
-    .render(meter_right, buf);
+        false,
+    );
 
-    Line::from(Span::styled(
-        format!(
-            "{}{}",
-            char_set.meter_center_left_active, char_set.meter_center_right_active,
-        ),
-        theme.meter_center_active,
-    ))
-    .render(meter_live, buf);
+    BAR_A.with(|slot| {
+        let mut scratch = slot.borrow_mut();
+        scratch.clear();
+        scratch.push_str(char_set.meter_center_left_active);
+        scratch.push_str(char_set.meter_center_right_active);
+        Line::from(Span::styled(scratch.as_str(), theme.meter_center_active))
+            .render(meter_live, buf);
+    });
 }
 
 /// Mono meter: `meter_center_right_active` live indicator, then one bar
@@ -156,31 +237,27 @@ pub fn render_mono(
     char_set: &CharSet,
     theme: &Theme,
 ) {
-    let [meter_live, meter_mono] = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(1), // meter_live
-            Constraint::Fill(2),   // meter_mono
-        ])
-        .spacing(1)
-        .areas(meter_area);
+    // Mono is `[Length(1), Fill(2)]` with 1-cell spacing: same closed form
+    // as the volume label split (OPT-4).
+    let (meter_live, meter_mono) = crate::render::split_fixed_greedy(meter_area, 1);
 
     let (active, overload, inactive) = segments(peak, meter_mono.width as usize);
-    Line::from(vec![
-        Span::styled(
-            char_set.meter_right_active.repeat(active),
+    render_bar(
+        buf,
+        meter_mono,
+        (
+            char_set.meter_right_active,
+            char_set.meter_right_overload,
+            char_set.meter_right_inactive,
+        ),
+        (active, overload, inactive),
+        (
             theme.meter_active,
-        ),
-        Span::styled(
-            char_set.meter_right_overload.repeat(overload),
             theme.meter_overload,
-        ),
-        Span::styled(
-            char_set.meter_right_inactive.repeat(inactive),
             theme.meter_inactive,
         ),
-    ])
-    .render(meter_mono, buf);
+        false,
+    );
 
     Line::from(Span::styled(
         char_set.meter_center_right_active,
@@ -199,7 +276,40 @@ mod tests {
     }
 
     #[test]
-    fn db_range_maps_onto_the_full_bar() {
+    fn stereo_split_matches_solver() {
+        use ratatui::layout::{Constraint, Direction, Layout, Rect};
+        for w in 0..=200 {
+            let area = Rect::new(7, 3, w, 1);
+            let expected = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Fill(2),
+                    Constraint::Length(2),
+                    Constraint::Fill(2),
+                ])
+                .spacing(1)
+                .split(area);
+            assert_eq!(split_stereo_h(area).as_slice(), expected.as_ref(), "w={w}");
+        }
+    }
+
+    #[test]
+    fn mono_split_matches_solver() {
+        use ratatui::layout::{Constraint, Direction, Layout, Rect};
+        for w in 0..=200 {
+            let area = Rect::new(7, 3, w, 1);
+            let expected = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Length(1), Constraint::Fill(2)])
+                .spacing(1)
+                .areas::<2>(area);
+            let (a, b) = crate::render::split_fixed_greedy(area, 1);
+            assert_eq!([a, b].as_slice(), expected.as_ref(), "w={w}");
+        }
+    }
+
+    #[test]
+    fn segments_scale_with_peak() {
         // -60 dB (or quieter) is empty, +6 dB or louder is full.
         assert_eq!(segments(0.0, 10).2, 10, "silence is all inactive");
         assert_eq!(segments(1e-3, 10), (0, 0, 10));

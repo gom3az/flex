@@ -174,7 +174,7 @@ fn scratch(name: &str) -> PathBuf {
 ///
 /// Regression guard for B-020: before the fix this printed one "skipping
 /// malformed entry" line per hidden entry — 202 false diagnostics on the
-/// reference host, on every `flex launch` and every `flex center` open.
+/// reference host, on every `flex launch` open.
 #[test]
 fn only_malformed_entries_reach_stderr() {
     let _env = EXEC_ENV_LOCK.lock().expect("env lock");
@@ -293,13 +293,13 @@ fn legacy_filter_mode_preserves_provider_order() {
     let mut menu = flex_rice::menu("launch", vec![tab]);
     menu.app.active_tab_mut().expect("tab").state.filter = "fir".to_string();
     assert_eq!(
-        menu.app.visible_rows(),
+        menu.app.visible_rows().to_vec(),
         vec![1, 2, 0],
         "spec reorders by tier"
     );
     menu.app.filter_mode = flex_core::filter::FilterMode::Legacy;
     assert_eq!(
-        menu.app.visible_rows(),
+        menu.app.visible_rows().to_vec(),
         vec![0, 1, 2],
         "legacy preserves provider order"
     );
@@ -453,9 +453,8 @@ fn write_exe(path: &std::path::Path, body: &str) {
 
 // --- Empty-scan placeholder (B-026) -------------------------------------------
 
-/// With nothing to launch the menu must not be blank: `center` already
-/// showed `(No applications found)`, and the standalone picker now shows the
-/// same `noop` row instead of an empty list.
+/// With nothing to launch the menu must not be blank: the standalone picker
+/// shows the `noop` row instead of an empty list.
 #[test]
 fn empty_scan_shows_the_noop_placeholder() {
     let tab = launch::tab_from_entries(&[]);

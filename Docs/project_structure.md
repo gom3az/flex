@@ -9,14 +9,14 @@ dependencies.
 | Half | Carried by | Publishable |
 |---|---|---|
 | **`flex-core`** — the engine: menu rendering, fuzzy filtering, key handling, the design system, kitty-graphics previews | this repo, `flex-core/` | Yes |
-| **`flex-rice`** — this rice's 13 providers, their executors, the `flex` dispatcher, the `flex-<provider>` binaries and the `flex-record` helper (15 binaries total) | this repo, `flex-rice/` | No (`publish = false`) |
+| **`flex-rice`** — this rice's 12 providers, their executors, the `flex` dispatcher, the `flex-<provider>` binaries and the `flex-record`/`flex-mixer` helpers (15 standalone binaries total) | this repo, `flex-rice/` | No (`publish = false`) |
 
 Dependencies run one way (`flex-rice` → `flex-core`, a **path** dependency —
 no tags, no `[patch]` overrides). `flex-core` must never gain a
 machine-specific path back into `flex-rice`. The engine's only reach into a
 consumer's providers is the `Menu::on_tick` / `TickHook` seam: the engine
 owns the tick, the caller supplies the refresh.
-`flex-rice::tick_hook` refreshes `center` gauges, picks up a finished `wifi`
+`flex-rice::tick_hook` picks up a finished `wifi`
 scan, re-sweeps the `proc` process list, polls MPRIS media, and ingests live
 notifications, and `flex-rice::menu(provider, tabs)` installs it — **use `menu()` instead of `Menu::new` inside `flex-rice`**,
 or those providers silently stop refreshing.
@@ -40,7 +40,10 @@ flex/                        # cargo workspace root (two members)
     benches/rerank.rs        # criterion rerank regression
 
   flex-rice/                 # this rice's glue — machine-specific, never published
-    Cargo.toml               # publish = false; [[bin]] flex + 14 provider/helper binaries
+    Cargo.toml               # publish = false; [[bin]] flex dispatcher + 15 provider/helper binaries
+                             # (15 standalone binaries installed directly into ~/.local/bin/;
+                             # `flex-record`/`flex-mixer` are sync-only,
+                             # no tokio runtime — see OPT-11)
     src/
       lib.rs                 # pub mod exec/providers/runner/popup/terminal/spawn; menu()/tick_hook()
       main.rs                # `flex` dispatcher: popup toggle, provider/verb re-exec
@@ -53,30 +56,28 @@ flex/                        # cargo workspace root (two members)
         power.rs
         launch.rs
         clip.rs
-        center.rs
         shot.rs
         theme_.rs            # `theme` is a crate-adjacent ident; file uses trailing underscore
         wallpaper.rs         # image scan + kitty-graphics preview rows (M7)
         wifi.rs              # radio/scan rows for the network dialog (M8)
         proc.rs              # /proc process list for the native kill menu
-        mixer.rs             # PipeWire/WirePlumber volume/mic mixer
         net.rs               # Network & bandwidth telemetry monitor
         bt.rs                # Bluetooth device manager & pairing
         notify.rs            # Notification Center drawer & feeds
       exec/                  # one executor per provider (the ported side effects)
         mod.rs power.rs launch.rs shot.rs theme.rs
-        clip.rs center.rs wallpaper.rs wifi.rs proc.rs record.rs
+        clip.rs wallpaper.rs wifi.rs proc.rs record.rs
         mixer.rs net.rs bt.rs notify.rs
       bin/                   # thin entry points over runner
         flex-power.rs flex-launch.rs flex-shot.rs flex-theme.rs
-        flex-clip.rs flex-center.rs flex-wallpaper.rs flex-wifi.rs
+        flex-clip.rs flex-wallpaper.rs flex-wifi.rs
         flex-proc.rs flex-record.rs flex-mixer.rs flex-net.rs
         flex-bt.rs flex-notify.rs
     tests/
       golden.rs              # TestBackend goldens
       entrypoints.rs         # --help/--version contract for all 15 binaries
       prefix.rs              # single `flex: error:` prefix across the provider binaries
-      center.rs clip.rs power.rs shot.rs theme.rs wallpaper.rs wifi.rs
+      clip.rs power.rs shot.rs theme.rs wallpaper.rs wifi.rs
       mixer.rs net.rs bt.rs notify.rs
 ```
 
@@ -101,9 +102,8 @@ flex/                        # cargo workspace root (two members)
    initialising the terminal.
 3. **Providers parse subprocess stdout once.** At most one child spawn per
    invocation; read stdout to `Vec<Row>` up front; filter/render in-process after
-   that. No re-spawning per keystroke. Two documented exceptions, both driven by
-   the `TickHook` seam: `center`'s 1 s gauge tick re-reads `wpctl`/`brightnessctl`
-   in place (Q7), and `wifi` opens from the cached scan and runs **one**
+   that. No re-spawning per keystroke. One documented exception, driven by
+   the `TickHook` seam: `wifi` opens from the cached scan and runs **one**
    background scan whose rows replace the list on a later tick (a triggered
    `nmcli` scan blocks ~3 s, which would leave the popup blank until it returned).
 3b. **Image previews are the one out-of-band surface** (`flex-core/src/preview.rs`).
@@ -158,7 +158,7 @@ publishable.
 - `cargo fmt --all --check`
 - `cargo clippy --all-targets -- -D warnings`
 - `cargo test` — the whole workspace
-- `cargo build --release` → `target/release/{flex,flex-power,…}` (the fifteen binaries)
+- `cargo build --release` → `target/release/{flex,flex-power,…}` (the fifteen binaries installed into `~/.local/bin/`)
 - `cargo tree -i crossterm` (single-major check)
 - `cargo bench -p flex-core --bench rerank`
 
@@ -170,7 +170,7 @@ lives at `~/projects/flex`; dotfiles references it through a stable
 
 - `~/.local/bin/flex` → `<checkout>/target/release/flex` (the dispatcher).
 - `~/.local/bin/flex-<provider>` → `<checkout>/target/release/flex-<provider>`
-  (one per provider, plus `flex-record`; every Hyprland bind, Waybar on-click
+  (one binary per provider, plus `flex-record`/`flex-mixer`; every Hyprland bind, Waybar on-click
   and delegating script references the farm, never the checkout path).
   `setup.sh` creates the fifteen links and `setup.sh --check` asserts they
-  resolve.
+  resolve into `target/release/`.

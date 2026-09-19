@@ -275,7 +275,7 @@ mod tests {
     #[test]
     fn target_outcome_holds_target_fields() {
         let outcome = Outcome::Target {
-            provider: String::from("center"),
+            provider: String::from("audio"),
             row: String::from("vol"),
             target: String::from("t-hdmi"),
             title: String::from("HDMI"),
@@ -289,7 +289,7 @@ mod tests {
         else {
             panic!("expected Outcome::Target");
         };
-        assert_eq!(provider, "center");
+        assert_eq!(provider, "audio");
         assert_eq!(row, "vol");
         assert_eq!(target, "t-hdmi");
         assert_eq!(title, "HDMI");

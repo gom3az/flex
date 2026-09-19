@@ -27,7 +27,7 @@ repository = "https://github.com/gom3az/flex"
 
 [workspace.dependencies]
 flex-core = { path = "flex-core" }
-ratatui = { version = "=0.29.0", features = ["crossterm"] }
+ratatui = { version = "=0.29.0", default-features = false, features = ["crossterm"] }
 crossterm = "0.28"
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"

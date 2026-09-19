@@ -7,12 +7,17 @@
 //!
 //! Manual argv dispatch (not clap): the bare-args form and the subcommands
 //! share one argv space, which clap cannot express unambiguously.
+//!
+//! Sync-only helper (OPT-11): plain `fn main`, no tokio runtime —
+//! `record::{start,status,stop}` never awaits, so spawning a thread-pool
+//! would only raise the link floor. The shared `flex-rice` library still
+//! links tokio for the TUI providers; a full no-TUI split crate is left
+//! for later because it would break the workspace test/build gates.
 
 use flex_rice::exec::record;
 use flex_rice::runner;
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() {
+fn main() {
     runner::init_logging();
     let args: Vec<String> = std::env::args().skip(1).collect();
     if let Err(err) = dispatch(&args) {

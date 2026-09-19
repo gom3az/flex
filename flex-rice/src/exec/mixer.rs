@@ -5,7 +5,7 @@
 //! window class [`CLASS`]. If `wiremix` is missing on `$PATH`, a desktop
 //! notification is sent and the process exits with an error.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use anyhow::{Context as _, Result};
@@ -13,24 +13,21 @@ use anyhow::{Context as _, Result};
 use crate::popup;
 use crate::spawn::RetryExec as _;
 use crate::terminal;
+use crate::tools;
 
-/// The window class matched for the floating mixer.
 pub const CLASS: &str = "kitty-wiremix";
 
-/// The command executed inside the floating window.
 const MIXER_BIN: &str = "wiremix";
 
-/// The ambient `PATH`, empty when unset.
+/// Fixed `wiremix` argv tail (OPT-11): `&'static`, no per-toggle `Vec<String>`.
+const MIXER_ARGV: &[&str] = &[MIXER_BIN, "--tab", "output"];
+
 fn ambient_path() -> String {
-    std::env::var("PATH").unwrap_or_default()
+    tools::ambient_path()
 }
 
-/// Resolve `name` against `path_env` (`:`-separated, shell-style).
 fn resolve_tool(name: &str, path_env: &str) -> Option<PathBuf> {
-    path_env
-        .split(':')
-        .map(|dir| Path::new(dir).join(name))
-        .find(|candidate| candidate.is_file())
+    tools::resolve_tool(name, path_env)
 }
 
 /// Best-effort `notify-send` when a tool is missing.
@@ -79,14 +76,9 @@ fn close(path_env: &str) -> Result<()> {
     Ok(())
 }
 
-/// Spawn the mixer window detached.
 fn spawn(path_env: &str) -> Result<()> {
     let kind = terminal::detect();
-    let cmd = vec![
-        MIXER_BIN.to_string(),
-        "--tab".to_string(),
-        "output".to_string(),
-    ];
+    let cmd: Vec<String> = MIXER_ARGV.iter().map(ToString::to_string).collect();
     let argv = terminal::spawn_argv(kind, CLASS, &cmd);
     let Some((program, rest)) = argv.split_first() else {
         anyhow::bail!("mixer: empty spawn argv");

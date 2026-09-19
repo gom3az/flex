@@ -4,8 +4,8 @@
 //!
 //! Row-set parity is against the deleted
 //! `waybar/.config/waybar/power-menu.sh` (see `src/providers/power.rs`).
-//! Danger confirm reuses the shared `keys` flow (proven by the center
-//! danger tests); these replays lock the power surface onto it.
+//! Danger confirm reuses the shared `keys` flow; these replays lock the
+//! power surface onto it.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -436,7 +436,7 @@ fn exec_stub_dir(name: &str) -> PathBuf {
 }
 
 /// Per-tool logging stub: `basename` + args to `$STUB_LOG`, always exit 0
-/// (the center port's `LOG_STUB`, so wrapper and executor call logs compare
+/// (the retired port's `LOG_STUB`, so wrapper and executor call logs compare
 /// byte-for-byte).
 const LOG_STUB: &str = r#"#!/usr/bin/env bash
 printf '%s %s\n' "$(basename "$0")" "$*" >> "$STUB_LOG"

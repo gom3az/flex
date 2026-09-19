@@ -2,8 +2,8 @@
 //!
 //! These verbs are non-interactive (no popup guard, no TUI), so they run
 //! detached without a pty. `wl-paste`/`notify-send` are stubbed on `PATH` and
-//! the three store files are pinned to a scratch dir via the
-//! `CLIPHIST_FILE`/`CLIPHIST_PINS`/`CLIPHIST_CURRENT` seams.
+//! the four store files are pinned to a scratch dir via the
+//! `CLIPHIST_FILE`/`CLIPHIST_PINS`/`CLIPHIST_CURRENT`/`CLIPHIST_TS` seams.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -73,23 +73,32 @@ fn install_stubs(name: &str) -> Stubs {
     }
 }
 
-/// Run `flex-clip` with a verb, the three store seams and a stub `PATH`.
+/// Run `flex-clip` with a verb, the four store seams and a stub `PATH`.
 fn run_verb(stubs: &Stubs, home: &Path, args: &[&str]) -> Output {
+    run_verb_with(stubs, home, args, &[])
+}
+
+/// [`run_verb`] plus extra `KEY=value` env pairs (retention overrides).
+fn run_verb_with(stubs: &Stubs, home: &Path, args: &[&str], extra_env: &[(&str, &str)]) -> Output {
     let path_env = format!(
         "{}:{}",
         stubs.dir.display(),
         std::env::var("PATH").unwrap_or_default()
     );
-    Command::new(env!("CARGO_BIN_EXE_flex-clip"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_flex-clip"));
+    command
         .args(args)
         .env("HOME", home)
         .env("PATH", path_env)
         .env("CLIPHIST_FILE", home.join("hist"))
         .env("CLIPHIST_PINS", home.join("pins"))
         .env("CLIPHIST_CURRENT", home.join("current"))
-        .stdin(Stdio::null())
-        .output()
-        .expect("run flex-clip")
+        .env("CLIPHIST_TS", home.join("ts"))
+        .stdin(Stdio::null());
+    for (key, value) in extra_env {
+        command.env(key, value);
+    }
+    command.output().expect("run flex-clip")
 }
 
 fn assert_ok(output: &Output) {
@@ -275,6 +284,79 @@ fn dispatcher_forwards_the_watch_verb() {
     assert!(
         logged.contains("--type") && logged.contains("text") && logged.contains("--watch"),
         "dispatcher watch spawned watcher: {logged:?}"
+    );
+    let _ = std::fs::remove_dir_all(&stubs.dir);
+}
+
+#[test]
+fn add_appends_a_sidecar_epoch_per_entry() {
+    let stubs = install_stubs("retention-ts");
+    let home = stubs.dir.join("home");
+    std::fs::create_dir_all(&home).expect("home");
+    std::fs::write(&stubs.payload, b"first\n").expect("payload");
+    assert_ok(&run_verb(&stubs, &home, &["add"]));
+    std::fs::write(&stubs.payload, b"second\n").expect("payload");
+    assert_ok(&run_verb(&stubs, &home, &["add"]));
+
+    let epochs = std::fs::read_to_string(home.join("ts")).expect("sidecar");
+    let epochs: Vec<u64> = epochs
+        .lines()
+        .map(|line| line.parse().expect("decimal epoch"))
+        .collect();
+    assert_eq!(epochs.len(), 2, "one epoch per history line");
+    assert!(epochs[0] <= epochs[1], "epochs are non-decreasing");
+    let _ = std::fs::remove_dir_all(&stubs.dir);
+}
+
+#[test]
+fn add_enforces_the_count_cap_with_pins_exempt() {
+    let stubs = install_stubs("retention-count");
+    let home = stubs.dir.join("home");
+    std::fs::create_dir_all(&home).expect("home");
+    let cap = &[("CLIPHIST_MAX_ENTRIES", "3")];
+    for entry in ["one", "two", "three"] {
+        std::fs::write(&stubs.payload, format!("{entry}\n")).expect("payload");
+        assert_ok(&run_verb_with(&stubs, &home, &["add"], cap));
+    }
+    assert_ok(&run_verb_with(&stubs, &home, &["pin", "one"], cap));
+    std::fs::write(&stubs.payload, b"four\n").expect("payload");
+    assert_ok(&run_verb_with(&stubs, &home, &["add"], cap));
+
+    assert_eq!(
+        std::fs::read(home.join("hist")).expect("hist"),
+        b"one\nthree\nfour\n".to_vec(),
+        "oldest unpinned line evicted, pinned oldest kept",
+    );
+    assert_eq!(
+        std::fs::read_to_string(home.join("ts"))
+            .expect("ts")
+            .lines()
+            .count(),
+        3,
+        "sidecar stays aligned with the trimmed history",
+    );
+    let _ = std::fs::remove_dir_all(&stubs.dir);
+}
+
+#[test]
+fn add_evicts_aged_out_entries_but_keeps_pinned_ones() {
+    let stubs = install_stubs("retention-age");
+    let home = stubs.dir.join("home");
+    std::fs::create_dir_all(&home).expect("home");
+    std::fs::write(home.join("hist"), b"keep\nstale\n").expect("hist");
+    std::fs::write(home.join("pins"), b"keep\n").expect("pins");
+    std::fs::write(home.join("ts"), b"0\n0\n").expect("ts");
+    std::fs::write(&stubs.payload, b"fresh\n").expect("payload");
+    assert_ok(&run_verb_with(
+        &stubs,
+        &home,
+        &["add"],
+        &[("CLIPHIST_MAX_AGE_SECS", "60")],
+    ));
+    assert_eq!(
+        std::fs::read(home.join("hist")).expect("hist"),
+        b"keep\nfresh\n".to_vec(),
+        "epoch-0 lines are older than 60s; the pinned one survives",
     );
     let _ = std::fs::remove_dir_all(&stubs.dir);
 }

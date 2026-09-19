@@ -2,7 +2,7 @@
 //!
 //! The eight providers here adapt this machine's tools to the generic
 //! [`flex_core`] menu engine: hyprpaper (wallpaper), cliphist (clip),
-//! nmcli (wifi), wpctl/brightnessctl (center), the theme directories
+//! nmcli (wifi), bluetoothctl/wpctl (bt), the theme directories
 //! (theme), `.desktop` entries (launch), `grim`/`slurp` (shot) and
 //! systemctl (power). The `flex` dispatcher (`src/main.rs`) parses the
 //! provider names and re-execs the matching `flex-<provider>` binary, which
@@ -18,5 +18,7 @@ pub mod providers;
 pub mod runner;
 mod spawn;
 pub mod terminal;
+pub mod tools;
+pub mod usage;
 
 pub use providers::{menu, tick_hook};

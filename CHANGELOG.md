@@ -13,6 +13,13 @@ longer consumed by anything — each binary selects a row and runs its effect
 directly.
 
 ### Added
+- Clip retention: `flex-clip add` keeps the history within 200 entries
+  (newest win) and drops unpinned lines older than 7 days, enforced on every
+  append (the `watch` daemon inherits it). Pinned entries are exempt. Ages
+  live in a `~/.cache/cliphist.ts` timestamp sidecar (one epoch per history
+  line); a missing sidecar counts as fresh so legacy history survives the
+  first run. Overrides: `CLIPHIST_TS`, `CLIPHIST_MAX_ENTRIES`,
+  `CLIPHIST_MAX_AGE_SECS`.
 - `flex-notify`: Native right-side Notification Center drawer (`-m` / `flex notify`),
   Waybar JSON polling module (`--status`), CLI operations (`send`, `clear-all`, `toggle-dnd`),
   and background D-Bus listener daemon (`daemon`).
@@ -44,6 +51,14 @@ directly.
   → `exec::<provider>::execute`).
 - `flex-rice/tests/entrypoints.rs`: the `--help`/`--version` contract for the
   binaries (replacing `tests/wrappers.rs`).
+- Zoxide-style usage ranking (frecency): choices are recorded per provider
+  (`$FLEX_USAGE_FILE`, else `$HOME/.cache/flex/usage.tsv`) and reorder
+  matches within their fuzzy tier (tiers still outrank use; empty-filter
+  views surface most-used first). On by default; `--no-frecency` or
+  `$FLEX_NO_FRECENCY` disables ranking and recording. Fixed menus (`power`,
+  `shot`, `profile`, `notify`) and ephemeral lists (`net`, `wifi`, `bt`,
+  `center`) opt out via `Tab::learnable = false`; `--print-action` never
+  records.
 
 ### Changed
 - The shell call path is fully retired: `cliphist.sh`, `kill-menu.sh`,
@@ -88,6 +103,12 @@ directly.
   die by signal).
 
 ### Removed
+- `flex-center` (control center menu + binary): volume/brightness gauges,
+  network/bluetooth/power/theme aggregation tabs, `Command::Center`,
+  `Provider::Center`, and the `SUPER+X` bind (now unbound).
+  `WifiNet`/nmcli parsing, `wifi_meta_body`, `bar`, and the `snapshot`
+  seam moved into `providers::wifi` / `providers.rs`; `NotifyWhen`
+  moved to `exec`; wifi/bt menus are behavior-identical.
 - `flex-rice/wrappers/` (all eight `flex-*.sh` scripts) and
   `flex-rice/tests/wrappers.rs`; the executor tests are the surviving
   coverage.

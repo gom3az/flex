@@ -58,6 +58,19 @@ pub const PINS_ENV: &str = "CLIPHIST_PINS";
 /// Env override for the current-entry file (test seam; bash hardcodes
 /// `$HOME/.cache/cliphist.current`, empty = default).
 pub const CURRENT_ENV: &str = "CLIPHIST_CURRENT";
+/// Max history lines kept by retention (newest win); override with
+/// [`HIST_MAX_ENV`] (empty/garbage/zero = default).
+pub const MAX_HISTORY_ENTRIES: usize = 200;
+/// Max age in seconds of an unpinned history line (7 days); override with
+/// [`HIST_MAX_AGE_ENV`] (empty/garbage/zero = default).
+pub const MAX_HISTORY_AGE_SECS: u64 = 7 * 24 * 3_600;
+/// Env override for the retention timestamp sidecar (empty = default).
+pub const TS_ENV: &str = "CLIPHIST_TS";
+/// Env override for the max history entries (empty/garbage/zero = default).
+pub const HIST_MAX_ENV: &str = "CLIPHIST_MAX_ENTRIES";
+/// Env override for the max history age in seconds (empty/garbage/zero =
+/// default).
+pub const HIST_MAX_AGE_ENV: &str = "CLIPHIST_MAX_AGE_SECS";
 
 /// One cleaned history line plus its precomputed row rendering data.
 ///
@@ -95,6 +108,15 @@ pub fn pins_path() -> PathBuf {
 #[must_use]
 pub fn current_path() -> PathBuf {
     env_override(CURRENT_ENV).unwrap_or_else(|| home_dir().join(".cache/cliphist.current"))
+}
+
+/// Retention timestamp sidecar path (`$CLIPHIST_TS`, else
+/// `$HOME/.cache/cliphist.ts`): one decimal unix-epoch line per history
+/// line, same order, maintained by the clip executor (see
+/// [`crate::exec::clip`]).
+#[must_use]
+pub fn ts_path() -> PathBuf {
+    env_override(TS_ENV).unwrap_or_else(|| home_dir().join(".cache/cliphist.ts"))
 }
 
 /// Load entries from the real store (env-overridden paths).

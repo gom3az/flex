@@ -15,13 +15,9 @@ pub const TAB_NAME: &str = "Profile";
 /// One profile row: action id + exact label + command meta.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProfileRow {
-    /// Row action id.
     pub id: &'static str,
-    /// Menu label.
     pub label: &'static str,
-    /// The command the executor runs for this row.
     pub meta: &'static str,
-    /// Whether the row needs confirm.
     pub confirmable: bool,
 }
 

@@ -117,6 +117,13 @@ Risk register drove this order — highest-unknown work is pulled earliest:
 - [x] **Danger-timing spec lock** — confirm-hold/step for danger rows defined +
       covered in `flex-core/tests/keys.rs` before any provider uses it.
 - [x] `flex-core/tests/fuzzy_corpus.rs`: tier/penalty regression corpus checked in.
+- [x] Frecency overlay (zoxide-style usage ranking): `filter.rs` frecency
+      section (`rank × 4.0/2.0/0.5/0.25` recency boosts, `+1.0`/use, aging,
+      per-provider TSV store in `flex-rice/src/usage.rs`); tier-major sort
+      (tiers outrank use, B-003 holds), empty-filter views surface most-used
+      first; default on with `--no-frecency` / `$FLEX_NO_FRECENCY` opt-out;
+      `Tab::learnable = false` excludes fixed menus and ephemeral lists;
+      `--print-action` never records.
 
 ## M2 — Providers (parse subprocess stdout once)
 
@@ -323,15 +330,15 @@ makes the dialog a flex provider instead of a package dependency.
       (`enabled` → `Turn Wi-Fi Off`; anything else → the single
       `Turn Wi-Fi On` row, since a down radio cannot scan), `Disconnect from
       {ssid}` when a scan reports `IN-USE` `*`, then one row per network (id
-      `wifi`, SSID in the escaped label — space-safe, the `center` contract).
-      Metas come from `center::wifi_meta_body` (the bash-exact body without
+      `wifi`, SSID in the escaped label — space-safe).
+      Metas come from `wifi::wifi_meta_body` (the bash-exact body without
       the `select` renderer's `◇ ` prefix, which is meaningless in standard
-      mode), so the row set cannot drift between the two surfaces.
-      Degradation reuses the `center` rules verbatim: failed `nmcli`/no
+      mode).
+      Degradation: failed `nmcli`/no
       device → one dim `— offline` row, empty scan → `(No Wi-Fi networks)`,
-      and the shared `center::snapshot` seam helper.
-- [x] Standard rows (`bare_rows = false`): unlike the `center` `Networks`
-      tab, the signal/security meta **is** the surface, so it must render.
+      and the shared `providers::snapshot` seam helper.
+- [x] Standard rows (`bare_rows = false`): the signal/security meta **is**
+      the surface, so it must render.
       Filterable (rofi `-dmenu` parity), never deletable.
 - [x] the wifi executor DONE (`menu` popup variant): radio on/off,
       `device disconnect`, open-network connect, `/dev/tty` password prompt

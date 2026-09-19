@@ -115,46 +115,6 @@ impl RetryExec for Command {
     }
 }
 
-#[allow(dead_code)]
-pub(crate) trait AsyncRetryExec {
-    async fn status_retrying(&mut self) -> io::Result<ExitStatus>;
-    async fn output_retrying(&mut self) -> io::Result<Output>;
-}
-
-impl AsyncRetryExec for tokio::process::Command {
-    async fn status_retrying(&mut self) -> io::Result<ExitStatus> {
-        tracing::debug!("AsyncRetryExec::status_retrying: {:?}", self);
-        let mut last = None;
-        for _ in 0..ATTEMPTS {
-            match self.status().await {
-                Ok(value) => return Ok(value),
-                Err(err) if err.kind() == io::ErrorKind::ExecutableFileBusy => {
-                    last = Some(err);
-                    tokio::time::sleep(BACKOFF).await;
-                }
-                Err(err) => return Err(err),
-            }
-        }
-        Err(last.unwrap_or_else(|| io::Error::other("spawn: exec stayed busy")))
-    }
-
-    async fn output_retrying(&mut self) -> io::Result<Output> {
-        tracing::debug!("AsyncRetryExec::output_retrying: {:?}", self);
-        let mut last = None;
-        for _ in 0..ATTEMPTS {
-            match self.output().await {
-                Ok(value) => return Ok(value),
-                Err(err) if err.kind() == io::ErrorKind::ExecutableFileBusy => {
-                    last = Some(err);
-                    tokio::time::sleep(BACKOFF).await;
-                }
-                Err(err) => return Err(err),
-            }
-        }
-        Err(last.unwrap_or_else(|| io::Error::other("spawn: exec stayed busy")))
-    }
-}
-
 /// Non-blocking background worker thread helper with a lock-free result mailbox.
 ///
 /// Spawns `f` on a background worker thread and deposits the result into a shared mailbox.
@@ -242,6 +202,28 @@ pub(crate) fn spawn_detached(
     status(&mut cmd)
 }
 
+/// Spawn `cmd` and reap the child on a detached waiter thread.
+///
+/// Fire-and-forget spawns that drop the [`Child`] handle leak a zombie: the
+/// child exits but nobody calls `wait()`, so its exit status is never
+/// collected for as long as this process lives. That is harmless for
+/// short-lived CLI invocations (init reaps on exit) but permanent for the
+/// long-lived notification daemon. The waiter thread blocks in `wait()` and
+/// exits; nothing ever joins it, so callers (including async contexts) are
+/// never blocked and process exit is never delayed.
+///
+/// # Errors
+///
+/// Returns an error if the spawn itself fails.
+pub(crate) fn spawn_and_reap(cmd: &mut Command) -> io::Result<u32> {
+    let mut child = retrying(|| cmd.spawn())?;
+    let pid = child.id();
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(pid)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,5 +239,22 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         panic!("BgTask timed out");
+    }
+
+    /// Fire-and-forget spawns must not leak permanent zombies: the waiter
+    /// thread collects the exit status, so `/proc/<pid>` disappears instead
+    /// of lingering as `Z` (the notification-daemon leak).
+    #[test]
+    fn spawn_and_reap_collects_fast_exiting_children() {
+        let mut cmd = Command::new("true");
+        let pid = spawn_and_reap(&mut cmd).expect("spawn true");
+        let proc = format!("/proc/{pid}");
+        for _ in 0..500 {
+            if !std::path::Path::new(&proc).exists() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("child {pid} was never reaped (still present in /proc)");
     }
 }

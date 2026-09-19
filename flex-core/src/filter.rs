@@ -25,6 +25,8 @@
 //! seam (swap [`FuzzyRanker`] for a `nucleo`-backed ranker without touching
 //! [`rank_all`] or the key/render layers).
 
+use std::collections::HashMap;
+
 use crate::Row;
 
 /// Haystack starts with the needle (`"fir"` in `"Firefox"`).
@@ -55,6 +57,18 @@ pub const EMPTY_NEEDLE_SCORE: u16 = u16::MAX;
 pub trait Ranker {
     /// Rank one pair; see [`score`] for the default semantics.
     fn rank(&self, needle: &str, haystack: &str) -> Option<(u16, Vec<u32>)>;
+
+    /// Rank one pair against a pre-folded needle.
+    ///
+    /// [`rank_all_with`] folds the needle once per query and calls this per
+    /// row, so implementors must not re-fold `needle` here. The default
+    /// unfolds back into a `String` and delegates to [`Ranker::rank`]
+    /// (correct, but slow); the built-in rankers override this with
+    /// streaming matchers that never materialize the haystack fold.
+    fn rank_folded(&self, needle: &[char], haystack: &str) -> Option<(u16, Vec<u32>)> {
+        let unfolded: String = needle.iter().collect();
+        self.rank(&unfolded, haystack)
+    }
 }
 
 /// Which ranking engine backs [`rank_all`] (see [`App::visible_rows`]).
@@ -81,6 +95,10 @@ impl Ranker for FuzzyRanker {
     fn rank(&self, needle: &str, haystack: &str) -> Option<(u16, Vec<u32>)> {
         score(needle, haystack)
     }
+
+    fn rank_folded(&self, needle: &[char], haystack: &str) -> Option<(u16, Vec<u32>)> {
+        score_folded(needle, haystack)
+    }
 }
 
 /// Legacy ordered-subsequence ranker (R1 escape hatch).
@@ -97,6 +115,17 @@ impl Ranker for LegacyRanker {
             return Some((EMPTY_NEEDLE_SCORE, Vec::new()));
         }
         if is_subsequence(needle, haystack) {
+            Some((0, Vec::new()))
+        } else {
+            None
+        }
+    }
+
+    fn rank_folded(&self, needle: &[char], haystack: &str) -> Option<(u16, Vec<u32>)> {
+        if needle.is_empty() {
+            return Some((EMPTY_NEEDLE_SCORE, Vec::new()));
+        }
+        if is_subsequence_folded(needle, haystack) {
             Some((0, Vec::new()))
         } else {
             None
@@ -121,32 +150,58 @@ pub fn score(needle: &str, haystack: &str) -> Option<(u16, Vec<u32>)> {
         return Some((EMPTY_NEEDLE_SCORE, Vec::new()));
     }
     let folded_needle: Vec<char> = lowercase_chars(needle);
-    let folded_hay: Vec<char> = lowercase_chars(haystack);
-    if folded_needle.len() > folded_hay.len() {
+    score_folded(&folded_needle, haystack)
+}
+
+/// [`score`] against a pre-folded needle (see [`Ranker::rank_folded`]).
+///
+/// The haystack fold streams (`chars().flat_map(to_lowercase)`) straight
+/// into a buffer instead of the old `String` + `Vec<char>` double alloc;
+/// tiers, penalties and positions match [`score`] exactly.
+fn score_folded(needle: &[char], haystack: &str) -> Option<(u16, Vec<u32>)> {
+    if needle.is_empty() {
+        return Some((EMPTY_NEEDLE_SCORE, Vec::new()));
+    }
+    let folded_hay: Vec<char> = haystack.chars().flat_map(char::to_lowercase).collect();
+    if needle.len() > folded_hay.len() {
         return None;
     }
+    let mut positions: Vec<u32> = Vec::with_capacity(needle.len());
+    let tier_score = score_into(needle, &folded_hay, &mut positions)?;
+    Some((tier_score, positions))
+}
+
+/// Tier core over pre-folded slices; fills `positions` on success.
+///
+/// `needle` is the once-per-query fold; `hay` is the streamed haystack fold.
+/// Tier/penalty semantics are unchanged: prefix 100 > prefix-word 80 >
+/// run>=3 60 > boundary 40 > scattered 10, subsequence required, gap/offset
+/// penalties saturating at zero.
+fn score_into(needle: &[char], hay: &[char], positions: &mut Vec<u32>) -> Option<u16> {
+    debug_assert!(!needle.is_empty(), "empty needle is handled by the caller");
+    positions.clear();
     // Tier 1: full prefix.
-    if folded_hay.starts_with(&folded_needle[..]) {
-        return Some(finish(TIER_PREFIX, 0, folded_needle.len()));
+    if hay.starts_with(needle) {
+        positions.extend((0..needle.len()).map(|i| u32::try_from(i).unwrap_or(u32::MAX)));
+        return Some(apply_penalties(TIER_PREFIX, 0, 0));
     }
     // Tier 2: prefix of a non-first word (leftmost wins: lowest penalty).
-    if let Some(word_start) = prefix_word_start(&folded_needle, &folded_hay) {
-        return Some(finish(
-            TIER_PREFIX_WORD,
-            word_start,
-            word_start + folded_needle.len(),
-        ));
+    if let Some(word_start) = prefix_word_start(needle, hay) {
+        positions.extend(
+            (word_start..word_start + needle.len()).map(|i| u32::try_from(i).unwrap_or(u32::MAX)),
+        );
+        return Some(apply_penalties(TIER_PREFIX_WORD, word_start, 0));
     }
     // Greedy leftmost ordered-subsequence alignment. This is the acceptance
     // predicate: every pair matched here is `Some`; tiers only reorder.
     // (Known limit: greedy can miss a higher-tier alignment, e.g. needle
     // `"fir"` vs `"ffir"` scores scattered instead of prefix. Acceptance is
     // unaffected — only the tier is conservative.)
-    let mut positions: Vec<u32> = Vec::with_capacity(folded_needle.len());
+    positions.reserve(needle.len());
     let mut cursor = 0_usize;
-    for &wanted in &folded_needle {
+    for &wanted in needle {
         let mut found = None;
-        for (index, &got) in folded_hay.iter().enumerate().skip(cursor) {
+        for (index, &got) in hay.iter().enumerate().skip(cursor) {
             if got == wanted {
                 found = Some(index);
                 cursor = index + 1;
@@ -155,17 +210,17 @@ pub fn score(needle: &str, haystack: &str) -> Option<(u16, Vec<u32>)> {
         }
         positions.push(u32::try_from(found?).unwrap_or(u32::MAX));
     }
-    let tier = if longest_run(&positions) >= MIN_RUN {
+    let tier = if longest_run(positions) >= MIN_RUN {
         TIER_RUN
-    } else if is_word_start(&folded_hay, positions[0] as usize) {
+    } else if is_word_start(hay, positions[0] as usize) {
         TIER_WORD_BOUNDARY
     } else {
         TIER_SCATTERED
     };
     let first = positions[0] as usize;
     let last = positions[positions.len() - 1] as usize;
-    let gaps = last - first + 1 - folded_needle.len();
-    Some((apply_penalties(tier, first, gaps), positions))
+    let gaps = last - first + 1 - needle.len();
+    Some(apply_penalties(tier, first, gaps))
 }
 
 /// One ranked row: provider index, score, and match positions.
@@ -184,31 +239,72 @@ pub struct RankedHit {
 /// - Empty needle: every row in provider order (no scoring).
 /// - Otherwise: matches ordered by score descending, ties broken by the
 ///   original provider index ascending (stable, deterministic).
+///
+/// Fast path (OPT-1): the needle folds once per query and the haystack fold
+/// plus the `positions` scratch are reused across rows, so per-row work is
+/// matching only — no `String`/`Vec` allocs except the per-hit positions.
 #[must_use]
 pub fn rank_all(needle: &str, rows: &[Row]) -> Vec<RankedHit> {
-    rank_all_with(&FuzzyRanker, needle, rows)
+    rank_all_inner(needle, rows, None)
+}
+
+/// [`rank_all`] with a zoxide-style frecency overlay.
+///
+/// Acceptance, tiers and penalties are identical; the sort gains a frecency
+/// tie-break between equal tiers (see [`usage_score`]). Rows never recorded
+/// score `0.0` and keep provider order among themselves, so an empty table
+/// ranks exactly like [`rank_all`]. On an empty needle every row matches and
+/// frecency alone decides the order (most-used on top).
+#[must_use]
+pub fn rank_all_scored(needle: &str, rows: &[Row], usage: &UsageTable, now: u64) -> Vec<RankedHit> {
+    rank_all_inner(needle, rows, Some((usage, now)))
+}
+
+/// Shared matching loop behind [`rank_all`] and [`rank_all_scored`].
+fn rank_all_inner(needle: &str, rows: &[Row], usage: Option<(&UsageTable, u64)>) -> Vec<RankedHit> {
+    if needle.is_empty() {
+        let mut hits = empty_hits(rows);
+        sort_hits(&mut hits, rows, usage);
+        return hits;
+    }
+    let folded_needle: Vec<char> = lowercase_chars(needle);
+    let mut hits: Vec<RankedHit> = Vec::new();
+    let mut folded_hay: Vec<char> = Vec::new();
+    let mut positions: Vec<u32> = Vec::new();
+    for (index, row) in rows.iter().enumerate() {
+        folded_hay.clear();
+        folded_hay.extend(row.label.chars().flat_map(char::to_lowercase));
+        if folded_needle.len() > folded_hay.len() {
+            continue;
+        }
+        if let Some(tier_score) = score_into(&folded_needle, &folded_hay, &mut positions) {
+            hits.push(RankedHit {
+                index,
+                score: tier_score,
+                positions: positions.clone(),
+            });
+        }
+    }
+    sort_hits(&mut hits, rows, usage);
+    hits
 }
 
 /// [`rank_all`] over an explicit [`Ranker`] (the `nucleo` seam).
+///
+/// The needle folds once per query and goes into the ranker as `&[char]`
+/// (see [`Ranker::rank_folded`]); per-row work never re-folds it.
 #[must_use]
 pub fn rank_all_with<R: Ranker>(ranker: &R, needle: &str, rows: &[Row]) -> Vec<RankedHit> {
     if needle.is_empty() {
-        return rows
-            .iter()
-            .enumerate()
-            .map(|(index, _)| RankedHit {
-                index,
-                score: EMPTY_NEEDLE_SCORE,
-                positions: Vec::new(),
-            })
-            .collect();
+        return empty_hits(rows);
     }
+    let folded_needle: Vec<char> = lowercase_chars(needle);
     let mut hits: Vec<RankedHit> = rows
         .iter()
         .enumerate()
         .filter_map(|(index, row)| {
             ranker
-                .rank(needle, &row.label)
+                .rank_folded(&folded_needle, &row.label)
                 .map(|(score, positions)| RankedHit {
                     index,
                     score,
@@ -229,7 +325,18 @@ pub fn rank_all_legacy(needle: &str, rows: &[Row]) -> Vec<RankedHit> {
     rank_all_with(&LegacyRanker, needle, rows)
 }
 
-/// Lowercase a string into chars (Unicode default case folding).
+/// Empty-needle hits: every row in provider order (no scoring).
+fn empty_hits(rows: &[Row]) -> Vec<RankedHit> {
+    rows.iter()
+        .enumerate()
+        .map(|(index, _)| RankedHit {
+            index,
+            score: EMPTY_NEEDLE_SCORE,
+            positions: Vec::new(),
+        })
+        .collect()
+}
+
 fn lowercase_chars(text: &str) -> Vec<char> {
     text.to_lowercase().chars().collect()
 }
@@ -240,26 +347,29 @@ fn lowercase_chars(text: &str) -> Vec<char> {
 /// agree on *whether* a pair matches and differ only in scoring.
 #[must_use]
 pub fn is_subsequence(needle: &str, haystack: &str) -> bool {
-    let folded_needle = lowercase_chars(needle);
-    let folded_hay = lowercase_chars(haystack);
-    if folded_needle.len() > folded_hay.len() {
-        return false;
-    }
-    let mut cursor = 0_usize;
-    for wanted in folded_needle {
-        let mut found = false;
-        for (index, got) in folded_hay.iter().enumerate().skip(cursor) {
-            if *got == wanted {
-                cursor = index + 1;
-                found = true;
-                break;
+    is_subsequence_folded(&lowercase_chars(needle), haystack)
+}
+
+/// [`is_subsequence`] against a pre-folded needle.
+///
+/// Streams the haystack fold (`chars().flat_map(to_lowercase)`) with no
+/// allocation; the predicate matches [`score`] exactly.
+fn is_subsequence_folded(needle: &[char], haystack: &str) -> bool {
+    let mut wanted = needle.iter();
+    let Some(first) = wanted.next() else {
+        return true;
+    };
+    let mut current = *first;
+    for got in haystack.chars().flat_map(char::to_lowercase) {
+        if got == current {
+            if let Some(next) = wanted.next() {
+                current = *next;
+            } else {
+                return true;
             }
         }
-        if !found {
-            return false;
-        }
     }
-    true
+    false
 }
 
 /// Leftmost non-first word start where `needle` matches contiguously.
@@ -295,20 +405,145 @@ fn longest_run(positions: &[u32]) -> usize {
     best
 }
 
-/// Build `(score, positions)` for a contiguous `[start, end)` match.
-fn finish(tier: u16, start: usize, end: usize) -> (u16, Vec<u32>) {
-    let positions: Vec<u32> = (start..end)
-        .map(|i| u32::try_from(i).unwrap_or(u32::MAX))
-        .collect();
-    (apply_penalties(tier, start, 0), positions)
-}
-
 /// Subtract gap/leading penalties, saturating at zero.
 fn apply_penalties(tier: u16, leading: usize, gaps: usize) -> u16 {
     let gap_hit = u16::try_from(gaps).unwrap_or(u16::MAX);
     let lead_hit = u16::try_from(leading).unwrap_or(u16::MAX);
     tier.saturating_sub(GAP_PENALTY_PER_CHAR.saturating_mul(gap_hit))
         .saturating_sub(LEADING_PENALTY_PER_CHAR.saturating_mul(lead_hit))
+}
+
+/// Zoxide-style frecency overlay (usage ranking).
+///
+/// The fuzzy predicate and tiers above gate *whether* a row matches; this
+/// section only reorders matches by learned use, mirroring
+/// `zoxide/src/db/dir.rs`:
+/// - [`usage_score`] = `rank × boost`, boost `4.0`/`2.0`/`0.5`/`0.25` for
+///   entries used within the hour/day/week or earlier.
+/// - [`usage_record`] = `rank += 1.0`, `last_accessed = now` (new ids start
+///   at `1.0`), the `add_update` port.
+/// - [`usage_age`] trims the table when it exceeds [`MAX_USAGE_ENTRIES`]
+///   (scale `×0.9`, drop `rank < 1.0`), the `age` port.
+/// - [`usage_remove`] drops one id, the `remove` port.
+///
+/// Keyed by row-id string (not [`crate::RowId`]: it has no `Borrow<str>`,
+/// so `get(id_str)` would not compile). Scores are `f64` compared with
+/// `total_cmp`; ranks stay non-negative so `NaN` cannot arise.
+///
+/// Nowhere here touches I/O or the clock: the caller supplies `now`
+/// (epoch seconds) and owns persistence (see `flex-rice/src/usage.rs`).
+/// Seconds in an hour (frecency recency boundary, cf. zoxide `HOUR`).
+pub const FRECENCY_HOUR_SECS: u64 = 3_600;
+/// Seconds in a day (frecency recency boundary, cf. zoxide `DAY`).
+pub const FRECENCY_DAY_SECS: u64 = 86_400;
+/// Seconds in a week (frecency recency boundary, cf. zoxide `WEEK`).
+pub const FRECENCY_WEEK_SECS: u64 = 604_800;
+/// Score boost for entries used within the hour (cf. zoxide `4.0`).
+pub const FRECENCY_BOOST_HOUR: f64 = 4.0;
+/// Score boost for entries used within the day (cf. zoxide `2.0`).
+pub const FRECENCY_BOOST_DAY: f64 = 2.0;
+/// Score boost for entries used within the week (cf. zoxide `0.5`).
+pub const FRECENCY_BOOST_WEEK: f64 = 0.5;
+/// Score boost for older entries (cf. zoxide `0.25`).
+pub const FRECENCY_BOOST_OLDER: f64 = 0.25;
+/// Rank added per recorded choice (cf. zoxide `add_update(path, 1.0, now)`).
+pub const USAGE_RANK_PER_USE: f64 = 1.0;
+/// Minimum surviving rank after aging (cf. zoxide's `rank < 1.0` drop).
+pub const USAGE_MIN_RANK: f64 = 1.0;
+/// Aging scale applied when the table overflows (cf. zoxide `0.9`).
+pub const USAGE_AGE_FACTOR: f64 = 0.9;
+/// Maximum usage entries kept per provider (bounds the store file).
+pub const MAX_USAGE_ENTRIES: usize = 512;
+
+/// One learned entry: zoxide `Dir` minus the path (the row id is the map key).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct UsageEntry {
+    /// Accumulated uses (`+1.0` per recorded choice, aged on overflow).
+    pub rank: f64,
+    /// Epoch seconds of the last recorded choice.
+    pub last_accessed: u64,
+}
+
+/// Usage table keyed by row-id string (see module docs for why not `RowId`).
+pub type UsageTable = HashMap<String, UsageEntry>;
+
+/// Zoxide `Dir::score` port: `rank × recency boost` at `now` (epoch seconds).
+///
+/// Negative ranks (only possible from hand-built tables) clamp to zero.
+#[must_use]
+pub fn usage_score(entry: &UsageEntry, now: u64) -> f64 {
+    let duration = now.saturating_sub(entry.last_accessed);
+    let boost = if duration < FRECENCY_HOUR_SECS {
+        FRECENCY_BOOST_HOUR
+    } else if duration < FRECENCY_DAY_SECS {
+        FRECENCY_BOOST_DAY
+    } else if duration < FRECENCY_WEEK_SECS {
+        FRECENCY_BOOST_WEEK
+    } else {
+        FRECENCY_BOOST_OLDER
+    };
+    entry.rank.max(0.0) * boost
+}
+
+/// Zoxide `add_update` port: bump `id` by one use at `now`, inserting at
+/// rank `1.0` when unseen.
+pub fn usage_record(table: &mut UsageTable, id: &str, now: u64) {
+    match table.get_mut(id) {
+        Some(entry) => {
+            entry.rank = (entry.rank + USAGE_RANK_PER_USE).max(0.0);
+            entry.last_accessed = now;
+        }
+        None => {
+            table.insert(
+                id.to_owned(),
+                UsageEntry {
+                    rank: USAGE_RANK_PER_USE.max(0.0),
+                    last_accessed: now,
+                },
+            );
+        }
+    }
+}
+
+/// Zoxide `remove` port: drop `id` from the table; returns whether one existed.
+pub fn usage_remove(table: &mut UsageTable, id: &str) -> bool {
+    table.remove(id).is_some()
+}
+
+/// Zoxide `age` port (entry-count budget): when the table exceeds
+/// [`MAX_USAGE_ENTRIES`], scale every rank by [`USAGE_AGE_FACTOR`] and drop
+/// entries below [`USAGE_MIN_RANK`]. Under budget this is a no-op.
+pub fn usage_age(table: &mut UsageTable) {
+    if table.len() <= MAX_USAGE_ENTRIES {
+        return;
+    }
+    table.retain(|_, entry| {
+        entry.rank *= USAGE_AGE_FACTOR;
+        entry.rank >= USAGE_MIN_RANK
+    });
+}
+
+/// Frecency of one ranked hit (`0.0` when the row was never recorded).
+fn hit_frecency(hit: &RankedHit, rows: &[Row], usage: &UsageTable, now: u64) -> f64 {
+    rows.get(hit.index)
+        .and_then(|row| usage.get(row.id.as_str()))
+        .map_or(0.0, |entry| usage_score(entry, now))
+}
+
+/// Sort hits by tier descending, then frecency descending, then provider
+/// index ascending (stable, deterministic).
+fn sort_hits(hits: &mut [RankedHit], rows: &[Row], usage: Option<(&UsageTable, u64)>) {
+    match usage {
+        Some((table, now)) => hits.sort_by(|a, b| {
+            b.score
+                .cmp(&a.score)
+                .then_with(|| {
+                    hit_frecency(b, rows, table, now).total_cmp(&hit_frecency(a, rows, table, now))
+                })
+                .then_with(|| a.index.cmp(&b.index))
+        }),
+        None => hits.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.index.cmp(&b.index))),
+    }
 }
 
 #[cfg(test)]
@@ -371,5 +606,233 @@ mod tests {
         let hits = rank_all_legacy("fir", &rows);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].index, 0);
+    }
+
+    fn usage_table(entries: &[(&str, f64, u64)]) -> UsageTable {
+        entries
+            .iter()
+            .map(|(id, rank, last)| {
+                (
+                    (*id).to_owned(),
+                    UsageEntry {
+                        rank: *rank,
+                        last_accessed: *last,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    // Exact `==` below: ranks are small integers and boosts are powers of
+    // two, so every compared product is exactly representable.
+    #[allow(clippy::float_cmp)]
+    #[test]
+    fn usage_score_boost_boundaries_mirror_zoxide() {
+        let now = 1_000_000_u64;
+        let at = |ago: u64| UsageEntry {
+            rank: 2.0,
+            last_accessed: now - ago,
+        };
+        let cases = [
+            (0, 8.0, "within the hour: x4"),
+            (FRECENCY_HOUR_SECS - 1, 8.0, "hour edge inclusive"),
+            (FRECENCY_HOUR_SECS, 4.0, "within the day: x2"),
+            (FRECENCY_DAY_SECS - 1, 4.0, "day edge inclusive"),
+            (FRECENCY_DAY_SECS, 1.0, "within the week: x0.5"),
+            (FRECENCY_WEEK_SECS - 1, 1.0, "week edge inclusive"),
+            (FRECENCY_WEEK_SECS, 0.5, "older: x0.25"),
+        ];
+        for (ago, expected, what) in cases {
+            assert!(
+                usage_score(&at(ago), now) == expected,
+                "{what}: got {}, want {expected}",
+                usage_score(&at(ago), now)
+            );
+        }
+        // Future timestamps saturate instead of underflowing.
+        let future = UsageEntry {
+            rank: 2.0,
+            last_accessed: now + 60,
+        };
+        assert_eq!(usage_score(&future, now), 8.0);
+    }
+
+    #[test]
+    fn usage_record_accumulates_and_stamps() {
+        let mut table = UsageTable::new();
+        usage_record(&mut table, "a", 100);
+        assert_eq!(
+            table["a"],
+            UsageEntry {
+                rank: 1.0,
+                last_accessed: 100
+            },
+            "new ids start at rank 1.0"
+        );
+        usage_record(&mut table, "a", 200);
+        assert_eq!(
+            table["a"],
+            UsageEntry {
+                rank: 2.0,
+                last_accessed: 200
+            },
+            "+1.0 per use, timestamp moves"
+        );
+    }
+
+    #[test]
+    fn usage_remove_reports_presence() {
+        let mut table = usage_table(&[("a", 3.0, 100)]);
+        assert!(usage_remove(&mut table, "a"));
+        assert!(!usage_remove(&mut table, "a"));
+        assert!(table.is_empty());
+    }
+
+    // Aged ranks compared here are exact (10.0*0.9=9.0, 100.0*0.9=90.0
+    // are exactly representable), so `assert_eq!` is sound.
+    #[allow(clippy::float_cmp)]
+    #[test]
+    fn usage_age_only_fires_over_budget() {
+        let mut small = usage_table(&[("a", 50.0, 1)]);
+        usage_age(&mut small);
+        assert_eq!(small["a"].rank, 50.0, "under budget is a no-op");
+        let mut big: UsageTable = (0..=MAX_USAGE_ENTRIES)
+            .map(|i| {
+                (
+                    format!("id{i:04}"),
+                    UsageEntry {
+                        rank: 10.0,
+                        last_accessed: 1,
+                    },
+                )
+            })
+            .collect();
+        usage_age(&mut big);
+        assert!(
+            big.values().all(|entry| entry.rank == 9.0),
+            "over budget scales every rank by 0.9"
+        );
+    }
+
+    // Aged ranks compared here are exact (10.0*0.9=9.0, 100.0*0.9=90.0
+    // are exactly representable), so `assert_eq!` is sound.
+    #[allow(clippy::float_cmp)]
+    #[test]
+    fn usage_age_drops_below_minimum_rank() {
+        let mut table: UsageTable = (0..MAX_USAGE_ENTRIES)
+            .map(|i| {
+                (
+                    format!("id{i:04}"),
+                    UsageEntry {
+                        rank: 1.0,
+                        last_accessed: 1,
+                    },
+                )
+            })
+            .collect();
+        table.insert(
+            "fresh".to_owned(),
+            UsageEntry {
+                rank: 100.0,
+                last_accessed: 1,
+            },
+        );
+        usage_age(&mut table);
+        assert!(!table.contains_key("id0000"), "1.0 * 0.9 < 1.0 drops");
+        assert_eq!(table["fresh"].rank, 90.0);
+    }
+
+    #[test]
+    fn scored_empty_table_matches_plain_order() {
+        let rows = vec![row("Confirm"), row("Firefox"), row("My Firm")];
+        let plain: Vec<usize> = rank_all("fir", &rows)
+            .into_iter()
+            .map(|hit| hit.index)
+            .collect();
+        let scored: Vec<usize> = rank_all_scored("fir", &rows, &UsageTable::new(), 1_000_000)
+            .into_iter()
+            .map(|hit| hit.index)
+            .collect();
+        assert_eq!(scored, plain, "no learned entries, no reorder");
+        let empty_plain: Vec<usize> = rank_all("", &rows)
+            .into_iter()
+            .map(|hit| hit.index)
+            .collect();
+        let empty_scored: Vec<usize> = rank_all_scored("", &rows, &UsageTable::new(), 1_000_000)
+            .into_iter()
+            .map(|hit| hit.index)
+            .collect();
+        assert_eq!(empty_scored, empty_plain);
+        assert_eq!(
+            empty_scored,
+            vec![0, 1, 2],
+            "empty needle keeps provider order"
+        );
+    }
+
+    #[test]
+    fn scored_prefers_used_row_within_tier() {
+        // Both prefix a non-first word at index 3: tier 80, leading 15 → 65
+        // each. The recorded one must lead on frecency alone.
+        let rows = vec![row("My Firm"), row("My First")];
+        let plain: Vec<usize> = rank_all("fir", &rows)
+            .into_iter()
+            .map(|hit| hit.index)
+            .collect();
+        assert_eq!(plain, vec![0, 1], "true tier tie keeps provider order");
+        let now = 1_000_000_u64;
+        let table = usage_table(&[("My First", 5.0, now)]);
+        let order: Vec<usize> = rank_all_scored("fir", &rows, &table, now)
+            .into_iter()
+            .map(|hit| hit.index)
+            .collect();
+        assert_eq!(order, vec![1, 0], "frecency breaks the tier tie");
+    }
+
+    #[test]
+    fn scored_never_outranks_a_higher_tier() {
+        // B-003 holds under frecency: string-prefix still beats a heavily
+        // used scattered/word match.
+        let rows = vec![row("Gnome Terminal"), row("Terminal")];
+        let now = 1_000_000_u64;
+        let table = usage_table(&[("Gnome Terminal", 100.0, now)]);
+        let order: Vec<usize> = rank_all_scored("term", &rows, &table, now)
+            .into_iter()
+            .map(|hit| hit.index)
+            .collect();
+        assert_eq!(order, vec![1, 0], "prefix 100 beats used prefix-word");
+    }
+
+    #[test]
+    fn scored_empty_needle_orders_by_frecency() {
+        let rows = vec![row("aa"), row("bb"), row("cc")];
+        let now = 1_000_000_u64;
+        let table = usage_table(&[("cc", 1.0, now - FRECENCY_WEEK_SECS), ("bb", 3.0, now)]);
+        let order: Vec<usize> = rank_all_scored("", &rows, &table, now)
+            .into_iter()
+            .map(|hit| hit.index)
+            .collect();
+        // bb: 3*4=12, cc: 1*0.25=0.25, aa: unrecorded 0.0.
+        assert_eq!(order, vec![1, 2, 0], "most-used on top at open");
+    }
+
+    #[test]
+    fn scored_balances_count_against_recency() {
+        let rows = vec![row("aa"), row("bb")];
+        let now = 10_000_000_u64;
+        // aa: 50*0.25=12.5, bb: 2*4=8 — heavy stale use still leads.
+        let table = usage_table(&[("aa", 50.0, now - FRECENCY_WEEK_SECS), ("bb", 2.0, now)]);
+        let order: Vec<usize> = rank_all_scored("", &rows, &table, now)
+            .into_iter()
+            .map(|hit| hit.index)
+            .collect();
+        assert_eq!(order, vec![0, 1]);
+        // aa: 12.5, bb: 4*4=16 — a fresh run of uses overtakes it.
+        let table = usage_table(&[("aa", 50.0, now - 2 * FRECENCY_WEEK_SECS), ("bb", 4.0, now)]);
+        let order: Vec<usize> = rank_all_scored("", &rows, &table, now)
+            .into_iter()
+            .map(|hit| hit.index)
+            .collect();
+        assert_eq!(order, vec![1, 0], "recent use beats stale count");
     }
 }

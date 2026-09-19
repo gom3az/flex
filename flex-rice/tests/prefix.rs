@@ -43,7 +43,7 @@ fn run_detached(bin: &str, home: &std::path::Path) -> Output {
         .expect("run provider binary without a controlling terminal")
 }
 
-/// Seven providers build a menu and then fail the TTY probe: one `flex:`
+/// Six providers build a menu and then fail the TTY probe: one `flex:`
 /// prefix, no output, non-zero exit.
 #[test]
 fn providers_report_tty_errors_with_a_single_prefix() {
@@ -52,7 +52,6 @@ fn providers_report_tty_errors_with_a_single_prefix() {
         env!("CARGO_BIN_EXE_flex-launch"),
         env!("CARGO_BIN_EXE_flex-shot"),
         env!("CARGO_BIN_EXE_flex-theme"),
-        env!("CARGO_BIN_EXE_flex-center"),
         env!("CARGO_BIN_EXE_flex-wifi"),
         env!("CARGO_BIN_EXE_flex-proc"),
         env!("CARGO_BIN_EXE_flex-profile"),

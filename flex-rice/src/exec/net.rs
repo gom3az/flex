@@ -22,52 +22,35 @@ pub const STAT_PATH_ENV: &str = "FLEX_NET_STAT_PATH";
 /// Fallback base directory for stat storage.
 const DEFAULT_STAT_FILE: &str = "flex-net-speed.stat";
 
-/// 1 Kilobyte in bytes (1024).
 pub const KB: f64 = 1024.0;
 
-/// 1 Megabyte in bytes (1024 * 1024 = 1048576).
 pub const MB: f64 = 1_048_576.0;
 
-/// 1 Gigabyte in bytes (1024 * 1024 * 1024 = 1073741824).
 pub const GB: f64 = 1_073_741_824.0;
 
 /// Information about an active process consuming network bandwidth.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProcessBandwidth {
-    /// Process ID.
     pub pid: u32,
-    /// Process name / command.
     pub comm: String,
-    /// Inbound rate in bytes per second.
     pub rx_rate: f64,
-    /// Outbound rate in bytes per second.
     pub tx_rate: f64,
-    /// Total rate in bytes per second (`rx_rate + tx_rate`).
     pub total_rate: f64,
-    /// Fractional share of total active process bandwidth (`0.0 ..= 1.0`).
     pub share: f32,
 }
 
 /// Information about a network interface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InterfaceInfo {
-    /// Interface name (e.g. `wlp15s0`, `enp14s0`, `lo`).
     pub name: String,
-    /// Operational state (`up`, `down`, `unknown`).
     pub operstate: String,
-    /// Whether this is the default route interface.
     pub is_default: bool,
-    /// Assigned IP address with CIDR mask (e.g. `192.168.1.108/24`).
     pub ip_cidr: Option<String>,
-    /// Default gateway IP (e.g. `192.168.1.1`).
     pub gateway: Option<String>,
-    /// Total received bytes in session.
     pub rx_bytes: u64,
-    /// Total transmitted bytes in session.
     pub tx_bytes: u64,
 }
 
-/// Process I/O sample: `(timestamp_millis, rchar, wchar)`.
 #[derive(Debug, Clone, Copy)]
 struct ProcIoSample {
     ts_ms: u128,
@@ -75,13 +58,47 @@ struct ProcIoSample {
     wchar: u64,
 }
 
-/// Fallback base directory for process stat storage.
 const DEFAULT_PROC_STAT_FILE: &str = "flex-net-proc.stat";
 
 /// Static process I/O sample cache across ticks.
 fn proc_io_cache() -> &'static Mutex<HashMap<u32, ProcIoSample>> {
     static CACHE: OnceLock<Mutex<HashMap<u32, ProcIoSample>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// OPT-7 `inet_inode → pid` membership cache: `pid → (has sockets, probed
+/// at)`. `fd` rescans run only for new pids; entries re-probe after a
+/// per-pid staggered TTL so a process that opens its first socket later is
+/// picked up within ~8–15 s instead of being missed until it exits.
+fn pid_net_cache() -> &'static Mutex<HashMap<u32, (bool, std::time::Instant)>> {
+    static CACHE: OnceLock<Mutex<HashMap<u32, (bool, std::time::Instant)>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Staggered re-probe TTL for one pid (8–15 s by pid hash, so expiries do
+/// not stampede on the same tick).
+fn pid_net_ttl(pid: u32) -> std::time::Duration {
+    std::time::Duration::from_secs(8 + u64::from(pid % 8))
+}
+
+/// Cached [`has_network_sockets`]: rescan fds only for new pids (or stale
+/// entries past their TTL).
+fn has_network_sockets_cached(pid: u32, inet_inodes: &HashSet<u64>) -> bool {
+    if let Ok(guard) = pid_net_cache().lock() {
+        if let Some(&(hit, at)) = guard.get(&pid) {
+            if at.elapsed() < pid_net_ttl(pid) {
+                return hit;
+            }
+        }
+    }
+    let hit = has_network_sockets(pid, inet_inodes);
+    if let Ok(mut guard) = pid_net_cache().lock() {
+        if guard.len() > 4096 {
+            guard.clear();
+        }
+        guard.insert(pid, (hit, std::time::Instant::now()));
+    }
+    hit
 }
 
 /// Resolve the stat cache file path.
@@ -412,6 +429,7 @@ pub fn scan_top_talkers() -> Vec<ProcessBandwidth> {
 
     let mut fresh_cache = HashMap::new();
     let mut results = Vec::new();
+    let mut seen_pids: HashSet<u32> = HashSet::new();
 
     for entry in entries.flatten() {
         let file_name = entry.file_name();
@@ -425,9 +443,11 @@ pub fn scan_top_talkers() -> Vec<ProcessBandwidth> {
         if pid == current_pid {
             continue;
         }
+        seen_pids.insert(pid);
 
-        // Only monitor processes with actual network/internet sockets (filters out local IPC/pipes/Wayland)
-        if !has_network_sockets(pid, &inet_inodes) {
+        // Only monitor processes with actual network/internet sockets (filters out local IPC/pipes/Wayland).
+        // OPT-7: fd rescan only for new pids via the `pid_net_cache`.
+        if !has_network_sockets_cached(pid, &inet_inodes) {
             continue;
         }
 
@@ -470,8 +490,17 @@ pub fn scan_top_talkers() -> Vec<ProcessBandwidth> {
         );
     }
 
-    write_proc_stat_cache(&proc_stat_path, &fresh_cache);
+    // OPT-7: write the proc-stat cache only when rates were requested
+    // (non-empty talker set); idle ticks with no network processes skip the
+    // disk write entirely. The in-memory `proc_io_cache` is always updated.
+    // Prune exited pids from the fd-membership cache.
+    if !results.is_empty() {
+        write_proc_stat_cache(&proc_stat_path, &fresh_cache);
+    }
     *guard = fresh_cache;
+    if let Ok(mut net_guard) = pid_net_cache().lock() {
+        net_guard.retain(|pid, _| seen_pids.contains(pid));
+    }
 
     let total_active_bandwidth: f64 = results.iter().map(|p| p.total_rate).sum();
     for p in &mut results {

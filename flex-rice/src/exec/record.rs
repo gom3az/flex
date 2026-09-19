@@ -35,12 +35,10 @@ fn info_path() -> PathBuf {
     }
 }
 
-/// The ambient `PATH`, empty when unset.
 fn ambient_path() -> String {
     std::env::var("PATH").unwrap_or_default()
 }
 
-/// Resolve `name` against `path_env` (`:`-separated, shell-style).
 fn resolve_tool(name: &str, path_env: &str) -> Option<PathBuf> {
     path_env
         .split(':')

@@ -31,7 +31,7 @@
 //! and integration tests diff the stub-`PATH` call logs against the same
 //! shapes plus byte-compare the resulting store files.
 //!
-//! Five deliberate departures from the wrapper (all tested):
+//! Six deliberate departures from the wrapper (all tested):
 //!
 //! - No subprocess: the hash is resolved in-process with the same
 //!   [`resolve`](crate::providers::clip::resolve) the library exposes, so
@@ -54,6 +54,10 @@
 //!   always rewrites via `.tmp` + `mv`, which is byte-identical content
 //!   whenever the file ends with a newline; the port skips the write when
 //!   the scrubbed bytes equal the input bytes.
+//! - Retention: the wrapper never capped the history file, so `add` enforces
+//!   a 200-entry / 7-day cap (pins exempt) via a `$CLIPHIST_TS`-style
+//!   timestamp sidecar (`cliphist.ts`, one epoch per history line).
+//!   Overrides: `$CLIPHIST_MAX_ENTRIES`, `$CLIPHIST_MAX_AGE_SECS`.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -70,7 +74,7 @@ use crate::providers::clip;
 use crate::spawn::RetryExec as _;
 
 /// Which menu outcome is being executed: clip is the only provider (besides
-/// `center`/`wifi`) whose rows are deletable, so the binary
+/// `wifi`) whose rows are deletable, so the binary
 /// maps `Chosen`/`Delete`/`Toggle` onto these three ops and bails on
 /// `Target` (clip rows carry no dropdown targets, and the wrapper has no
 /// `ACTION:TARGET` arm either).
@@ -425,6 +429,259 @@ pub fn is_pinned(pins: &Path, raw: &str) -> bool {
     std::fs::read(pins).is_ok_and(|bytes| store_contains(&bytes, raw.as_bytes()))
 }
 
+// === history retention ===
+//
+// The retired wrapper never capped the history file; `add` enforces two
+// caps on every append so the store stays bounded:
+//
+// - count: keep the newest [`clip::MAX_HISTORY_ENTRIES`] lines
+//   (`$CLIPHIST_MAX_ENTRIES` override);
+// - age: drop unpinned lines older than [`clip::MAX_HISTORY_AGE_SECS`]
+//   seconds (`$CLIPHIST_MAX_AGE_SECS` override).
+//
+// Pinned lines (exact-line membership in the pins file) are exempt from both
+// caps. Ages live in the timestamp sidecar ([`clip::ts_path`], one decimal
+// unix-epoch line per history line, same order); a missing sidecar or an
+// unparseable epoch counts as fresh, so the first enforcement after upgrade
+// never mass-deletes legacy history — those lines get stamped with `now` and
+// a full fresh lease instead. Re-adding an existing line refreshes its epoch
+// (last-seen age). Files are rewritten atomically (`.tmp` + rename, like the
+// other store edits) and left untouched when nothing changes (the
+// mtime-preservation convention from the module docs).
+
+/// Positive env override in seconds/entries, else `default`
+/// (missing/empty/garbage/zero all fall back).
+fn positive_env(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+        .filter(|parsed| *parsed > 0)
+        .unwrap_or(default)
+}
+
+/// Positive `usize` env override, else `default` (same fallback rule; kept
+/// separate from [`positive_env`] so no `u64`→`usize` cast is needed).
+fn positive_env_usize(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+        .filter(|parsed| *parsed > 0)
+        .unwrap_or(default)
+}
+
+/// Unix now in whole seconds (a broken clock yields `0`, and the saturating
+/// age math below then keeps everything — fail-open, never mass-delete).
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+}
+
+/// Sidecar epochs aligned to the history lines: `None`/missing/garbage slots
+/// become `now` (fresh). Always exactly `count` long.
+fn read_epochs(ts: &Path, count: usize, now: u64) -> Vec<u64> {
+    let bytes = std::fs::read(ts).unwrap_or_default();
+    let mut epochs: Vec<u64> = store_lines(&bytes)
+        .iter()
+        .map(|line| {
+            std::str::from_utf8(line)
+                .ok()
+                .and_then(|text| text.trim().parse().ok())
+                .unwrap_or(now)
+        })
+        .collect();
+    epochs.resize(count, now);
+    epochs.truncate(count);
+    epochs
+}
+
+/// Atomic rewrite (`.tmp` + rename, creating parent dirs), like
+/// [`append_line`] and [`scrub_file`].
+///
+/// # Errors
+///
+/// When the write or the rename fails.
+fn rewrite(path: &Path, bytes: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("clip: cannot create {}", parent.display()))?;
+        }
+    }
+    let tmp = tmp_for(path);
+    std::fs::write(&tmp, bytes).with_context(|| format!("clip: cannot write {}", tmp.display()))?;
+    std::fs::rename(&tmp, path)
+        .with_context(|| format!("clip: cannot update {}", path.display()))?;
+    Ok(())
+}
+
+/// Enforce the retention caps with env overrides and the real clock (what
+/// [`add_with`] and the delete path call).
+///
+/// Returns whether any store file changed.
+///
+/// # Errors
+///
+/// When a store rewrite fails.
+pub fn enforce_retention(hist: &Path, pins: &Path, ts: &Path) -> Result<bool> {
+    enforce_retention_with(
+        hist,
+        pins,
+        ts,
+        positive_env_usize(clip::HIST_MAX_ENV, clip::MAX_HISTORY_ENTRIES),
+        positive_env(clip::HIST_MAX_AGE_ENV, clip::MAX_HISTORY_AGE_SECS),
+        now_secs(),
+    )
+}
+
+/// [`enforce_retention`] with explicit caps and clock (the test seam).
+///
+/// Pinned lines are exempt from both caps; when pins alone exceed the count
+/// cap they are all kept. A missing/empty history file is a no-op (there is
+/// nothing to trim, and no sidecar is created for a store that has no lines).
+///
+/// Returns whether any store file changed.
+///
+/// # Errors
+///
+/// When a store rewrite fails.
+pub fn enforce_retention_with(
+    hist: &Path,
+    pins: &Path,
+    ts: &Path,
+    max_entries: usize,
+    max_age_secs: u64,
+    now: u64,
+) -> Result<bool> {
+    let Ok(bytes) = std::fs::read(hist) else {
+        return Ok(false);
+    };
+    if bytes.is_empty() {
+        return Ok(false);
+    }
+    let lines = store_lines(&bytes);
+    let pins_bytes = std::fs::read(pins).unwrap_or_default();
+    let pinned: std::collections::HashSet<&[u8]> = store_lines(&pins_bytes).into_iter().collect();
+    let epochs = read_epochs(ts, lines.len(), now);
+    let mut keep: Vec<bool> = lines
+        .iter()
+        .enumerate()
+        .map(|(index, line)| {
+            pinned.contains(*line) || now.saturating_sub(epochs[index]) <= max_age_secs
+        })
+        .collect();
+    let kept = keep.iter().filter(|kept| **kept).count();
+    if kept > max_entries {
+        let mut drop_budget = kept - max_entries;
+        for (index, line) in lines.iter().enumerate() {
+            if drop_budget == 0 {
+                break;
+            }
+            if keep[index] && !pinned.contains(*line) {
+                keep[index] = false;
+                drop_budget -= 1;
+            }
+        }
+    }
+    let evicted = keep.contains(&false);
+    let ts_count = std::fs::read(ts).map_or(0, |ts_bytes| store_lines(&ts_bytes).len());
+    if !evicted && ts_count == lines.len() {
+        return Ok(false);
+    }
+    if evicted {
+        let mut rewritten: Vec<u8> = Vec::new();
+        for (index, line) in lines.iter().enumerate() {
+            if keep[index] {
+                rewritten.extend_from_slice(line);
+                rewritten.push(b'\n');
+            }
+        }
+        rewrite(hist, &rewritten)?;
+    }
+    let mut ts_rewritten: Vec<u8> = Vec::new();
+    for (index, epoch) in epochs.iter().enumerate() {
+        if !evicted || keep[index] {
+            ts_rewritten.extend_from_slice(epoch.to_string().as_bytes());
+            ts_rewritten.push(b'\n');
+        }
+    }
+    rewrite(ts, &ts_rewritten)?;
+    Ok(true)
+}
+
+/// Refresh the sidecar epoch of the history line exactly equal to `raw`
+/// (re-add = last-seen). A no-op when the line is absent; the sidecar is
+/// left untouched when the epoch already equals `now` (mtime convention).
+///
+/// # Errors
+///
+/// When the sidecar rewrite fails.
+fn refresh_epoch(hist: &Path, ts: &Path, raw: &[u8], now: u64) -> Result<()> {
+    let Ok(bytes) = std::fs::read(hist) else {
+        return Ok(());
+    };
+    let lines = store_lines(&bytes);
+    let Some(index) = lines.iter().position(|line| *line == raw) else {
+        return Ok(());
+    };
+    let mut epochs = read_epochs(ts, lines.len(), now);
+    if epochs[index] == now {
+        return Ok(());
+    }
+    epochs[index] = now;
+    let mut rewritten: Vec<u8> = Vec::new();
+    for epoch in &epochs {
+        rewritten.extend_from_slice(epoch.to_string().as_bytes());
+        rewritten.push(b'\n');
+    }
+    rewrite(ts, &rewritten)
+}
+
+/// History line indices exactly equal to `raw` (what [`scrub_file`] removes,
+/// so the sidecar can drop the same slots).
+fn removed_indices(hist: &Path, raw: &[u8]) -> Vec<usize> {
+    let Ok(bytes) = std::fs::read(hist) else {
+        return Vec::new();
+    };
+    store_lines(&bytes)
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| **line == raw)
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// Drop the sidecar slots at `removed` (best-effort alignment: indices past
+/// a short sidecar are ignored, surplus trailing sidecar lines are kept for
+/// [`enforce_retention`] to normalise).
+///
+/// # Errors
+///
+/// When the sidecar rewrite fails.
+fn drop_epochs(ts: &Path, removed: &[usize]) -> Result<()> {
+    if removed.is_empty() {
+        return Ok(());
+    }
+    let Ok(bytes) = std::fs::read(ts) else {
+        return Ok(());
+    };
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    let lines = store_lines(&bytes);
+    let mut rewritten: Vec<u8> = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        if !removed.contains(&index) {
+            rewritten.extend_from_slice(line);
+            rewritten.push(b'\n');
+        }
+    }
+    if rewritten == bytes {
+        return Ok(());
+    }
+    rewrite(ts, &rewritten)
+}
+
 /// What [`execute`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecuteReport {
@@ -466,12 +723,22 @@ pub fn execute(op: ClipOp, action_id: &str, path_env: Option<&str>) -> Result<Ex
     if raw.is_empty() {
         anyhow::bail!("clip: unknown id '{id}'");
     }
-    execute_with(op, &raw, &clip::hist_path(), &clip::pins_path(), path_env)
+    execute_with(
+        op,
+        &raw,
+        &clip::hist_path(),
+        &clip::pins_path(),
+        &clip::ts_path(),
+        path_env,
+    )
 }
 
 /// Copy/delete/toggle half of [`execute`], with the resolved inputs given
 /// (no env reads, no resolve): the shape integration tests drive with a
 /// stub `PATH` and scratch store files.
+///
+/// A history scrub also drops the matching sidecar epochs so the timestamp
+/// file stays aligned with the history file.
 ///
 /// # Errors
 ///
@@ -483,6 +750,7 @@ pub fn execute_with(
     raw: &str,
     hist: &Path,
     pins: &Path,
+    ts: &Path,
     path_env: Option<&str>,
 ) -> Result<ExecuteReport> {
     let path_env = path_env.map_or_else(ambient_path, str::to_string);
@@ -496,7 +764,9 @@ pub fn execute_with(
             }
             Step::Scrub { raw, pins_only } => {
                 if !pins_only {
+                    let removed = removed_indices(hist, raw.as_bytes());
                     scrub_file(hist, raw.as_bytes())?;
+                    drop_epochs(ts, &removed)?;
                 }
                 scrub_file(pins, raw.as_bytes())?;
             }
@@ -644,11 +914,16 @@ pub fn add(path_env: Option<&str>) -> Result<()> {
         &clipboard,
         &clip::hist_path(),
         &clip::current_path(),
+        &clip::pins_path(),
+        &clip::ts_path(),
         Some(&path_env),
     )
 }
 
 /// [`add`] with the clipboard text and paths given (the test seam).
+///
+/// Appends the entry (with a `now` sidecar epoch) unless already present —
+/// a re-add refreshes its epoch instead — then enforces retention.
 ///
 /// # Errors
 ///
@@ -657,6 +932,8 @@ pub fn add_with(
     clipboard: &str,
     hist: &Path,
     current: &Path,
+    pins: &Path,
+    ts: &Path,
     path_env: Option<&str>,
 ) -> Result<()> {
     let stripped: String = clipboard.chars().filter(|ch| *ch != '\0').collect();
@@ -667,9 +944,14 @@ pub fn add_with(
     let encoded = clip::encode(trimmed);
     let prev_current = current_decoded(current);
     write_current(current, &encoded)?;
-    if !file_contains(hist, encoded.as_bytes()) {
+    let now = now_secs();
+    if file_contains(hist, encoded.as_bytes()) {
+        refresh_epoch(hist, ts, encoded.as_bytes(), now)?;
+    } else {
         append_line(hist, encoded.as_bytes())?;
+        append_line(ts, now.to_string().as_bytes())?;
     }
+    enforce_retention(hist, pins, ts)?;
     if prev_current != trimmed {
         if let Some(pe) = path_env {
             if resolve_tool("wl-copy", pe).is_some() {
@@ -964,7 +1246,9 @@ mod tests {
         let dir = scratch("add");
         let hist = dir.join("hist");
         let current = dir.join("current");
-        add_with("alpha\nbeta\0\n", &hist, &current, None).expect("add");
+        let pins = dir.join("pins");
+        let ts = dir.join("ts");
+        add_with("alpha\nbeta\0\n", &hist, &current, &pins, &ts, None).expect("add");
         // NUL stripped, trailing newline trimmed, internal newline encoded.
         assert_eq!(
             std::fs::read(&current).expect("current"),
@@ -975,7 +1259,7 @@ mod tests {
             b"alpha<NEWLINE>beta\n".to_vec(),
         );
         // Second add of the same entry updates current but does not re-append.
-        add_with("alpha\nbeta\n", &hist, &current, None).expect("add again");
+        add_with("alpha\nbeta\n", &hist, &current, &pins, &ts, None).expect("add again");
         assert_eq!(
             std::fs::read(&hist).expect("hist"),
             b"alpha<NEWLINE>beta\n".to_vec(),
@@ -989,9 +1273,135 @@ mod tests {
         let dir = scratch("add-empty");
         let hist = dir.join("hist");
         let current = dir.join("current");
-        add_with("\n", &hist, &current, None).expect("add");
+        let pins = dir.join("pins");
+        let ts = dir.join("ts");
+        add_with("\n", &hist, &current, &pins, &ts, None).expect("add");
         assert!(!hist.exists());
         assert!(!current.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn retention_trims_to_newest_and_exempts_pins() {
+        let dir = scratch("retention-count");
+        let hist = dir.join("hist");
+        let pins = dir.join("pins");
+        let ts = dir.join("ts");
+        std::fs::write(&hist, b"one\ntwo\nthree\nfour\nfive\n").expect("hist");
+        std::fs::write(&pins, b"one\n").expect("pins");
+        std::fs::write(&ts, b"100\n100\n100\n100\n100\n").expect("ts");
+        let changed = enforce_retention_with(&hist, &pins, &ts, 3, u64::MAX, 200).expect("enforce");
+        assert!(changed, "two lines must be evicted");
+        assert_eq!(
+            std::fs::read(&hist).expect("hist"),
+            b"one\nfour\nfive\n".to_vec(),
+            "pinned oldest survives, newest win",
+        );
+        assert_eq!(
+            std::fs::read(&ts).expect("ts"),
+            b"100\n100\n100\n".to_vec(),
+            "sidecar stays aligned",
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn retention_evicts_old_unpinned_but_keeps_old_pinned() {
+        let dir = scratch("retention-age");
+        let hist = dir.join("hist");
+        let pins = dir.join("pins");
+        let ts = dir.join("ts");
+        std::fs::write(&hist, b"keep\nstale\nfresh\n").expect("hist");
+        std::fs::write(&pins, b"keep\n").expect("pins");
+        std::fs::write(&ts, b"0\n0\n990\n").expect("ts");
+        let changed = enforce_retention_with(&hist, &pins, &ts, 200, 60, 1_000).expect("enforce");
+        assert!(changed, "the stale line must be evicted");
+        assert_eq!(
+            std::fs::read(&hist).expect("hist"),
+            b"keep\nfresh\n".to_vec(),
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn retention_treats_a_missing_sidecar_as_fresh() {
+        let dir = scratch("retention-legacy");
+        let hist = dir.join("hist");
+        let pins = dir.join("pins");
+        let ts = dir.join("ts");
+        std::fs::write(&hist, b"legacy\nlines\n").expect("hist");
+        // No sidecar: legacy history must survive its first enforcement even
+        // under a tiny age cap, gaining a fresh lease instead.
+        let changed =
+            enforce_retention_with(&hist, &pins, &ts, 200, 1, 1_000_000).expect("enforce");
+        assert!(changed, "the sidecar is created");
+        assert_eq!(
+            std::fs::read(&hist).expect("hist"),
+            b"legacy\nlines\n".to_vec(),
+            "legacy lines are kept",
+        );
+        assert_eq!(
+            std::fs::read(&ts).expect("ts"),
+            b"1000000\n1000000\n".to_vec(),
+            "missing epochs are stamped with now",
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn retention_is_a_no_op_without_history() {
+        let dir = scratch("retention-empty");
+        let hist = dir.join("hist");
+        let pins = dir.join("pins");
+        let ts = dir.join("ts");
+        assert!(
+            !enforce_retention_with(&hist, &pins, &ts, 200, 60, 1_000).expect("missing"),
+            "a missing history file changes nothing",
+        );
+        std::fs::write(&hist, b"").expect("empty hist");
+        assert!(
+            !enforce_retention_with(&hist, &pins, &ts, 200, 60, 1_000).expect("empty"),
+            "an empty history file changes nothing",
+        );
+        assert!(!ts.exists(), "no sidecar is created for an empty store");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn readd_refreshes_the_epoch_instead_of_appending() {
+        let dir = scratch("retention-refresh");
+        let hist = dir.join("hist");
+        let current = dir.join("current");
+        let pins = dir.join("pins");
+        let ts = dir.join("ts");
+        std::fs::write(&hist, b"alpha\n").expect("hist");
+        std::fs::write(&ts, b"1\n").expect("ts");
+        add_with("alpha\n", &hist, &current, &pins, &ts, None).expect("re-add");
+        assert_eq!(
+            std::fs::read(&hist).expect("hist"),
+            b"alpha\n".to_vec(),
+            "no duplicate line",
+        );
+        let epoch: u64 = std::fs::read_to_string(&ts)
+            .expect("ts")
+            .trim()
+            .parse()
+            .expect("epoch parses");
+        assert!(epoch > 1 && epoch <= now_secs(), "epoch refreshed to now");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delete_drops_the_matching_sidecar_slots() {
+        let dir = scratch("retention-delete");
+        let hist = dir.join("hist");
+        let ts = dir.join("ts");
+        std::fs::write(&hist, b"a\nb\nc\n").expect("hist");
+        std::fs::write(&ts, b"10\n20\n30\n").expect("ts");
+        let removed = removed_indices(&hist, b"b");
+        assert_eq!(removed, vec![1]);
+        drop_epochs(&ts, &removed).expect("drop");
+        assert_eq!(std::fs::read(&ts).expect("ts"), b"10\n30\n".to_vec());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

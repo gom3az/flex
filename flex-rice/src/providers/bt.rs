@@ -17,7 +17,7 @@ use std::path::Path;
 
 use flex_core::{Menu, Row, RowId, Tab, Target};
 
-use crate::providers::{self, center};
+use crate::providers::{self};
 
 /// Provider name for the `ACTION:` line.
 pub const PROVIDER: &str = "bt";
@@ -183,8 +183,14 @@ pub fn parse_rssi(info_out: &str) -> Option<i32> {
 }
 
 /// Check whether the device info indicates an audio device.
+///
+/// OPT-8: byte-level `starts_with`/substring pre-check runs before the
+/// `to_lowercase` allocation, so non-audio `info` outputs skip the fold.
 #[must_use]
 pub fn is_audio_device(info_out: &str) -> bool {
+    if !contains_audio_token_ascii(info_out) {
+        return false;
+    }
     let lower = info_out.to_lowercase();
     lower.contains("audio sink")
         || lower.contains("audio source")
@@ -193,6 +199,37 @@ pub fn is_audio_device(info_out: &str) -> bool {
         || lower.contains("headset")
         || lower.contains("a/v remote control")
         || lower.contains("icon: audio-")
+}
+
+/// Case-insensitive ASCII pre-filter for [`is_audio_device`]: true when the
+/// text could contain one of the audio markers, without allocating.
+fn contains_audio_token_ascii(text: &str) -> bool {
+    const TOKENS: &[&[u8]] = &[
+        b"audio", b"hands", b"headset", b"a/v", b"icon:", b"hfp", b"a2dp",
+    ];
+    let bytes = text.as_bytes();
+    if bytes.is_empty() {
+        return false;
+    }
+    for token in TOKENS {
+        if bytes.len() < token.len() {
+            continue;
+        }
+        // Sliding ASCII case-insensitive search.
+        for window in bytes.windows(token.len()) {
+            let mut hit = true;
+            for (a, b) in window.iter().zip(token.iter()) {
+                if a.to_ascii_lowercase() != *b {
+                    hit = false;
+                    break;
+                }
+            }
+            if hit {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Check if the MAC or name matches the active default audio sink in `PipeWire` / `PulseAudio` status.
@@ -342,7 +379,7 @@ pub fn devices_tab_from(
             TAB_DEVICES,
             vec![Row::offline_placeholder(
                 RowId::new(providers::NOOP_ID),
-                center::OFFLINE_LABEL,
+                flex_core::strings::OFFLINE_LABEL,
             )],
         );
         tab.bare_rows = false;
@@ -388,7 +425,7 @@ pub fn adapters_tab_from(adapter: Option<&BtAdapterInfo>) -> Tab {
             TAB_ADAPTERS,
             vec![Row::offline_placeholder(
                 RowId::new(providers::NOOP_ID),
-                center::OFFLINE_LABEL,
+                flex_core::strings::OFFLINE_LABEL,
             )],
         );
         tab.bare_rows = false;
@@ -485,7 +522,7 @@ fn bt_info_snapshot(mac: &str) -> Option<String> {
         }
         return std::fs::read_to_string(Path::new(&dir).join(mac)).ok();
     }
-    center::snapshot(BT_INFO_DIR_ENV, "bluetoothctl", &["info", mac])
+    super::snapshot(BT_INFO_DIR_ENV, "bluetoothctl", &["info", mac])
 }
 
 /// Helper to read default audio sink status snapshot or live from wpctl/pactl.
@@ -497,18 +534,18 @@ fn bt_default_sink_snapshot() -> Option<String> {
         return std::fs::read_to_string(file).ok();
     }
     // Live probe: try wpctl status first, then pactl info
-    if let Some(out) = center::snapshot("", "wpctl", &["status"]) {
+    if let Some(out) = super::snapshot("", "wpctl", &["status"]) {
         return Some(out);
     }
-    center::snapshot("", "pactl", &["info"])
+    super::snapshot("", "pactl", &["info"])
 }
 
 /// Build the `Devices` tab live.
 #[must_use]
 pub fn devices_tab() -> Tab {
-    let show_out = center::snapshot(BT_SHOW_FILE_ENV, "bluetoothctl", &["show"]);
+    let show_out = super::snapshot(BT_SHOW_FILE_ENV, "bluetoothctl", &["show"]);
     let adapter = show_out.as_deref().and_then(parse_controller);
-    let devices_out = center::snapshot(BT_DEVICES_FILE_ENV, "bluetoothctl", &["devices"]);
+    let devices_out = super::snapshot(BT_DEVICES_FILE_ENV, "bluetoothctl", &["devices"]);
     let sink_status = bt_default_sink_snapshot();
 
     devices_tab_from(
@@ -522,7 +559,7 @@ pub fn devices_tab() -> Tab {
 /// Build the `Adapters` tab live.
 #[must_use]
 pub fn adapters_tab() -> Tab {
-    let show_out = center::snapshot(BT_SHOW_FILE_ENV, "bluetoothctl", &["show"]);
+    let show_out = super::snapshot(BT_SHOW_FILE_ENV, "bluetoothctl", &["show"]);
     let adapter = show_out.as_deref().and_then(parse_controller);
     adapters_tab_from(adapter.as_ref())
 }
@@ -530,60 +567,57 @@ pub fn adapters_tab() -> Tab {
 /// Build the full interactive Bluetooth menu.
 #[must_use]
 pub fn bt_menu() -> Menu {
-    let tabs = vec![devices_tab(), adapters_tab()];
+    let mut tabs = vec![devices_tab(), adapters_tab()];
+    // Device rows are scan snapshots (MACs come and go): searchable, but
+    // nothing stable worth learning.
+    for tab in &mut tabs {
+        tab.learnable = false;
+    }
     providers::menu(PROVIDER, tabs)
 }
 
-/// Helper to locate row index in visible rows.
-fn visible_position(menu: &Menu, predicate: impl Fn(&Row) -> bool) -> Option<usize> {
-    let tab = menu.app.active_tab()?;
-    menu.app
-        .visible_rows()
-        .iter()
-        .position(|&index| tab.rows.get(index).is_some_and(&predicate))
-}
-
-/// Per-tick refresh for `flex-bt`: re-probes controller and device states in place.
+/// Per-tick refresh for `flex-bt`: re-probes controller and device states.
+///
+/// OPT-6: skips unless a `bt` tab is active (throttled to 5 s in
+/// [`providers::tick_hook`], so idle ticks cost no `bluetoothctl`/`wpctl`
+/// spawns). OPT-9: reuses row allocations in place with a single
+/// focus-restore pass.
 pub fn refresh(menu: &mut Menu) {
-    let previous = menu
+    let active = menu
         .app
-        .focused_row()
-        .map(|row| (row.id.clone(), row.label.clone()));
+        .active_tab()
+        .is_some_and(|tab| tab.name == TAB_DEVICES || tab.name == TAB_ADAPTERS);
+    if !active {
+        return;
+    }
+    let previous = menu.app.focused_row().map(|row| row.id.clone());
 
-    let show_out = center::snapshot(BT_SHOW_FILE_ENV, "bluetoothctl", &["show"]);
+    let show_out = super::snapshot(BT_SHOW_FILE_ENV, "bluetoothctl", &["show"]);
     let adapter = show_out.as_deref().and_then(parse_controller);
-    let devices_out = center::snapshot(BT_DEVICES_FILE_ENV, "bluetoothctl", &["devices"]);
+    let devices_out = super::snapshot(BT_DEVICES_FILE_ENV, "bluetoothctl", &["devices"]);
     let sink_status = bt_default_sink_snapshot();
 
-    if let Some(tab) = menu.app.tabs.get_mut(0) {
-        if tab.name == TAB_DEVICES {
-            let fresh = devices_tab_from(
-                adapter.as_ref(),
-                devices_out.as_deref(),
-                &bt_info_snapshot,
-                sink_status.as_deref(),
-            );
-            tab.rows = fresh.rows;
-        }
+    if let Some(tab) = menu.app.tabs.iter_mut().find(|tab| tab.name == TAB_DEVICES) {
+        let fresh = devices_tab_from(
+            adapter.as_ref(),
+            devices_out.as_deref(),
+            &bt_info_snapshot,
+            sink_status.as_deref(),
+        );
+        super::sync_rows_in_place(&mut tab.rows, fresh.rows);
     }
 
-    if let Some(tab) = menu.app.tabs.get_mut(1) {
-        if tab.name == TAB_ADAPTERS {
-            let fresh = adapters_tab_from(adapter.as_ref());
-            tab.rows = fresh.rows;
-        }
+    if let Some(tab) = menu
+        .app
+        .tabs
+        .iter_mut()
+        .find(|tab| tab.name == TAB_ADAPTERS)
+    {
+        let fresh = adapters_tab_from(adapter.as_ref());
+        super::sync_rows_in_place(&mut tab.rows, fresh.rows);
     }
 
-    if let Some((id, label)) = previous {
-        if let Some(position) = visible_position(menu, |row| row.id == id && row.label == label)
-            .or_else(|| visible_position(menu, |row| row.id == id))
-        {
-            if let Some(state) = menu.app.active_tab_mut().map(|tab| &mut tab.state) {
-                state.focus = position;
-            }
-        }
-    }
-    menu.app.clamp_focus();
+    super::restore_focus(menu, previous);
 }
 
 #[cfg(test)]

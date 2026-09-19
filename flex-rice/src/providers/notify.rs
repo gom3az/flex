@@ -9,7 +9,7 @@
 //! - Smart entity extractors (1-click copy OTP, URLs, hex colors)
 //! - Per-app mute rules and Focus/DND timers
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -73,11 +73,81 @@ fn now_secs() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
+/// OPT-8 entity cache keyed by `(notification id, timestamp)`: notification
+/// text is immutable for a given `(id, timestamp)`, so per-tick row rebuilds
+/// reuse the extracted entities instead of re-scanning strings.
+type EntityCache = Mutex<HashMap<(u32, u64), Vec<ExtractedEntity>>>;
+fn entity_cache() -> &'static EntityCache {
+    static CACHE: OnceLock<EntityCache> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Cached [`notify::extract_entities`] for one notification.
+fn cached_entities(item: &NotificationItem) -> Vec<ExtractedEntity> {
+    let key = (item.id, item.timestamp);
+    if let Ok(guard) = entity_cache().lock() {
+        if let Some(hit) = guard.get(&key) {
+            return hit.clone();
+        }
+    }
+    let entities = notify::extract_entities(&format!("{} {}", item.summary, item.body));
+    if let Ok(mut guard) = entity_cache().lock() {
+        if guard.len() > 1024 {
+            guard.clear();
+        }
+        guard.insert(key, entities.clone());
+    }
+    entities
+}
+
+/// OPT-8 relative-time cache: recomputed only on minute rollover.
+/// Keyed by `(timestamp, age_minutes)` so a cached entry is exact for its
+/// whole minute of age; diffs under two minutes bypass the cache so the
+/// `Just Now` → `1m ago` transition stays exact.
+fn rel_time_cache() -> &'static Mutex<HashMap<(u64, u64), String>> {
+    static CACHE: OnceLock<Mutex<HashMap<(u64, u64), String>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Cached [`notify::format_relative_time`].
+fn cached_rel_time(timestamp: u64, now: u64) -> String {
+    let age = now.saturating_sub(timestamp);
+    if age < 120 {
+        return notify::format_relative_time(timestamp, now);
+    }
+    let key = (timestamp, age / 60);
+    if let Ok(guard) = rel_time_cache().lock() {
+        if let Some(hit) = guard.get(&key) {
+            return hit.clone();
+        }
+    }
+    let value = notify::format_relative_time(timestamp, now);
+    if let Ok(mut guard) = rel_time_cache().lock() {
+        if guard.len() > 2048 {
+            guard.clear();
+        }
+        guard.insert(key, value.clone());
+    }
+    value
+}
+
+/// OPT-8 byte-level pre-check for the three system-app names that never get
+/// an "Open App" target. Returns true for `system`/`packagekit`/`wiremix`
+/// in any ASCII case without allocating.
+fn is_system_app_name(name: &str) -> bool {
+    if name.len() > "packagekit".len() {
+        return false;
+    }
+    name.eq_ignore_ascii_case("system")
+        || name.eq_ignore_ascii_case("packagekit")
+        || name.eq_ignore_ascii_case("wiremix")
+}
+
 /// Helper to construct a notification Row with body text preview, graphic image preview, and actions.
 #[allow(clippy::too_many_lines)]
 fn notification_row_from(item: &NotificationItem, now: u64, _is_child: bool) -> Row {
-    let rel_time = notify::format_relative_time(item.timestamp, now);
-    let entities = notify::extract_entities(&format!("{} {}", item.summary, item.body));
+    let rel_time = cached_rel_time(item.timestamp, now);
+    let entities = cached_entities(item);
 
     let mut targets = Vec::new();
 
@@ -128,13 +198,11 @@ fn notification_row_from(item: &NotificationItem, now: u64, _is_child: bool) -> 
     }
 
     // 2. Open desktop application if non-system app
+    // OPT-8: byte-level length + first-byte pre-check before the
+    // `to_lowercase` allocation; system-app names are short ASCII.
     let clean_app = item.app_name.trim();
-    let lower_app = clean_app.to_lowercase();
-    if !clean_app.is_empty()
-        && lower_app != "system"
-        && lower_app != "packagekit"
-        && lower_app != "wiremix"
-    {
+    let is_system_app = clean_app.is_empty() || is_system_app_name(clean_app);
+    if !is_system_app {
         targets.push(Target::new(
             RowId::new(format!("open_app:{clean_app}")),
             format!("Open App ({clean_app})"),
@@ -219,8 +287,8 @@ fn grouped_parent_row_from(
     expanded: bool,
 ) -> Row {
     let latest = items[0];
-    let rel_time = notify::format_relative_time(latest.timestamp, now);
-    let entities = notify::extract_entities(&format!("{} {}", latest.summary, latest.body));
+    let rel_time = cached_rel_time(latest.timestamp, now);
+    let entities = cached_entities(latest);
 
     let mut targets = Vec::new();
 
@@ -281,14 +349,9 @@ fn grouped_parent_row_from(
         }
     }
 
-    // 3. Open desktop application
+    // 3. Open desktop application (OPT-8 byte-level pre-check, see above).
     let clean_app = app_name.trim();
-    let lower_app = clean_app.to_lowercase();
-    if !clean_app.is_empty()
-        && lower_app != "system"
-        && lower_app != "packagekit"
-        && lower_app != "wiremix"
-    {
+    if !clean_app.is_empty() && !is_system_app_name(clean_app) {
         targets.push(Target::new(
             RowId::new(format!("open_app:{clean_app}")),
             format!("Open App ({clean_app})"),
@@ -629,7 +692,7 @@ pub fn channels_tab_from(state: &NotifyState, now: u64) -> Tab {
 
         let meta = latest.map_or_else(
             || String::from("idle"),
-            |l| notify::format_relative_time(l.timestamp, now),
+            |l| cached_rel_time(l.timestamp, now),
         );
 
         let expanded = is_thread_expanded(app);
@@ -778,7 +841,7 @@ pub fn history_tab_from(state: &NotifyState, now: u64) -> Tab {
     dismissed_items.sort_by_key(|n| std::cmp::Reverse(n.timestamp));
 
     for item in dismissed_items.iter().take(30) {
-        let rel_time = notify::format_relative_time(item.timestamp, now);
+        let rel_time = cached_rel_time(item.timestamp, now);
         let targets = vec![
             Target::new(
                 RowId::new(format!("restore:{}", item.id)),
@@ -844,19 +907,25 @@ pub fn menu() -> Menu {
 }
 
 /// In-place tick hook for background updates.
+///
+/// OPT-6: throttled to 2 s in [`crate::providers::tick_hook`] so the disk
+/// read plus `playerctl`/`wpctl` probes do not run every second. OPT-9:
+/// reuses row allocations in place (`mem::replace` + diff) and keeps
+/// focus/scroll stable per tab.
 pub fn refresh(menu: &mut Menu) {
     let mut state = notify::load_state(None);
     notify::probe_quick_controls(&mut state.controls);
     let now = now_secs();
 
+    let focused_id = menu.app.focused_row().map(|row| row.id.clone());
     let new_menu = menu_from(&state, now);
     for (i, new_tab) in new_menu.app.tabs.into_iter().enumerate() {
         if let Some(tab) = menu.app.tabs.get_mut(i) {
-            let old_focus = tab.state.focus;
-            tab.rows = new_tab.rows;
-            tab.state.focus = old_focus.min(tab.rows.len().saturating_sub(1));
+            crate::providers::sync_rows_in_place(&mut tab.rows, new_tab.rows);
+            tab.state.focus = tab.state.focus.min(tab.rows.len().saturating_sub(1));
         }
     }
+    crate::providers::restore_focus(menu, focused_id);
 }
 
 /// Report on execution outcome.

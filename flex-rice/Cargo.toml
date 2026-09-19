@@ -39,10 +39,6 @@ name = "flex-clip"
 path = "src/bin/flex-clip.rs"
 
 [[bin]]
-name = "flex-center"
-path = "src/bin/flex-center.rs"
-
-[[bin]]
 name = "flex-wallpaper"
 path = "src/bin/flex-wallpaper.rs"
 
@@ -86,9 +82,9 @@ serde_json.workspace = true
 unicode-width.workspace = true
 signal-hook.workspace = true
 zbus = { version = "5.19.0", default-features = false, features = ["async-io", "blocking-api"] }
-tokio = { version = "1.53.1", features = ["rt", "rt-multi-thread", "macros", "process", "sync"] }
+tokio = { version = "1.53.1", features = ["rt", "macros", "sync"] }
 tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "std"] }
 
 [lints]
 workspace = true

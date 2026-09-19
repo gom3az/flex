@@ -19,6 +19,8 @@
 //! API: measure a label once (e.g. when rows are built), then truncate per
 //! frame without re-scanning.
 
+use std::borrow::Cow;
+
 use unicode_width::UnicodeWidthChar;
 
 /// Ellipsis appended by [`truncate_exact`] (`U+2026`, width 1).
@@ -91,41 +93,49 @@ pub struct Measured {
 ///
 /// Byte ranges in [`Measured::clusters`] always tile the source string, so
 /// truncating at a cluster boundary never splits a UTF-8 sequence.
+///
+/// The scan is allocation-free (streaming `char_indices` with a cloned
+/// lookahead for `ZWJ` pairs); only [`Measured::clusters`] grows.
+///
+/// # Panics
+///
+/// Never panics on valid `&str` input: the two internal `expect`s only fire
+/// when a peeked/probed `char` vanishes from the same iterator, which is
+/// impossible without concurrent mutation (and `&str` is immutable).
 #[must_use]
 pub fn measure(text: &str) -> Measured {
-    let tokens: Vec<(usize, usize, char)> = text
-        .char_indices()
-        .map(|(start, c)| (start, start + c.len_utf8(), c))
-        .collect();
     let mut out = Measured::default();
-    if tokens.is_empty() {
-        return out;
-    }
-    let mut head = 0;
-    while head < tokens.len() {
+    let mut chars = text.char_indices().peekable();
+    while let Some((start, head)) = chars.next() {
+        let mut end = start + head.len_utf8();
+        let mut joined = false;
         // Extend over `ZWJ non-ZWJ` pairs: the ZWJ must have a partner on
-        // both sides to join (lone ZWJ stays a zero-width cluster).
-        let mut tail = head;
-        while tail + 2 < tokens.len() && tokens[tail + 1].2 == ZWJ && tokens[tail + 2].2 != ZWJ {
-            tail += 2;
+        // both sides to join (lone ZWJ stays a zero-width cluster). The
+        // probe clones the iterator state (`CharIndices` is `Clone`, no
+        // allocation) so a failed pair costs nothing.
+        while chars.peek().is_some_and(|&(_, c)| c == ZWJ) {
+            let mut probe = chars.clone();
+            probe.next();
+            let pair = probe.next().is_some_and(|(_, c)| c != ZWJ);
+            if !pair {
+                break;
+            }
+            let (_, zwj) = chars.next().expect("peeked ZWJ");
+            debug_assert_eq!(zwj, ZWJ);
+            let (next_start, next) = chars.next().expect("probed pair tail");
+            end = next_start + next.len_utf8();
+            joined = true;
         }
-        let joined = tail > head;
-        let width = if joined {
-            2
-        } else {
-            tokens[head..=tail]
-                .iter()
-                .map(|&(_, _, c)| char_width(c))
-                .sum()
-        };
+        // A non-joined cluster is exactly one char (extension only happens
+        // via pairs above), so its width is a single [`char_width`].
+        let width = if joined { 2 } else { char_width(head) };
         out.width += width;
         out.clusters.push(Cluster {
-            start: tokens[head].0,
-            end: tokens[tail].1,
+            start,
+            end,
             width,
             joined,
         });
-        head = tail + 1;
     }
     out
 }
@@ -202,6 +212,55 @@ pub fn truncate_measured(label: &str, measured: &Measured, avail: usize) -> Stri
     out.push(ELLIPSIS);
     debug_assert!(str_width(&out) <= avail);
     out
+}
+
+/// [`truncate_measured`] without the fit-case allocation.
+///
+/// Returns a borrow when the label already fits (`width <= avail`), else an
+/// owned truncated string. Draw paths render borrowed spans through this so
+/// fitting labels cost nothing per frame.
+///
+/// # Panics
+///
+/// Panics when `measured` was not built from `label` (the `assert_eq!`
+/// pins the OPT-3 cache contract: byte ranges must tile `label.len()`).
+#[must_use]
+pub fn truncate_measured_cow<'a>(
+    label: &'a str,
+    measured: &Measured,
+    avail: usize,
+) -> Cow<'a, str> {
+    assert_eq!(
+        measured.clusters.last().map_or(0, |c| c.end),
+        label.len(),
+        "Measured does not match label"
+    );
+    if measured.width <= avail {
+        return Cow::Borrowed(label);
+    }
+    Cow::Owned(truncate_measured(label, measured, avail))
+}
+
+/// Sanitized text bundled with its own [`measure`] result.
+///
+/// [`sanitize`] preserves widths exactly, so measuring the sanitized text
+/// agrees with measuring the raw label while the byte ranges index the
+/// string the draw paths actually render. Build once per content change,
+/// then truncate per frame with [`truncate_measured`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Sanitized {
+    /// [`sanitize`] output (what the draw paths render).
+    pub text: String,
+    /// [`measure`] over [`Sanitized::text`].
+    pub measured: Measured,
+}
+
+/// [`sanitize`] + [`measure`] in one pass over the input.
+#[must_use]
+pub fn sanitize_measured(raw: &str) -> Sanitized {
+    let text = sanitize(raw);
+    let measured = measure(&text);
+    Sanitized { text, measured }
 }
 
 #[cfg(test)]

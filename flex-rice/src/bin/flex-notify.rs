@@ -371,7 +371,7 @@ async fn run() -> anyhow::Result<()> {
         }
 
         loop {
-            let menu = runner::build_menu(Provider::Notify, style).await?;
+            let menu = runner::build_menu(Provider::Notify, style)?;
             match flex_core::run::run_capture(menu).await? {
                 Outcome::Chosen {
                     action_id, label, ..

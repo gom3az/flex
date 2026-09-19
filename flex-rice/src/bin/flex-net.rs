@@ -101,7 +101,7 @@ async fn run() -> anyhow::Result<()> {
 
         let mut active_tab = 0;
         loop {
-            let mut menu = runner::build_menu(Provider::Net, style).await?;
+            let mut menu = runner::build_menu(Provider::Net, style)?;
             if active_tab < menu.app.tabs.len() {
                 menu.app.switch_tab(active_tab);
             }
