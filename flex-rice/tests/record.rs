@@ -93,11 +93,17 @@ fn start_spawns_the_recorder_and_registers_it() {
     );
 
     let rec = dir.join("rec.log");
+    // Poll for the full argv, not just the file: `> rec.log` truncates at
+    // open, so a reader can observe a partially-written log under load.
+    let expected_count = 14;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while !rec.exists() && std::time::Instant::now() < deadline {
+    let logged = loop {
+        let logged = std::fs::read_to_string(&rec).unwrap_or_default();
+        if logged.lines().count() >= expected_count || std::time::Instant::now() >= deadline {
+            break logged;
+        }
         std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    let logged = std::fs::read_to_string(&rec).expect("recorder log");
+    };
     assert_eq!(
         logged.lines().collect::<Vec<_>>(),
         vec![
