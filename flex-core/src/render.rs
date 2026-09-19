@@ -135,7 +135,7 @@ pub const FILTER_PROMPT: char = '›';
 /// Flex extension: the filter prompt glyph as a renderable span (`›`).
 pub const FILTER_PROMPT_STR: &str = "›";
 /// Placeholder shown on the filter line when no filter is typed.
-pub const FILTER_EMPTY_TEXT: &str = "filter…";
+pub const FILTER_EMPTY_TEXT: &str = "Search";
 /// Upstream's 3-cell ASCII ellipsis area between a clipped title and target.
 pub const TITLE_ELLIPSES: &str = "...";
 /// Upstream volume-label replacement while muted (`node_widget.rs:421-423`).
@@ -366,6 +366,9 @@ struct FrameCtx {
 struct FrameLayout {
     /// Rows owned by the list (and therefore by the preview pane).
     list_h: u16,
+    /// Rows reserved above the list for top chrome: 3 on filterable
+    /// tabs (top margin + search line + separator), 0 otherwise.
+    chrome_top: u16,
     /// Bare-rows tab: no chrome at all, the list owns the frame.
     bare: bool,
     /// Tab shows a filter line (and the caret).
@@ -382,8 +385,10 @@ fn frame_layout(area: Rect, menu: &Menu) -> FrameLayout {
     let gauge_on = !bare && menu.gauge.is_some();
     let has_tabs = menu.app.tabs.len() > 1;
 
-    // Bare tabs (flex extension) draw no chrome at all unless there are multiple
-    // tabs to switch between (where the tab bar must remain visible).
+    // Top chrome: top margin (1) + search line (1) + separator (1) = 3 rows on filterable tabs
+    let chrome_top: u16 = if filterable { 3 } else { 0 };
+
+    // Bottom chrome: tab bar (+ gauge if present), no hint line
     let chrome_bottom: u16 = if bare {
         if has_tabs {
             TAB_BAR_HEIGHT
@@ -391,16 +396,15 @@ fn frame_layout(area: Rect, menu: &Menu) -> FrameLayout {
             0
         }
     } else if gauge_on {
-        3 + TAB_BAR_HEIGHT
-    } else if filterable {
-        2 + TAB_BAR_HEIGHT
-    } else {
         1 + TAB_BAR_HEIGHT
+    } else {
+        TAB_BAR_HEIGHT
     };
 
-    let list_h = usize::from(area.height).saturating_sub(usize::from(chrome_bottom));
+    let list_h = usize::from(area.height).saturating_sub(usize::from(chrome_top + chrome_bottom));
     FrameLayout {
         list_h: u16::try_from(list_h).unwrap_or(u16::MAX),
+        chrome_top,
         bare,
         filterable,
         gauge_on,
@@ -419,7 +423,14 @@ pub fn preview_area(area: Rect, menu: &Menu) -> Option<Rect> {
     if area.width == 0 || area.height == 0 {
         return None;
     }
-    preview::pane(area, frame_layout(area, menu).list_h, menu.preview)
+    let layout = frame_layout(area, menu);
+    let list_area = Rect::new(
+        area.x,
+        area.y + layout.chrome_top,
+        area.width,
+        layout.list_h,
+    );
+    preview::pane(list_area, layout.list_h, menu.preview)
 }
 
 pub fn render(frame: &mut Frame, menu: &mut Menu) {
@@ -433,6 +444,7 @@ pub fn render(frame: &mut Frame, menu: &mut Menu) {
 
     let FrameLayout {
         list_h,
+        chrome_top,
         bare,
         filterable,
         gauge_on,
@@ -456,13 +468,14 @@ pub fn render(frame: &mut Frame, menu: &mut Menu) {
             .and_then(|&index| tab.rows.get(index))
             .is_some_and(|row| row.preview_image.is_some())
     });
-    let pane = preview::pane(area, list_h, menu.preview && has_image);
+    let list_area = Rect::new(area.x, area.y + chrome_top, area.width, list_h);
+    let pane = preview::pane(list_area, list_h, menu.preview && has_image);
     let list_w = match pane {
         // One gutter column between the rows and the image.
-        Some(pane) => pane.x.saturating_sub(area.x).saturating_sub(1),
+        Some(pane) => pane.x.saturating_sub(list_area.x).saturating_sub(1),
         None => area.width,
     };
-    let list_area = Rect::new(area.x, area.y, list_w, list_h);
+    let list_area = Rect::new(list_area.x, list_area.y, list_w, list_h);
 
     // Viewport sizing (upstream `ObjectList::visible_count`,
     // `object_list.rs:246-256`): entry units, not visual rows.
@@ -485,36 +498,26 @@ pub fn render(frame: &mut Frame, menu: &mut Menu) {
     };
 
     let buf = frame.buffer_mut();
+
+    // Draw top chrome on filterable tabs: top margin (row 0), filter line (row 1), separator (row 2)
+    if filterable {
+        if height >= 3 {
+            draw_filter(buf, area.x, area.y + 1, width_cells, menu, &ctx.visible);
+            draw_separator(buf, area.x, area.y + 2, width_cells, menu);
+        } else if height >= 1 {
+            draw_filter(buf, area.x, area.y, width_cells, menu, &ctx.visible);
+        }
+    }
+
     draw_list(buf, list_area, menu, &ctx);
-    if !bare {
-        if gauge_on && height >= 4 {
-            draw_gauge(
-                buf,
-                area.x,
-                area.y + area.height - 3 - TAB_BAR_HEIGHT,
-                width_cells,
-                menu,
-            );
-        }
-        if height >= 2 {
-            if filterable {
-                draw_filter(
-                    buf,
-                    area.x,
-                    area.y + area.height - 2 - TAB_BAR_HEIGHT,
-                    width_cells,
-                    menu,
-                    &ctx.visible,
-                );
-            }
-            draw_hints(
-                buf,
-                area.x,
-                area.y + area.height - 1 - TAB_BAR_HEIGHT,
-                width_cells,
-                menu,
-            );
-        }
+    if !bare && gauge_on && height >= 2 {
+        draw_gauge(
+            buf,
+            area.x,
+            area.y + area.height - 1 - TAB_BAR_HEIGHT,
+            width_cells,
+            menu,
+        );
     }
     if !bare || has_tabs {
         draw_tab_bar(
@@ -532,7 +535,7 @@ pub fn render(frame: &mut Frame, menu: &mut Menu) {
         draw_help(buf, list_area, menu);
     }
 
-    place_cursor(frame, area, menu, bare || !filterable);
+    place_cursor(frame, area, menu, !filterable);
 }
 
 /// Tab bar: `[Active] Inactive ` with upstream widths (`app.rs:757-790`).
@@ -1445,8 +1448,19 @@ fn draw_filter(buf: &mut Buffer, ox: u16, y: u16, width: usize, menu: &Menu, vis
     let area = Rect::new(ox, y, u16::try_from(width).unwrap_or(u16::MAX), 1);
     let theme = &menu.theme;
 
-    Span::styled(FILTER_PROMPT_STR, theme.filter_prompt).render(area, buf);
-    let prompt_area = Rect::new(ox.saturating_add(2), y, area.width.saturating_sub(2), 1);
+    // Layout A: 2-cell left padding aligns `›` at col 2 and search text at col 4
+    // (matching list item titles at col 4); 2-cell right margin for `{pos}/{total}`.
+    let pad = if area.width >= 8 { 2u16 } else { 0u16 };
+
+    let prompt_glyph_area = Rect::new(ox.saturating_add(pad), y, 1, 1);
+    Span::styled(FILTER_PROMPT_STR, theme.filter_prompt).render(prompt_glyph_area, buf);
+    let text_ox = ox.saturating_add(pad).saturating_add(2);
+    let prompt_area = Rect::new(
+        text_ox,
+        y,
+        area.width.saturating_sub(pad.saturating_mul(2) + 2),
+        1,
+    );
     if prompt_area.width == 0 {
         return;
     }
@@ -1482,34 +1496,38 @@ fn draw_filter(buf: &mut Buffer, ox: u16, y: u16, width: usize, menu: &Menu, vis
         let _ = write!(scratch, "{pos}/{total}");
         let right_w = u16::try_from(scratch.len()).unwrap_or(u16::MAX);
         if right_w < prompt_area.width {
-            let right_area = Rect::new(area.right().saturating_sub(right_w), y, right_w, 1);
+            let right_area = Rect::new(
+                area.right().saturating_sub(right_w.saturating_add(pad)),
+                y,
+                right_w,
+                1,
+            );
             Line::from(Span::styled(scratch.as_str(), theme.hint)).render(right_area, buf);
         }
     });
 }
 
-/// Flex extension: the hint line under the list.
-fn draw_hints(buf: &mut Buffer, ox: u16, y: u16, width: usize, menu: &Menu) {
+/// Separator line below the filter line: horizontal rule in `theme.hint` style.
+fn draw_separator(buf: &mut Buffer, ox: u16, y: u16, width: usize, menu: &Menu) {
     if width == 0 {
         return;
     }
-    let pending = menu.app.active_state().is_some_and(|s| s.confirm_pending);
-    let text = if pending {
-        "Delete/Enter deletes · esc cancels"
-    } else if menu.app.is_armed() {
-        "Enter again to confirm · esc disarms"
-    } else if menu.app.dropdown().is_some() {
-        "↑↓ choose target · enter applies · esc closes"
+    let pad = if width >= 8 { 2u16 } else { 0u16 };
+    let sep_x = ox.saturating_add(pad);
+    let sep_w = u16::try_from(width)
+        .unwrap_or(u16::MAX)
+        .saturating_sub(pad.saturating_mul(2));
+    let glyph = if menu.char_set.selector_top == "-" {
+        "-"
     } else {
-        "↑↓ navigate · enter select · esc cancel"
+        "─"
     };
-    let area = Rect::new(ox, y, u16::try_from(width).unwrap_or(u16::MAX), 1);
-    // The hint texts are static and clean; one allocation-free measure plus
-    // a borrow-when-fitting truncate replaces `truncate_exact` (OPT-3/4).
-    let measured = width::measure(text);
-    let truncated = width::truncate_measured_cow(text, &measured, width);
-    let text: &str = truncated.as_ref();
-    Line::from(Span::styled(text, menu.theme.hint)).render(area, buf);
+    for x in sep_x..sep_x.saturating_add(sep_w) {
+        if let Some(cell) = buf.cell_mut((x, y)) {
+            cell.set_symbol(glyph);
+            cell.set_style(menu.theme.hint);
+        }
+    }
 }
 
 /// Flex extension: the gauge row.
@@ -1600,23 +1618,23 @@ fn place_cursor(frame: &mut Frame, area: Rect, menu: &Menu, hidden: bool) {
 /// event loop re-parks it here so the caret never appears inside the pane.
 #[must_use]
 pub fn cursor_position(area: Rect, menu: &Menu) -> Option<(u16, u16)> {
+    let layout = frame_layout(area, menu);
+    if layout.chrome_top == 0 {
+        return None;
+    }
+    let pad = if area.width >= 8 { 2u16 } else { 0u16 };
     let filter_w = menu
         .app
         .active_tab()
         .map_or(0, |tab| width::str_width(&tab.state.filter));
-    let tab_bar_h = TAB_BAR_HEIGHT;
-    let hints_h = 1u16;
-    let filter_h = 1u16;
-
-    // Saturating: degenerate frames (1x1) must not underflow.
-    let y = area
-        .y
-        .saturating_add(area.height)
-        .saturating_sub(tab_bar_h)
-        .saturating_sub(hints_h)
-        .saturating_sub(filter_h);
+    let y = if layout.chrome_top >= 3 {
+        area.y.saturating_add(1)
+    } else {
+        area.y
+    };
     let x = area
         .x
+        .saturating_add(pad)
         .saturating_add(2)
         .saturating_add(u16::try_from(filter_w).unwrap_or(0));
 

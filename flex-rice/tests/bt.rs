@@ -234,19 +234,19 @@ fn golden_80x24_rendering_wiremix_detail() {
     assert!(tab_bar.contains("[Devices]"));
     assert!(tab_bar.contains("Adapters"));
 
-    // Entry 0 header (y = 1): "Turn Bluetooth Off"
-    let e0_header = buffer_line(&buf, 1, 80);
+    // Entry 0 header (y = 4): "Turn Bluetooth Off" (margin at y=0, filter at y=1, separator at y=2, indicator at y=3)
+    let e0_header = buffer_line(&buf, 4, 80);
     assert!(e0_header.contains("░"));
     assert!(e0_header.contains("Turn Bluetooth Off"));
 
-    // Pitch for 3-line nodes with detail: Entry 1 header is at y = 6 (1 + 5)
-    let e1_header = buffer_line(&buf, 6, 80);
+    // Pitch for 3-line nodes with detail: Entry 1 header is at y = 9 (4 + 5)
+    let e1_header = buffer_line(&buf, 9, 80);
     assert!(e1_header.contains("◇"));
     assert!(e1_header.contains("WH-1000XM4"));
     assert!(e1_header.contains("Disconnect"));
 
-    // Detail line for entry 1 (y = 8): Battery percentage bar
-    let e1_detail = buffer_line(&buf, 8, 80);
+    // Detail line for entry 1 (y = 11): Battery percentage bar
+    let e1_detail = buffer_line(&buf, 11, 80);
     assert!(e1_detail.contains("85%"));
     assert!(e1_detail.contains("━"));
 

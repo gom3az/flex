@@ -70,8 +70,8 @@ fn entry_pitch_matches_the_node_metrics() {
     );
     assert_eq!(
         entry_headers(&buf, "Entry "),
-        vec![1, 3, 5],
-        "compact pitch 2"
+        vec![4, 6, 8],
+        "compact pitch 2 (filter chrome at y=0..3, indicator at y=3)"
     );
     assert_eq!(
         render::node_metrics(&menu).pitch(),
@@ -88,8 +88,8 @@ fn entry_pitch_matches_the_node_metrics() {
         render::NodeMetrics::UPSTREAM,
         "one detail-bearing row switches the tab to upstream metrics"
     );
-    assert_eq!(entry_headers(&buf, "Volume 1"), vec![1], "first row at y=1");
-    assert_eq!(entry_headers(&buf, "Entry 2"), vec![6], "upstream pitch 5");
+    assert_eq!(entry_headers(&buf, "Volume 1"), vec![4], "first row at y=4");
+    assert_eq!(entry_headers(&buf, "Entry 2"), vec![9], "upstream pitch 5");
     assert_eq!(
         render::node_metrics(&menu).pitch(),
         render::NODE_HEIGHT + render::NODE_SPACING
@@ -112,9 +112,9 @@ fn viewport_counts_entries() {
     let mut menu = menu_with(rows);
     let _ = draw(&mut menu, 80, 24);
     let pitch = usize::from(render::node_metrics(&menu).pitch());
-    // 80x24: list height 21 (filter + hints + tab bar chrome) minus 2
-    // indicator rows = 19.
-    let visible = 19 / pitch;
+    // 80x24: list height 20 (filter top chrome 3 + tab bar chrome 1) minus 2
+    // indicator rows = 18.
+    let visible = 18 / pitch;
     assert!(visible > 1, "sanity: {visible} entries fit");
 
     menu.app.active_tab_mut().expect("tab").state.focus = visible;
@@ -143,7 +143,7 @@ fn list_more_only_when_scrollable() {
         Row::new(RowId::new("b"), "bravo"),
     ]);
     let buf = draw(&mut short, 80, 24);
-    let all: String = (0..21).map(|y| row_text(&buf, y, 80)).collect();
+    let all: String = (0..24).map(|y| row_text(&buf, y, 80)).collect();
     assert!(!all.contains("•••"), "two rows need no indicator");
 
     let mut long = menu_with(
@@ -152,8 +152,35 @@ fn list_more_only_when_scrollable() {
             .collect(),
     );
     let buf = draw(&mut long, 80, 24);
-    let all: String = (0..21).map(|y| row_text(&buf, y, 80)).collect();
+    let all: String = (0..24).map(|y| row_text(&buf, y, 80)).collect();
     assert!(all.contains("•••"), "20 rows overflow the viewport");
+}
+
+#[test]
+fn filter_line_renders_at_top_for_filterable_tab_only() {
+    // Filterable tab renders top margin at y = 0, `› Search` at y = 1, separator at y = 2
+    let mut filterable_menu = menu_with(vec![Row::new(RowId::new("a"), "alpha")]);
+    let buf = draw(&mut filterable_menu, 80, 24);
+    let row0 = row_text(&buf, 0, 80);
+    assert_eq!(row0.trim(), "", "top margin at y=0 is empty");
+    let filter_line = row_text(&buf, 1, 80);
+    assert!(
+        filter_line.contains("›") && filter_line.contains("Search"),
+        "filterable tab draws `› Search` at y=1: {filter_line:?}"
+    );
+    let sep_line = row_text(&buf, 2, 80);
+    assert!(sep_line.contains("─"), "separator at y=2: {sep_line:?}");
+
+    // Non-filterable tab renders no `›` prompt anywhere
+    let mut fixed_tab = Tab::with_rows("fixed", vec![Row::new(RowId::new("a"), "alpha")]);
+    fixed_tab.filterable = false;
+    let mut fixed_menu = Menu::new("fixed", vec![fixed_tab]);
+    let buf = draw(&mut fixed_menu, 80, 24);
+    let all: String = (0..24).map(|y| row_text(&buf, y, 80)).collect();
+    assert!(
+        !all.contains('›'),
+        "non-filterable tab draws no `›` prompt anywhere"
+    );
 }
 
 // --- character set --------------------------------------------------------
@@ -179,9 +206,9 @@ fn default_charset_renders_upstream_glyphs() {
     assert_eq!(char_set.dropdown_border, BorderType::Rounded);
 
     let buf = draw(&mut menu, 80, 24);
-    assert_eq!(row_text(&buf, 1, 80).chars().next(), Some('░'));
-    assert_eq!(row_text(&buf, 2, 80).trim_end(), "▒");
-    let detail = row_text(&buf, 3, 80);
+    assert_eq!(row_text(&buf, 4, 80).chars().next(), Some('░'));
+    assert_eq!(row_text(&buf, 5, 80).trim_end(), "▒");
+    let detail = row_text(&buf, 6, 80);
     assert!(detail.contains('━') && detail.contains('╌'));
 }
 
@@ -212,7 +239,7 @@ fn alternate_charsets_match_upstream() {
     let mut menu = menu_with(vec![Row::new(RowId::new("a"), "alpha")]);
     menu.char_set = CharSet::get(CharSetName::ExtraCompat);
     let buf = draw(&mut menu, 80, 24);
-    assert_eq!(row_text(&buf, 1, 80).chars().next(), Some('-'));
+    assert_eq!(row_text(&buf, 4, 80).chars().next(), Some('-'));
 }
 
 // --- theme ----------------------------------------------------------------
@@ -278,7 +305,7 @@ fn volume_and_meter_areas_follow_upstream_splits() {
         .with_peaks(RowPeaks::Stereo(1.0, 0.5));
     let mut menu = menu_with(vec![row.clone()]);
     let buf = draw(&mut menu, 80, 24);
-    let y = 3; // first entry's detail line
+    let y = 6; // first entry's detail line (top margin at y=0, filter at y=1, separator at y=2, indicator at y=3, header at y=4, middle at y=5, detail at y=6)
     let with_peaks = row_text(&buf, y, 80);
     let meter_cells = with_peaks.chars().filter(|c| *c == '▮').count();
     assert!(meter_cells > 0, "meters render: {with_peaks:?}");
@@ -316,14 +343,15 @@ fn volume_bar_uses_the_configured_maximum() {
     );
     let buf = draw(&mut menu, 80, 24);
     let bar_w = 63; // 80-wide frame: see tests/golden.rs for the derivation
-    let filled = row_text(&buf, 3, 80).chars().filter(|c| *c == '━').count();
+                    // Detail line (volume bar) at y=6
+    let filled = row_text(&buf, 6, 80).chars().filter(|c| *c == '━').count();
     let expected = ((0.75_f32.clamp(0.0, 1.5) / 1.5) * bar_w as f32).round() as usize;
     assert_eq!(filled, expected, "75% of a 150% ceiling");
 
     // Raising the ceiling shrinks the fill.
     menu.max_volume_percent = 300.0;
     let buf = draw(&mut menu, 80, 24);
-    let filled_high = row_text(&buf, 3, 80).chars().filter(|c| *c == '━').count();
+    let filled_high = row_text(&buf, 6, 80).chars().filter(|c| *c == '━').count();
     assert!(
         filled_high < filled,
         "a higher ceiling fills less of the bar: {filled_high} < {filled}"
@@ -354,21 +382,22 @@ fn dropdown_geometry_matches_upstream() {
     let longest = width::str_width("Default: Speakers");
     let dropdown_w = u16::try_from(longest + 4).expect("dropdown width fits"); // 21
     let dropdown_h = 3 + 2;
-    // The selected row is the first entry: header row 1, so the dropdown
-    // starts one row above it (y=0) and is right-aligned in the list area.
+    // The selected row is the first entry: header row at y=4, so the dropdown starts one row above it (y=3)
     let x = 80 - dropdown_w;
-    assert_eq!(buf.cell((x, 0)).expect("corner").symbol(), "╭");
+    assert_eq!(buf.cell((x, 3)).expect("corner").symbol(), "╭");
     assert_eq!(
-        buf.cell((80 - 1, dropdown_h - 1)).expect("corner").symbol(),
+        buf.cell((80 - 1, 3 + dropdown_h - 1))
+            .expect("corner")
+            .symbol(),
         "╯"
     );
-    let text = row_text(&buf, 1, 80);
+    let text = row_text(&buf, 4, 80);
     assert!(text.contains("Default: Speakers"), "first item: {text:?}");
     assert!(
         text.contains("> Default: Speakers"),
         "highlight symbol `> `: {text:?}"
     );
-    let selected = buf.cell((x + 2, 1)).expect("highlighted item cell");
+    let selected = buf.cell((x + 2, 4)).expect("highlighted item cell");
     assert_eq!(
         selected.bg,
         Theme::DEFAULT.dropdown_selected.bg.unwrap_or(Color::Reset),
@@ -392,7 +421,7 @@ fn dropdown_scrolls_with_indicators() {
     )]);
     assert!(menu.app.open_dropdown());
     let buf = draw(&mut menu, 80, 24);
-    let all: String = (0..8).map(|y| row_text(&buf, y, 80)).collect();
+    let all: String = (0..12).map(|y| row_text(&buf, y, 80)).collect();
     assert!(all.contains("•••"), "scroll indicator on the border");
 
     // Move the highlight past the visible window: the offset follows.

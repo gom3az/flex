@@ -258,18 +258,17 @@ fn theme_default_view_golden_at_80x24() {
         }
         assert_eq!(total, 80, "row {y} must be exactly 80 cells");
     }
-    // Bare mode: list rows start below the reserved `•••` indicator line
-    // (`LIST_INDICATOR_ROWS`), no tab bar, no filter, no meta.
-    let first_y = flex_core::render::LIST_INDICATOR_ROWS / 2;
+    // With top filter chrome: y=0 margin, y=1 filter, y=2 separator, y=3 indicator, y=4 first entry
+    let first_y = 3 + flex_core::render::LIST_INDICATOR_ROWS / 2;
     assert!(
         row_text(&buf, first_y, 80).starts_with('░'),
-        "row 0 is the first list row"
+        "row 4 is the first list row"
     );
     let mut all = String::new();
     for y in 0..24 {
         all.push_str(&row_text(&buf, y, 80));
     }
-    assert!(!all.contains('›'), "no filter line");
+    assert!(all.contains('›'), "filter line rendered");
     assert!(
         all.contains("catppuccin-mocha"),
         "theme label visible: {all:?}"

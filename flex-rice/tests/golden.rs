@@ -17,11 +17,14 @@ use ratatui::Terminal;
 use flex_core::{render, width, Gauge, Menu, Peaks, Row, RowId, RowPeaks, Tab, Target, Theme};
 use flex_rice::providers::power;
 
-/// First row of the list area: the top `•••` indicator line.
-const LIST_TOP: u16 = render::LIST_INDICATOR_ROWS / 2;
+/// First entry header row for a filterable, non-bare tab:
+/// top margin at y=0, filter at y=1, separator at y=2, top `•••` indicator at y=3, first entry at y=4.
+const LIST_TOP: u16 = 4;
 /// List height at 80x24 for a filterable, non-bare tab:
-/// `24 - (filter + hints + tab bar)`.
-const LIST_H_80X24: u16 = 21;
+/// `24 - (chrome_top + tab bar)` = 24 - 3 - 1 = 20.
+const LIST_H_80X24: u16 = 20;
+/// List area starts at this buffer row (`chrome_top` = 3 for filterable tabs).
+const LIST_AREA_TOP: u16 = 3;
 
 /// On-screen header row of provider-row `index`, from the menu's current
 /// metrics and scroll offset — correct in both node modes.
@@ -170,7 +173,7 @@ fn selected_selector_block_spans_exactly_three_lines() {
     );
 
     // Exactly one `░▒░` block in the selector column.
-    let marks: Vec<(u16, String)> = (0..LIST_H_80X24)
+    let marks: Vec<(u16, String)> = (LIST_AREA_TOP..=LIST_H_80X24)
         .map(|y| (y, col0(&buf, y)))
         .filter(|(_, symbol)| symbol != " ")
         .collect();
@@ -213,7 +216,7 @@ fn compact_nodes_when_no_row_has_detail_data() {
     }
     assert_eq!(col0(&buf, entry_y(&menu, 0)), "░", "single-glyph selector");
     assert_eq!(col0(&buf, entry_y(&menu, 0) + 1), " ");
-    let marks: Vec<(u16, String)> = (0..LIST_H_80X24)
+    let marks: Vec<(u16, String)> = (LIST_AREA_TOP..=LIST_H_80X24)
         .map(|y| (y, col0(&buf, y)))
         .filter(|(_, symbol)| symbol != " ")
         .collect();
@@ -537,11 +540,11 @@ fn list_indicators_mark_hidden_rows() {
 
     // At the top: nothing above, `•••` below.
     assert_eq!(
-        row_text(&buf, 0, 80).trim(),
+        row_text(&buf, LIST_AREA_TOP, 80).trim(),
         "",
         "no top indicator at scroll 0"
     );
-    let footer = row_text(&buf, LIST_H_80X24 - 1, 80);
+    let footer = row_text(&buf, LIST_AREA_TOP + LIST_H_80X24 - 1, 80);
     assert!(footer.contains("•••"), "bottom indicator: {footer:?}");
     let trimmed = footer.trim_end();
     let left_pad = width::str_width(&trimmed[..trimmed.find('•').expect("bullet")]);
@@ -551,7 +554,7 @@ fn list_indicators_mark_hidden_rows() {
         (37..=39).contains(&right_pad),
         "right padding {right_pad} is centered too: {footer:?}"
     );
-    let y = LIST_H_80X24 - 1;
+    let y = LIST_AREA_TOP + LIST_H_80X24 - 1;
     let cell = cell_at(&buf, 40, y);
     assert_eq!(
         cell.fg,
@@ -563,11 +566,11 @@ fn list_indicators_mark_hidden_rows() {
     menu.app.active_tab_mut().expect("tab").state.focus = last;
     let buf = draw(&mut menu, 80, 24);
     assert!(
-        row_text(&buf, 0, 80).contains("•••"),
+        row_text(&buf, LIST_AREA_TOP, 80).contains("•••"),
         "top indicator once scrolled"
     );
     assert_eq!(
-        row_text(&buf, LIST_H_80X24 - 1, 80).trim(),
+        row_text(&buf, LIST_AREA_TOP + LIST_H_80X24 - 1, 80).trim(),
         "",
         "no bottom indicator at the end"
     );
@@ -577,22 +580,22 @@ fn list_indicators_mark_hidden_rows() {
 /// rendered but shows everything that matters.
 #[test]
 fn bottom_indicator_is_suppressed_for_a_partial_last_row() {
-    // 6 rows, focus 4 → scroll 2: rows 2,3,4 visible and row 5 partially.
-    // 12 compact rows with 9 visible: focus 10 → scroll 2, so only row 11 is
-    // below the viewport and its single header line still fits (19 % 2 == 1),
+    // 12 compact rows: with odd rows_area height 19 (at terminal height 25: 25 - 4 = 21, 21 - 2 = 19),
+    // focus 10 → scroll 2, so only row 11 is below the viewport and its single header line fits (19 % 2 == 1),
     // which suppresses the indicator (upstream `object_list.rs:497-511`).
     let mut menu = compact_menu(12);
     menu.app.active_tab_mut().expect("tab").state.focus = 10;
-    let buf = draw(&mut menu, 80, 24);
+    let buf = draw(&mut menu, 80, 25);
     let scroll = menu.app.active_tab().expect("tab").state.scroll;
     assert_eq!(scroll, 2);
+    // Footer row is at LIST_AREA_TOP + list_h - 1 = 3 + 21 - 1 = 23
     assert_eq!(
-        row_text(&buf, LIST_H_80X24 - 1, 80).trim(),
+        row_text(&buf, 23, 80).trim(),
         "",
         "the partially rendered last row hides the indicator"
     );
     assert!(
-        row_text(&buf, 0, 80).contains("•••"),
+        row_text(&buf, LIST_AREA_TOP, 80).contains("•••"),
         "rows above the viewport still show the top indicator"
     );
 }
@@ -722,8 +725,11 @@ fn armed_confirmable_row_at_80x24() {
     let y = entry_y(&menu, 0);
     let text = row_text(&buf, y, 80);
     assert!(text.contains("-- confirm"), "armed confirm text: {text:?}");
-    let hints = row_text(&buf, 22, 80);
-    assert!(hints.contains("Enter again"), "armed hints: {hints:?}");
+    let mut all = String::new();
+    for row in 0..24 {
+        all.push_str(&row_text(&buf, row, 80));
+    }
+    assert!(!all.contains("Enter again"), "bottom hint line is removed");
 }
 
 #[test]
@@ -732,13 +738,13 @@ fn gauge_online_offline_and_mute_at_80x24() {
     menu.gauge = Some(Gauge::new("Volume", 65));
     let buf = draw(&mut menu, 80, 24);
     assert_full_width(&buf);
-    let gauge_line = row_text(&buf, 20, 80);
+    let gauge_line = row_text(&buf, 22, 80);
     assert!(gauge_line.contains("65%"), "gauge value: {gauge_line:?}");
 
     menu.gauge.as_mut().expect("gauge").toggle_mute();
     let buf = draw(&mut menu, 80, 24);
     assert_full_width(&buf);
-    let text = row_text(&buf, 20, 80);
+    let text = row_text(&buf, 22, 80);
     assert!(text.contains("muted"), "mute label: {text:?}");
     assert!(
         !text.contains("65%"),
@@ -749,8 +755,9 @@ fn gauge_online_offline_and_mute_at_80x24() {
     let buf = draw(&mut menu, 80, 24);
     assert_full_width(&buf);
     assert!(
-        row_text(&buf, 20, 80).contains("— offline"),
-        "offline state"
+        row_text(&buf, 22, 80).contains("— offline"),
+        "offline label: {:?}",
+        row_text(&buf, 22, 80)
     );
 }
 
@@ -761,19 +768,24 @@ fn empty_state_is_centered_in_the_list() {
     let buf = draw(&mut menu, 80, 24);
     assert_full_width(&buf);
     let mut found = None;
-    for y in 0..LIST_H_80X24 {
+    for y in LIST_AREA_TOP..=LIST_H_80X24 {
         if row_text(&buf, y, 80).contains("— no matches —") {
             found = Some(y);
         }
     }
     let y = found.expect("empty state renders");
-    assert_eq!(y, LIST_H_80X24 / 2, "empty state sits mid-list");
+    assert_eq!(
+        y,
+        LIST_AREA_TOP + LIST_H_80X24 / 2,
+        "empty state sits mid-list"
+    );
 }
 
 #[test]
 fn bare_rows_mode_has_no_chrome_and_no_indicators() {
     let mut tab = Tab::with_rows("launch", vec![Row::new(RowId::new("id-a"), "alpha")]);
     tab.bare_rows = true;
+    tab.filterable = false;
     let mut menu = flex_rice::menu("launch", vec![tab]);
     let buf = draw(&mut menu, 80, 24);
     assert_full_width(&buf);
@@ -781,12 +793,38 @@ fn bare_rows_mode_has_no_chrome_and_no_indicators() {
     for y in 0..24 {
         all.push_str(&row_text(&buf, y, 80));
     }
-    assert!(!all.contains('›'), "bare mode has no filter line");
+    assert!(
+        !all.contains('›'),
+        "bare non-filterable mode has no filter line"
+    );
     assert!(!all.contains("navigate"), "bare mode has no hints line");
     assert!(!all.contains("•••"), "one row needs no scroll indicator");
     assert!(
-        row_text(&buf, LIST_TOP, 80).starts_with('░'),
+        row_text(&buf, 1, 80).starts_with('░'),
         "row 0 starts with the selector"
+    );
+}
+
+#[test]
+fn bare_filterable_tab_has_top_filter_chrome() {
+    let mut tab = Tab::with_rows("launch", vec![Row::new(RowId::new("id-a"), "alpha")]);
+    tab.bare_rows = true;
+    tab.filterable = true;
+    let mut menu = flex_rice::menu("launch", vec![tab]);
+    let buf = draw(&mut menu, 80, 24);
+    assert_full_width(&buf);
+    let r0 = row_text(&buf, 0, 80);
+    assert_eq!(r0.trim(), "", "row 0 is top margin");
+    let r1 = row_text(&buf, 1, 80);
+    assert!(r1.contains('›'), "top filter line at y=1: {r1:?}");
+    assert!(r1.contains("Search"), "search placeholder at y=1: {r1:?}");
+    assert_eq!(buf.cell((2, 1)).expect("glyph").symbol(), "›");
+    assert_eq!(buf.cell((4, 1)).expect("search start").symbol(), "S");
+    let r2 = row_text(&buf, 2, 80);
+    assert!(r2.contains('─'), "separator at y=2: {r2:?}");
+    assert!(
+        row_text(&buf, 4, 80).starts_with('░'),
+        "first list row starts at y=4"
     );
 }
 
@@ -800,7 +838,7 @@ fn power_tab_has_launch_style_chrome_at_80x24() {
         all.push_str(&row_text(&buf, y, 80));
     }
     assert!(
-        row_text(&buf, LIST_TOP, 80).starts_with('░'),
+        row_text(&buf, 1, 80).starts_with('░'),
         "row 0 starts with the selector"
     );
     assert!(!all.contains('›'), "no filter line");
@@ -824,14 +862,14 @@ fn full_menu_at_125x30() {
     for y in 0..30 {
         all.push_str(&row_text(&buf, y, 125));
     }
-    for token in ["apps", "power", "Volume", "87%", "navigate"] {
+    for token in ["apps", "power", "Volume", "87%"] {
         assert!(all.contains(token), "125x30 contains {token:?}");
     }
     assert!(all.contains(render::HELP_LINES[0]), "help body renders");
-    // Gauge at y = H - 3 - TAB_BAR_HEIGHT = 30 - 3 - 1 = 26
-    assert!(row_text(&buf, 26, 125).contains("87%"), "gauge at H-3-tab");
-    // Filter at y = H - 2 - TAB_BAR_HEIGHT = 30 - 2 - 1 = 27
-    assert!(row_text(&buf, 27, 125).contains('›'), "filter at H-2-tab");
+    // Gauge at y = H - 1 - TAB_BAR_HEIGHT = 30 - 1 - 1 = 28
+    assert!(row_text(&buf, 28, 125).contains("87%"), "gauge at H-1-tab");
+    // Filter at y = 1
+    assert!(row_text(&buf, 1, 125).contains('›'), "filter at y=1");
 }
 
 #[test]

@@ -347,9 +347,30 @@ fn launch_default_view_golden_at_80x24() {
         }
         assert_eq!(total, 80, "row {y} must be exactly 80 cells");
     }
-    // Row 0: selector + Firefox label (bare mode: no filter/hints chrome).
-    // The first list row sits below the reserved `•••` indicator line.
-    let first_y = flex_core::render::LIST_INDICATOR_ROWS / 2;
+    // Row 0: top margin (empty/blank).
+    let r0 = row_text(&buf, 0, 80);
+    assert_eq!(r0.trim(), "", "row 0 is empty top margin: {r0:?}");
+
+    // Row 1: top filter line (Layout A: col 2 prompt glyph, col 4 search text).
+    let r1 = row_text(&buf, 1, 80);
+    assert!(r1.contains('›'), "row 1 has top filter prompt: {r1:?}");
+    assert!(
+        r1.contains("Search"),
+        "row 1 has search placeholder: {r1:?}"
+    );
+    let p_cell = buf.cell((2, 1)).expect("prompt cell at col 2");
+    assert_eq!(p_cell.symbol(), "›", "prompt glyph is at col 2");
+    let s_cell = buf.cell((4, 1)).expect("search start cell at col 4");
+    assert_eq!(s_cell.symbol(), "S", "search placeholder starts at col 4");
+
+    // Row 2: separator line (2-cell padded: col 2..78 has '─').
+    let r2 = row_text(&buf, 2, 80);
+    assert!(r2.contains('─'), "row 2 has separator: {r2:?}");
+    assert_eq!(buf.cell((2, 2)).expect("sep start").symbol(), "─");
+
+    // Row 3: reserved `•••` indicator line.
+    // Row 4: first list row (selector + Firefox label, bare mode: no hints/tab chrome).
+    let first_y = 3 + flex_core::render::LIST_INDICATOR_ROWS / 2;
     let bar = buf.cell((0, first_y)).expect("bar cell");
     assert_eq!(bar.symbol(), "░");
     assert_eq!(
@@ -361,14 +382,14 @@ fn launch_default_view_golden_at_80x24() {
     );
     assert!(
         row_text(&buf, first_y, 80).contains("Firefox"),
-        "row 0 shows Firefox"
+        "row 4 shows Firefox"
     );
     let mut all = String::new();
     for y in 0..24 {
         all.push_str(&row_text(&buf, y, 80));
     }
-    assert!(!all.contains('›'), "bare mode has no filter line");
-    assert!(!all.contains("navigate"), "bare mode has no hints line");
+    assert!(all.contains('›'), "top filter line is present");
+    assert!(!all.contains("navigate"), "no hints line");
 }
 
 // --- FLEX_TEST seed extension -----------------------------------------------------
