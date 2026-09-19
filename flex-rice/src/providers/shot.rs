@@ -6,9 +6,12 @@
 //! - Tab title `Capture`; standard (spec) rows with a `PNG`/`MP4` meta.
 //! - Labels keep their exact bash bytes, including the two-space indent
 //!   on area/window rows and the `🖥` glyph on full-capture rows.
-//! - Row ids are the bash `case` arms (`area-shot`, …, `full-rec-audio`);
+//! - Row ids are the bash `case` arms (`area-shot`, …, `full-rec`);
 //!   the shot executor matches on them after the TUI exits
 //!   (`slurp` needs a clean tty, so capture never runs inside the TUI).
+//!   The retired `*-rec-audio` arms survive as hidden executor aliases
+//!   (audio forced on), so old scripts keep working; new picks go through
+//!   the recording-options submenu (`providers::rec_opt`).
 //!
 //! The library never executes captures; it only selects a row.
 
@@ -31,8 +34,10 @@ pub struct ShotRow {
 }
 
 /// Capture rows in bash `CAP_ROWS` order (mode pick first, then
-/// recordings; region/window/full within each group).
-pub const ROWS: [ShotRow; 7] = [
+/// recordings; region/window/full within each group). Recording rows no
+/// longer split by audio: one row each, with a drill-in submenu for
+/// audio/quality/framerate (see [`crate::providers::rec_opt`]).
+pub const ROWS: [ShotRow; 5] = [
     ShotRow {
         id: "area-shot",
         label: "Area Screenshot",
@@ -54,18 +59,8 @@ pub const ROWS: [ShotRow; 7] = [
         meta: "MP4",
     },
     ShotRow {
-        id: "area-rec-audio",
-        label: "Area Recording + Audio",
-        meta: "MP4",
-    },
-    ShotRow {
         id: "full-rec",
         label: "Full Recording",
-        meta: "MP4",
-    },
-    ShotRow {
-        id: "full-rec-audio",
-        label: "Full Recording + Audio",
         meta: "MP4",
     },
 ];
@@ -96,15 +91,7 @@ mod tests {
         let ids: Vec<&str> = ROWS.iter().map(|row| row.id).collect();
         assert_eq!(
             ids,
-            vec![
-                "area-shot",
-                "full-shot",
-                "win-shot",
-                "area-rec",
-                "area-rec-audio",
-                "full-rec",
-                "full-rec-audio",
-            ]
+            vec!["area-shot", "full-shot", "win-shot", "area-rec", "full-rec",]
         );
     }
 }

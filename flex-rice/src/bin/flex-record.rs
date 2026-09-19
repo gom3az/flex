@@ -2,8 +2,9 @@
 //!
 //! Ports `recording-start.sh`, `recording-status.sh`, and
 //! `recording-stop.sh` so `flex-shot` and Waybar no longer shell out to bash.
-//! `flex-record [-a] [-g GEOM] FILE` is the drop-in `RECORDING_START` shape
-//! (start), and the `start`/`status`/`stop` words select the verb explicitly.
+//! `flex-record [-a] [--quality PRESET] [--fps N] [-g GEOM] FILE` is the
+//! drop-in `RECORDING_START` shape (start), and the `start`/`status`/`stop`
+//! words select the verb explicitly.
 //!
 //! Manual argv dispatch (not clap): the bare-args form and the subcommands
 //! share one argv space, which clap cannot express unambiguously.
@@ -36,8 +37,8 @@ fn dispatch(args: &[String]) -> anyhow::Result<()> {
         Some("-h" | "--help") => {
             print!(
                 "Recording helper\n\n\
-                 Usage:\n  \
-                 flex-record [-a] [-g GEOM] FILE   start a recording\n  \
+                  Usage:\n  \
+                  flex-record [-a] [--quality light|balanced|high] [--fps N] [-g GEOM] FILE   start a recording\n  \
                  flex-record start …               same as above\n  \
                  flex-record status                print the REC badge (exit 1 when idle)\n  \
                  flex-record stop                  stop the active recording\n"

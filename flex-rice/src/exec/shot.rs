@@ -31,6 +31,10 @@
 //!   or the blank-restored window (and a window shot measures the popup).
 //!   Gated on the inherited `POPUP_KITTY=1` marker rather than probe luck,
 //!   so CLI/test runs stay instant.
+//! - Recording options: the two recording rows open a drill-in submenu
+//!   (audio/quality/framerate) over env defaults (`FLEX_REC_*`); the parent
+//!   exports the picks before the detach so the worker inherits them, and
+//!   the `RECORDING_START` seam only gains flags off-default.
 //!
 //! [`MENU_CLASS`]: crate::popup::MENU_CLASS
 //! [`popup::match_pattern`]: crate::popup::match_pattern
@@ -43,6 +47,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result};
 
 use crate::popup;
+use crate::providers::rec_opt::{Quality, RecOptions, DEFAULT_FPS};
 use crate::spawn::RetryExec as _;
 
 /// Capture rows in bash `case`-arm order (screenshots, then recordings).
@@ -155,12 +160,18 @@ pub enum Step {
         /// Saved file named in the notification.
         file: String,
     },
-    /// `REC [-a] [-g GEOM] FILE` (the `RECORDING_START` helper).
+    /// `REC [-a] [--quality PRESET] [--fps N] [-g GEOM] FILE` (the
+    /// `RECORDING_START` helper; quality/fps flags only appear off-default
+    /// so custom helpers keep working for default recordings).
     Record {
         /// Recording helper program.
         rec: String,
         /// Whether `-a` (audio) is passed.
         audio: bool,
+        /// Encoding quality preset.
+        quality: Quality,
+        /// Constant framerate.
+        fps: u32,
         /// Region (`None` = fullscreen, no `-g` flag).
         geometry: Option<Geom>,
         /// Output file.
@@ -170,13 +181,22 @@ pub enum Step {
 
 /// Build the capture [`Step`]s for `id` (no process started).
 ///
-/// `file` is the staged output path, `rec` the `RECORDING_START` helper.
-/// Region steps (`Slurp`/`ActiveWindow`) always precede their consumer, so
-/// the worker resolves each [`Geom::Slurp`]/[`Geom::Window`] in order.
+/// `file` is the staged output path, `rec` the `RECORDING_START` helper,
+/// `opts` the effective recording settings (env defaults, possibly refined
+/// by the submenu). Retired `*-rec-audio` aliases force audio on; the menu
+/// rows take `opts.audio` as-is.
 #[must_use]
-pub fn plan(id: ShotId, file: &str, rec: &str) -> Vec<Step> {
+pub fn plan(id: ShotId, file: &str, rec: &str, opts: &RecOptions) -> Vec<Step> {
     let file = file.to_string();
     let rec = rec.to_string();
+    let record = |audio: bool, geometry: Option<Geom>| Step::Record {
+        rec: rec.clone(),
+        audio,
+        quality: opts.quality,
+        fps: opts.fps,
+        geometry,
+        file: file.clone(),
+    };
     match id {
         ShotId::AreaShot => vec![
             Step::Slurp,
@@ -204,36 +224,10 @@ pub fn plan(id: ShotId, file: &str, rec: &str) -> Vec<Step> {
             Step::WlCopy { file: file.clone() },
             Step::Notify { file },
         ],
-        ShotId::AreaRec => vec![
-            Step::Slurp,
-            Step::Record {
-                rec,
-                audio: false,
-                geometry: Some(Geom::Slurp),
-                file,
-            },
-        ],
-        ShotId::AreaRecAudio => vec![
-            Step::Slurp,
-            Step::Record {
-                rec,
-                audio: true,
-                geometry: Some(Geom::Slurp),
-                file,
-            },
-        ],
-        ShotId::FullRec => vec![Step::Record {
-            rec,
-            audio: false,
-            geometry: None,
-            file,
-        }],
-        ShotId::FullRecAudio => vec![Step::Record {
-            rec,
-            audio: true,
-            geometry: None,
-            file,
-        }],
+        ShotId::AreaRec => vec![Step::Slurp, record(opts.audio, Some(Geom::Slurp))],
+        ShotId::AreaRecAudio => vec![Step::Slurp, record(true, Some(Geom::Slurp))],
+        ShotId::FullRec => vec![record(opts.audio, None)],
+        ShotId::FullRecAudio => vec![record(true, None)],
     }
 }
 
@@ -259,12 +253,22 @@ pub fn describe(step: &Step) -> String {
         Step::Record {
             rec,
             audio,
+            quality,
+            fps,
             geometry,
             file,
         } => {
             let mut line = rec.clone();
             if *audio {
                 line.push_str(" -a");
+            }
+            if *quality != Quality::Balanced {
+                line.push_str(" --quality ");
+                line.push_str(quality.as_str());
+            }
+            if *fps != DEFAULT_FPS {
+                line.push_str(" --fps ");
+                line.push_str(&fps.to_string());
             }
             if let Some(geom) = geometry {
                 line.push_str(" -g ");
@@ -541,8 +545,11 @@ pub fn run_worker(
     wait_popup_gone(&path_env);
     let file_str = file.to_string_lossy().into_owned();
     let rec_str = rec.to_string_lossy().into_owned();
+    // The parent exports the submenu picks before the detach (`setsid`
+    // preserves env), so the worker resolves the same settings here.
+    let opts = RecOptions::from_env();
     let mut geometry: Option<String> = None;
-    for step in plan(id, &file_str, &rec_str) {
+    for step in plan(id, &file_str, &rec_str, &opts) {
         match step {
             Step::Slurp => {
                 let out = tool(&path_env, "slurp", &[], None)?;
@@ -606,6 +613,8 @@ pub fn run_worker(
             Step::Record {
                 rec,
                 audio,
+                quality,
+                fps,
                 geometry: want,
                 file,
             } => {
@@ -617,15 +626,7 @@ pub fn run_worker(
                 if want.is_some() && resolved.is_none() {
                     anyhow::bail!("shot: capture region missing before recording");
                 }
-                let mut args = Vec::new();
-                if audio {
-                    args.push(String::from("-a"));
-                }
-                if let Some(geom) = resolved {
-                    args.push(String::from("-g"));
-                    args.push(geom);
-                }
-                args.push(file);
+                let args = record_args(audio, quality, fps, resolved, file);
                 let out = tool(&path_env, &rec, &args, None)?;
                 if !out.ok {
                     anyhow::bail!("shot: recording failed");
@@ -634,6 +635,36 @@ pub fn run_worker(
         }
     }
     Ok(CaptureEnd::Done)
+}
+
+/// Build the `RECORDING_START` argv for one [`Step::Record`]: `-a` when
+/// audio is on, `--quality`/`--fps` only off-default (so custom helpers
+/// keep parsing default recordings), then `-g GEOM` and the file.
+fn record_args(
+    audio: bool,
+    quality: Quality,
+    fps: u32,
+    geometry: Option<String>,
+    file: String,
+) -> Vec<String> {
+    let mut args = Vec::new();
+    if audio {
+        args.push(String::from("-a"));
+    }
+    if quality != Quality::Balanced {
+        args.push(String::from("--quality"));
+        args.push(quality.as_str().to_string());
+    }
+    if fps != DEFAULT_FPS {
+        args.push(String::from("--fps"));
+        args.push(fps.to_string());
+    }
+    if let Some(geom) = geometry {
+        args.push(String::from("-g"));
+        args.push(geom);
+    }
+    args.push(file);
+    args
 }
 
 /// `date +%Y-%m-%d_%H-%M-%S` (the wrapper's timestamp, byte-identical).
@@ -755,7 +786,8 @@ pub struct ExecuteReport {
 
 /// Parent half of the flow: stage the output, detach the worker, close the
 /// popup (see the module docs). `path_env` shadows the ambient `PATH` when
-/// `Some` (the stub seam); `None` inherits it.
+/// `Some` (the stub seam); `None` inherits it. Recording settings resolve
+/// from the environment ([`RecOptions::from_env`]).
 ///
 /// # Errors
 ///
@@ -763,6 +795,25 @@ pub struct ExecuteReport {
 /// fails, or the detach fails. Messages carry no `flex:` prefix; the runner
 /// reports them.
 pub fn execute(action_id: &str, path_env: Option<&str>) -> Result<ExecuteReport> {
+    execute_options(action_id, &RecOptions::from_env(), path_env)
+}
+
+/// Parent half with explicit recording settings: the submenu path. `opts`
+/// are exported into this process's environment before the detach, so the
+/// detached worker (which inherits env through `setsid`) resolves the same
+/// settings via [`RecOptions::from_env`].
+///
+/// # Errors
+///
+/// When the id is unknown, the staging dir cannot be created, the timestamp
+/// fails, or the detach fails. Messages carry no `flex:` prefix; the runner
+/// reports them.
+pub fn execute_options(
+    action_id: &str,
+    opts: &RecOptions,
+    path_env: Option<&str>,
+) -> Result<ExecuteReport> {
+    use crate::providers::rec_opt::{AUDIO_ENV, FPS_ENV, QUALITY_ENV};
     let Some(id) = ShotId::parse(action_id) else {
         anyhow::bail!("shot: unknown id '{action_id}'");
     };
@@ -773,6 +824,9 @@ pub fn execute(action_id: &str, path_env: Option<&str>) -> Result<ExecuteReport>
     let stamp = timestamp(&path_env)?;
     let filepath = filepath_for(id, &dir, &stamp);
     let rec = rec_start()?;
+    std::env::set_var(AUDIO_ENV, if opts.audio { "1" } else { "0" });
+    std::env::set_var(QUALITY_ENV, opts.quality.as_str());
+    std::env::set_var(FPS_ENV, opts.fps.to_string());
     execute_with(id, &filepath, &rec, Some(&path_env))
 }
 
@@ -867,8 +921,9 @@ mod tests {
     #[test]
     fn plan_snapshot_area_shot() {
         let (file, rec) = file_and_rec();
+        let opts = RecOptions::defaults();
         assert_eq!(
-            describe_plan(&plan(ShotId::AreaShot, &file, &rec)),
+            describe_plan(&plan(ShotId::AreaShot, &file, &rec, &opts)),
             vec![
                 "slurp",
                 "grim -g <slurp> /shots/f.png",
@@ -881,8 +936,9 @@ mod tests {
     #[test]
     fn plan_snapshot_full_shot() {
         let (file, rec) = file_and_rec();
+        let opts = RecOptions::defaults();
         assert_eq!(
-            describe_plan(&plan(ShotId::FullShot, &file, &rec)),
+            describe_plan(&plan(ShotId::FullShot, &file, &rec, &opts)),
             vec![
                 "grim /shots/f.png",
                 "wl-copy --type image/png < /shots/f.png",
@@ -894,8 +950,9 @@ mod tests {
     #[test]
     fn plan_snapshot_win_shot() {
         let (file, rec) = file_and_rec();
+        let opts = RecOptions::defaults();
         assert_eq!(
-            describe_plan(&plan(ShotId::WinShot, &file, &rec)),
+            describe_plan(&plan(ShotId::WinShot, &file, &rec, &opts)),
             vec![
                 "hyprctl -j activewindow",
                 "grim -g <window> /shots/f.png",
@@ -907,33 +964,83 @@ mod tests {
 
     #[test]
     fn plan_snapshot_recordings() {
+        // Defaults (audio on, balanced, 30 fps) keep the legacy seam shape:
+        // no quality/fps flags, so custom `RECORDING_START` helpers still
+        // parse.
         let (file, rec) = file_and_rec();
+        let opts = RecOptions::defaults();
         assert_eq!(
-            describe_plan(&plan(ShotId::AreaRec, &file, &rec)),
-            vec!["slurp", "/rec/start.sh -g <slurp> /shots/f.png",],
-        );
-        assert_eq!(
-            describe_plan(&plan(ShotId::AreaRecAudio, &file, &rec)),
+            describe_plan(&plan(ShotId::AreaRec, &file, &rec, &opts)),
             vec!["slurp", "/rec/start.sh -a -g <slurp> /shots/f.png",],
         );
         assert_eq!(
-            describe_plan(&plan(ShotId::FullRec, &file, &rec)),
-            vec!["/rec/start.sh /shots/f.png"],
+            describe_plan(&plan(ShotId::AreaRecAudio, &file, &rec, &opts)),
+            vec!["slurp", "/rec/start.sh -a -g <slurp> /shots/f.png",],
         );
         assert_eq!(
-            describe_plan(&plan(ShotId::FullRecAudio, &file, &rec)),
+            describe_plan(&plan(ShotId::FullRec, &file, &rec, &opts)),
             vec!["/rec/start.sh -a /shots/f.png"],
+        );
+        assert_eq!(
+            describe_plan(&plan(ShotId::FullRecAudio, &file, &rec, &opts)),
+            vec!["/rec/start.sh -a /shots/f.png"],
+        );
+    }
+
+    #[test]
+    fn plan_snapshot_recording_options_off_default() {
+        let (file, rec) = file_and_rec();
+        let opts = RecOptions {
+            audio: false,
+            quality: Quality::High,
+            fps: 60,
+        };
+        assert_eq!(
+            describe_plan(&plan(ShotId::AreaRec, &file, &rec, &opts)),
+            vec![
+                "slurp",
+                "/rec/start.sh --quality high --fps 60 -g <slurp> /shots/f.png",
+            ],
+        );
+        assert_eq!(
+            describe_plan(&plan(ShotId::FullRec, &file, &rec, &opts)),
+            vec!["/rec/start.sh --quality high --fps 60 /shots/f.png"],
+        );
+    }
+
+    #[test]
+    fn retired_audio_aliases_force_audio_on() {
+        // `area-rec-audio`/`full-rec-audio` survive for old scripts: audio
+        // on regardless of the effective settings, quality/fps still from
+        // `opts`.
+        let (file, rec) = file_and_rec();
+        let opts = RecOptions {
+            audio: false,
+            quality: Quality::Light,
+            fps: 60,
+        };
+        assert_eq!(
+            describe_plan(&plan(ShotId::AreaRecAudio, &file, &rec, &opts)),
+            vec![
+                "slurp",
+                "/rec/start.sh -a --quality light --fps 60 -g <slurp> /shots/f.png",
+            ],
+        );
+        assert_eq!(
+            describe_plan(&plan(ShotId::FullRecAudio, &file, &rec, &opts)),
+            vec!["/rec/start.sh -a --quality light --fps 60 /shots/f.png"],
         );
     }
 
     #[test]
     fn plan_orders_the_region_step_first() {
         let (file, rec) = file_and_rec();
+        let opts = RecOptions::defaults();
         for id in [ShotId::AreaShot, ShotId::AreaRec, ShotId::AreaRecAudio] {
-            let steps = plan(id, &file, &rec);
+            let steps = plan(id, &file, &rec, &opts);
             assert_eq!(steps.first(), Some(&Step::Slurp), "{id:?}");
         }
-        let steps = plan(ShotId::WinShot, &file, &rec);
+        let steps = plan(ShotId::WinShot, &file, &rec, &opts);
         assert_eq!(steps.first(), Some(&Step::ActiveWindow));
     }
 

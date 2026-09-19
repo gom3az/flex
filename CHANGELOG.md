@@ -13,6 +13,15 @@ longer consumed by anything — each binary selects a row and runs its effect
 directly.
 
 ### Added
+- `flex-shot` recording options: the four recording rows collapse to Area /
+  Full Recording, and picking one opens a drill-in submenu (Audio on/muted,
+  quality Light/Balanced/High mapping to 2M/5M/10M bitrates, framerate
+  30/60) over `FLEX_REC_AUDIO`/`FLEX_REC_QUALITY`/`FLEX_REC_FPS` env
+  defaults (audio on, balanced, 30 fps — today's `*-rec-audio` command
+  shape). The confirm row carries the live settings, so the defaults path
+  is Enter-Enter. Retired `*-rec-audio` ids survive as hidden aliases
+  (audio forced on); default recordings keep the legacy `RECORDING_START`
+  argv, so custom helpers still parse.
 - Notification Center copies images: any drawer row referencing an image
   file (body-text paths and `image-path` hint thumbnails, feed/threads/
   history) offers `Copy Image`, which puts the file bytes on the clipboard

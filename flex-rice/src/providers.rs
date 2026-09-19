@@ -15,6 +15,7 @@ pub mod notify;
 pub mod power;
 pub mod proc;
 pub mod profile;
+pub mod rec_opt;
 pub mod shot;
 pub mod wallpaper;
 pub mod wifi;
