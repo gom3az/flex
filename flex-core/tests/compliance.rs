@@ -169,7 +169,7 @@ fn filter_line_renders_at_top_for_filterable_tab_only() {
         "filterable tab draws `› Search` at y=1: {filter_line:?}"
     );
     let sep_line = row_text(&buf, 2, 80);
-    assert!(sep_line.contains("─"), "separator at y=2: {sep_line:?}");
+    assert!(sep_line.contains("╌"), "separator at y=2: {sep_line:?}");
 
     // Non-filterable tab renders no `›` prompt anywhere
     let mut fixed_tab = Tab::with_rows("fixed", vec![Row::new(RowId::new("a"), "alpha")]);

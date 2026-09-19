@@ -395,7 +395,7 @@ fn clip_default_view_golden_at_80x24() {
         row_text(&buf, 1, 80).contains("Search"),
         "row 1 has search placeholder"
     );
-    assert!(row_text(&buf, 2, 80).contains('─'), "row 2 has separator");
+    assert!(row_text(&buf, 2, 80).contains('╌'), "row 2 has separator");
     let first_y = 3 + flex_core::render::LIST_INDICATOR_ROWS / 2;
     assert!(
         row_text(&buf, first_y, 80).starts_with('░'),

@@ -1507,7 +1507,7 @@ fn draw_filter(buf: &mut Buffer, ox: u16, y: u16, width: usize, menu: &Menu, vis
     });
 }
 
-/// Separator line below the filter line: horizontal rule in `theme.hint` style.
+/// Separator line below the filter line: dashed horizontal rule in `theme.hint` style.
 fn draw_separator(buf: &mut Buffer, ox: u16, y: u16, width: usize, menu: &Menu) {
     if width == 0 {
         return;
@@ -1520,7 +1520,7 @@ fn draw_separator(buf: &mut Buffer, ox: u16, y: u16, width: usize, menu: &Menu) 
     let glyph = if menu.char_set.selector_top == "-" {
         "-"
     } else {
-        "─"
+        "╌"
     };
     for x in sep_x..sep_x.saturating_add(sep_w) {
         if let Some(cell) = buf.cell_mut((x, y)) {

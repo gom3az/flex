@@ -465,7 +465,9 @@ fn rows_without_volume_have_no_bar() {
     let mut menu = rich_menu();
     let buf = draw(&mut menu, 80, 24);
     assert_full_width(&buf);
-    let all: String = (0..LIST_H_80X24).map(|y| row_text(&buf, y, 80)).collect();
+    let all: String = (LIST_TOP..LIST_AREA_TOP + LIST_H_80X24)
+        .map(|y| row_text(&buf, y, 80))
+        .collect();
     assert!(
         !all.contains('━') && !all.contains('╌'),
         "no volume bar for rows without volume data"
@@ -821,7 +823,7 @@ fn bare_filterable_tab_has_top_filter_chrome() {
     assert_eq!(buf.cell((2, 1)).expect("glyph").symbol(), "›");
     assert_eq!(buf.cell((4, 1)).expect("search start").symbol(), "S");
     let r2 = row_text(&buf, 2, 80);
-    assert!(r2.contains('─'), "separator at y=2: {r2:?}");
+    assert!(r2.contains('╌'), "separator at y=2: {r2:?}");
     assert!(
         row_text(&buf, 4, 80).starts_with('░'),
         "first list row starts at y=4"

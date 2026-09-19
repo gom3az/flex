@@ -363,10 +363,10 @@ fn launch_default_view_golden_at_80x24() {
     let s_cell = buf.cell((4, 1)).expect("search start cell at col 4");
     assert_eq!(s_cell.symbol(), "S", "search placeholder starts at col 4");
 
-    // Row 2: separator line (2-cell padded: col 2..78 has '─').
+    // Row 2: separator line (2-cell padded: col 2..78 has '╌').
     let r2 = row_text(&buf, 2, 80);
-    assert!(r2.contains('─'), "row 2 has separator: {r2:?}");
-    assert_eq!(buf.cell((2, 2)).expect("sep start").symbol(), "─");
+    assert!(r2.contains('╌'), "row 2 has separator: {r2:?}");
+    assert_eq!(buf.cell((2, 2)).expect("sep start").symbol(), "╌");
 
     // Row 3: reserved `•••` indicator line.
     // Row 4: first list row (selector + Firefox label, bare mode: no hints/tab chrome).
