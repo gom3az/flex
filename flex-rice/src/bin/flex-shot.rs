@@ -14,6 +14,7 @@ use clap::Parser;
 use flex_core::backend::EXIT_CANCELLED;
 use flex_core::Outcome;
 use flex_rice::exec::shot;
+use flex_rice::providers::rec_opt::RecOptions;
 use flex_rice::runner::{self, GlobalStyle, Provider};
 
 /// Screenshot flow: select a row, capture, let the popup die.
@@ -47,6 +48,10 @@ async fn main() {
 
 /// Parse args, guard the popup, then select+execute.
 ///
+/// Recording rows defer: the `Chosen` handler only stages the pick, and the
+/// drill-in submenu runs after the main menu exits (same popup, second
+/// select loop), then executes with the effective settings.
+///
 /// # Errors
 ///
 /// Returns an error when the worker args are malformed, the popup toggle or
@@ -59,14 +64,20 @@ async fn run() -> anyhow::Result<()> {
         return run_capture_worker(parts);
     }
     let style = cli.style.options();
+    let mut rec_pick: Option<String> = None;
     runner::run_standard_cli(
         Provider::Shot,
         style,
         cli.print_action,
         |outcome| match outcome {
             Outcome::Chosen { action_id, .. } => {
-                shot::execute(&action_id, None)?;
-                Ok(())
+                if shot::ShotId::parse(&action_id).is_some_and(shot::ShotId::is_recording) {
+                    rec_pick = Some(action_id);
+                    Ok(())
+                } else {
+                    shot::execute(&action_id, None)?;
+                    Ok(())
+                }
             }
             Outcome::Delete { action_id, .. } => {
                 anyhow::bail!("shot: unexpected delete outcome for '{action_id}'")
@@ -80,7 +91,12 @@ async fn run() -> anyhow::Result<()> {
             _ => unreachable!(),
         },
     )
-    .await
+    .await?;
+    if let Some(action_id) = rec_pick {
+        let opts = runner::run_recording_menu(style, RecOptions::from_env()).await?;
+        shot::execute_options(&action_id, &opts, None)?;
+    }
+    Ok(())
 }
 
 /// Run one capture synchronously for the detached `--capture` worker.

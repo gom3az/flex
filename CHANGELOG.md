@@ -13,6 +13,31 @@ longer consumed by anything — each binary selects a row and runs its effect
 directly.
 
 ### Added
+- `flex-shot` recording options: the four recording rows collapse to Area /
+  Full Recording, and picking one opens a drill-in submenu (Audio on/muted,
+  quality Light/Balanced/High mapping to 2M/5M/10M bitrates, framerate
+  30/60) over `FLEX_REC_AUDIO`/`FLEX_REC_QUALITY`/`FLEX_REC_FPS` env
+  defaults (audio on, balanced, 30 fps — today's `*-rec-audio` command
+  shape). The confirm row carries the live settings, so the defaults path
+  is Enter-Enter. Retired `*-rec-audio` ids survive as hidden aliases
+  (audio forced on); default recordings keep the legacy `RECORDING_START`
+  argv, so custom helpers still parse.
+- Notification Center copies images: any drawer row referencing an image
+  file (body-text paths and `image-path` hint thumbnails, feed/threads/
+  history) offers `Copy Image`, which puts the file bytes on the clipboard
+  with their MIME type (`wl-copy --type <mime>`, magic-byte sniff for
+  PNG/JPEG/GIF/WebP/BMP plus extension fallback incl. SVG). The paste
+  survives the drawer exiting (`wl-copy` serves forked from memory); a file
+  lost since listing time reports `Image not found` instead of failing
+  silent. Screenshots now copy as typed `image/png` and their notification
+  carries an `image-path` hint (preview + Copy Image target).
+- `flex-shot` waits for the popup to disappear (bounded 1 s, plus a 500 ms
+  settle for the compositor close animation) before capturing: the worker
+  ran concurrently with the popup close, so a fullscreen shot photographed
+  the flex TUI itself, its fade, or the blank-restored window (and a window
+  shot could measure the popup as the active window). The wait is gated on
+  the inherited `POPUP_KITTY=1` marker, so it always applies in real flows
+  even when the first probe already finds the popup gone.
 - Clip retention: `flex-clip add` keeps the history within 200 entries
   (newest win) and drops unpinned lines older than 7 days, enforced on every
   append (the `watch` daemon inherits it). Pinned entries are exempt. Ages

@@ -132,6 +132,88 @@ fn start_spawns_the_recorder_and_registers_it() {
 }
 
 #[test]
+fn start_maps_quality_and_fps_to_recorder_params() {
+    let dir = scratch("quality");
+    install_stubs(&dir, 1);
+    let info = dir.join("recording.info");
+    let file = dir.join("out.mp4");
+
+    let output = run(
+        &dir,
+        &info,
+        &[
+            "--quality",
+            "high",
+            "--fps=60",
+            "-g",
+            "10,10 20x20",
+            file.to_str().expect("utf8"),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "start exits 0: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let rec = dir.join("rec.log");
+    let expected_count = 12;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let logged = loop {
+        let logged = std::fs::read_to_string(&rec).unwrap_or_default();
+        if logged.lines().count() >= expected_count || std::time::Instant::now() >= deadline {
+            break logged;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    assert_eq!(
+        logged.lines().collect::<Vec<_>>(),
+        vec![
+            "-c",
+            "av1_vaapi",
+            "-r",
+            "60",
+            "-p",
+            "b=10M",
+            "-p",
+            "maxrate=10M",
+            "-g",
+            "10,10 20x20",
+            "-f",
+            file.to_str().expect("utf8"),
+        ],
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn start_rejects_unknown_quality_and_bad_fps() {
+    let dir = scratch("bad-opts");
+    install_stubs(&dir, 1);
+    let info = dir.join("recording.info");
+    let file = dir.join("out.mp4");
+
+    let output = run(
+        &dir,
+        &info,
+        &["--quality", "ultra", file.to_str().expect("utf8")],
+    );
+    assert!(!output.status.success(), "unknown quality bails");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("unknown quality"),
+        "names the bad value: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = run(
+        &dir,
+        &info,
+        &["--fps", "banana", file.to_str().expect("utf8")],
+    );
+    assert!(!output.status.success(), "bad fps bails");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn status_is_silent_and_exits_1_when_idle() {
     let dir = scratch("status-idle");
     install_stubs(&dir, 1);

@@ -44,9 +44,7 @@ fn row_set_matches_bash_cap_rows_exactly() {
             ("full-shot", "Full Screenshot", Some("PNG")),
             ("win-shot", "Window Screenshot", Some("PNG")),
             ("area-rec", "Area Recording", Some("MP4")),
-            ("area-rec-audio", "Area Recording + Audio", Some("MP4")),
             ("full-rec", "Full Recording", Some("MP4")),
-            ("full-rec-audio", "Full Recording + Audio", Some("MP4")),
         ]
     );
 }
@@ -74,14 +72,13 @@ fn keyseq_down_down_enter_selects_window_shot() {
 }
 
 #[test]
-fn keyseq_down_to_area_recording_audio() {
-    // No filter in shot mode: use Down x4 to reach area-rec-audio (index 4).
+fn keyseq_down_to_area_recording() {
+    // No filter in shot mode: use Down x3 to reach area-rec (index 3).
     let mut menu = shot_menu();
     let base = run::test_base();
     let outcome = run::replay_keys(
         &mut menu,
         &[
-            press(KeyCode::Down),
             press(KeyCode::Down),
             press(KeyCode::Down),
             press(KeyCode::Down),
@@ -91,7 +88,7 @@ fn keyseq_down_to_area_recording_audio() {
     );
     assert_eq!(outcome, KeyOutcome::Select);
     let row = menu.app.focused_row().expect("focused row");
-    assert_eq!(row.id.as_str(), "area-rec-audio");
+    assert_eq!(row.id.as_str(), "area-rec");
 }
 
 #[test]
@@ -276,23 +273,33 @@ fn install_worker_stubs(
 }
 
 /// Run the detached worker the way the parent spawns it (minus `setsid`):
-/// `flex-shot --capture ID FILE REC` with a stub `PATH`.
+/// `flex-shot --capture ID FILE REC` with a stub `PATH`. Recording settings
+/// come from the environment (as the parent exports them); the ambient
+/// `FLEX_REC_*` are cleared so the matrix is hermetic unless `extra_env`
+/// overrides them.
 fn run_capture_worker(
     id: &str,
     file: &std::path::Path,
     rec: &std::path::Path,
     stubs: &WorkerStubs,
+    extra_env: &[(&str, &str)],
 ) -> std::process::Output {
-    std::process::Command::new(env!("CARGO_BIN_EXE_flex-shot"))
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_flex-shot"));
+    command
         .arg("--capture")
         .arg(id)
         .arg(file)
         .arg(rec)
         .env("PATH", &stubs.path_env)
         .env("POPUP_KITTY", "1")
-        .stdin(std::process::Stdio::null())
-        .output()
-        .expect("run capture worker")
+        .env_remove("FLEX_REC_AUDIO")
+        .env_remove("FLEX_REC_QUALITY")
+        .env_remove("FLEX_REC_FPS")
+        .stdin(std::process::Stdio::null());
+    for (key, value) in extra_env {
+        command.env(key, value);
+    }
+    command.output().expect("run capture worker")
 }
 
 fn call_lines(log: &std::path::Path) -> Vec<String> {
@@ -305,6 +312,7 @@ fn call_lines(log: &std::path::Path) -> Vec<String> {
 
 /// Seven ids, one pipeline each: the worker must spawn exactly the wrapper's
 /// tool sequence (see `exec::shot::describe` for the snapshot convention).
+/// The retired `*-rec-audio` aliases stay executable (audio forced on).
 #[test]
 fn worker_matrix_runs_the_wrapper_pipeline_per_id() {
     let geometry = "11,22 33x44";
@@ -323,7 +331,7 @@ fn worker_matrix_runs_the_wrapper_pipeline_per_id() {
         let ext = if id.contains("rec") { "mp4" } else { "png" };
         let file = stubs.dir.join(format!("out.{ext}"));
         let rec = stubs.dir.join("rec");
-        let output = run_capture_worker(id, &file, &rec, &stubs);
+        let output = run_capture_worker(id, &file, &rec, &stubs, &[]);
         assert!(
             output.status.success(),
             "{id}: {:?}",
@@ -335,7 +343,7 @@ fn worker_matrix_runs_the_wrapper_pipeline_per_id() {
         let shot_tail = vec![
             format!("grim -g {geometry} {painted}"),
             String::from("wl-copy <0 bytes>"),
-            format!("notify-send Screenshot saved {painted}"),
+            format!("notify-send -h string:image-path:{painted} Screenshot saved {painted}"),
         ];
         // The `grim`/`rec` stubs log their fixed tool word plus `$@`, so the
         // expected lines name the stub (`rec …`), not the helper path.
@@ -355,21 +363,51 @@ fn worker_matrix_runs_the_wrapper_pipeline_per_id() {
                 rows.extend(shot_tail);
                 rows
             }
-            "area-rec" => vec![
-                String::from("slurp"),
-                format!("rec -g {geometry} {painted}"),
-            ],
-            "area-rec-audio" => vec![
+            "area-rec" | "area-rec-audio" => vec![
                 String::from("slurp"),
                 format!("rec -a -g {geometry} {painted}"),
             ],
-            "full-rec" => vec![format!("rec {painted}")],
-            "full-rec-audio" => vec![format!("rec -a {painted}")],
+            "full-rec" | "full-rec-audio" => vec![format!("rec -a {painted}")],
             other => panic!("unexpected id {other}"),
         };
         let _ = std::fs::remove_dir_all(&stubs.dir);
         assert_eq!(lines, expected, "{id}: worker tool sequence");
     }
+}
+
+/// Off-default recording settings ride the `RECORDING_START` seam as
+/// `--quality`/`--fps` flags (default recordings keep the legacy shape).
+#[test]
+fn worker_passes_off_default_recording_options_to_the_helper() {
+    let geometry = "11,22 33x44";
+    let stubs = install_worker_stubs("rec-opts", 0, geometry, "{}");
+    let file = stubs.dir.join("out.mp4");
+    let rec = stubs.dir.join("rec");
+    let output = run_capture_worker(
+        "area-rec",
+        &file,
+        &rec,
+        &stubs,
+        &[
+            ("FLEX_REC_AUDIO", "0"),
+            ("FLEX_REC_QUALITY", "high"),
+            ("FLEX_REC_FPS", "60"),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let painted = file.display().to_string();
+    assert_eq!(
+        call_lines(&stubs.log),
+        vec![
+            String::from("slurp"),
+            format!("rec --quality high --fps 60 -g {geometry} {painted}"),
+        ]
+    );
+    let _ = std::fs::remove_dir_all(&stubs.dir);
 }
 
 /// `slurp` cancel (non-zero exit, no geometry): exit 130 quietly, before
@@ -379,7 +417,7 @@ fn worker_slurp_cancel_exits_130_quietly() {
     let stubs = install_worker_stubs("cancel", 1, "11,22 33x44", "{}");
     let file = stubs.dir.join("out.png");
     let rec = stubs.dir.join("rec");
-    let output = run_capture_worker("area-shot", &file, &rec, &stubs);
+    let output = run_capture_worker("area-shot", &file, &rec, &stubs, &[]);
     assert_eq!(output.status.code(), Some(130), "cancel exits 130");
     assert!(output.stdout.is_empty(), "no stdout on cancel");
     assert!(output.stderr.is_empty(), "no diagnostics on cancel");
@@ -395,7 +433,7 @@ fn worker_rejects_unknown_ids_with_a_single_prefix() {
     let stubs = install_worker_stubs("bad-id", 0, "11,22 33x44", "{}");
     let file = stubs.dir.join("out.png");
     let rec = stubs.dir.join("rec");
-    let output = run_capture_worker("bogus", &file, &rec, &stubs);
+    let output = run_capture_worker("bogus", &file, &rec, &stubs, &[]);
     assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     assert_eq!(stderr, "flex: error: shot: unknown id 'bogus'\n");
@@ -538,4 +576,69 @@ fn binary_outside_a_popup_reexecs_into_the_menu_popup() {
         "re-exec uses the menu popup template: {logged:?}"
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Worker-side popup wait: with a popup reported open, `grim` must not run
+/// until `pgrep` reports it gone — otherwise a fullscreen shot photographs
+/// the flex TUI itself.
+#[test]
+fn worker_waits_for_popup_gone_before_capture() {
+    let dir = stub_dir("exec-popup-wait");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("stub dir");
+    let log = dir.join("calls.log");
+    let logged = log.display().to_string();
+    let counted = dir.join("pgrep.count");
+    let counted_str = counted.display().to_string();
+    // Popup "open" for the first three probes, gone after: the worker polls
+    // through them (3 x 50 ms) before touching the screen.
+    write_exe(
+        &dir.join("pgrep"),
+        &format!(
+            "#!/usr/bin/env bash\nn=$(cat \"{counted_str}\" 2>/dev/null || echo 0)\necho $((n + 1)) > \"{counted_str}\"\n[ \"$n\" -lt 3 ]\n"
+        ),
+    );
+    write_exe(
+        &dir.join("grim"),
+        &format!("#!/usr/bin/env bash\necho \"grim $@\" >> \"{logged}\"\ntouch \"${{@: -1}}\"\n"),
+    );
+    write_exe(
+        &dir.join("wl-copy"),
+        &format!(
+            "#!/usr/bin/env bash\nbytes=$(wc -c | tr -d ' ')\necho \"wl-copy <$bytes bytes>\" >> \"{logged}\"\n"
+        ),
+    );
+    write_exe(
+        &dir.join("notify-send"),
+        &format!("#!/usr/bin/env bash\necho \"notify-send $@\" >> \"{logged}\"\n"),
+    );
+    let stubs = WorkerStubs {
+        dir,
+        log,
+        path_env: format!(
+            "{}:{}",
+            stub_dir("exec-popup-wait").display(),
+            std::env::var("PATH").unwrap_or_default()
+        ),
+    };
+    let file = stubs.dir.join("out.png");
+    let rec = stubs.dir.join("rec");
+    let output = run_capture_worker("full-shot", &file, &rec, &stubs, &[]);
+    assert!(
+        output.status.success(),
+        "full-shot: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let probes: usize = std::fs::read_to_string(&counted)
+        .expect("pgrep probe count")
+        .trim()
+        .parse()
+        .expect("probe count parses");
+    assert_eq!(probes, 4, "worker polls until the popup reports gone");
+    let lines = call_lines(&stubs.log);
+    assert!(
+        lines.iter().any(|line| line.starts_with("grim ")),
+        "grim runs, but only after the wait: {lines:?}"
+    );
+    let _ = std::fs::remove_dir_all(&stubs.dir);
 }

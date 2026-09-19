@@ -97,6 +97,9 @@ separate CLI step.
 | `DRY_RUN` | power, profile | When exactly `1`, print `would run: <cmd>` instead of executing |
 | `FLEX_WIFI_PASSWORD` | wifi | Skip the `/dev/tty` password prompt |
 | `SCREENSHOT_DIR`, `RECORDING_START` | shot | Capture output dir / recording helper override (defaults to `flex-record`) |
+| `FLEX_REC_AUDIO` | shot, record | Recording audio default: `0`/`false`/`no`/`off` mutes, anything else (or unset) captures audio |
+| `FLEX_REC_QUALITY` | shot, record | Recording quality preset: `light` (2M) / `balanced` (5M) / `high` (10M); garbage falls back to `balanced` |
+| `FLEX_REC_FPS` | shot, record | Recording framerate (default 30); garbage falls back to 30 |
 | `CLIPHIST_FILE`, `CLIPHIST_PINS`, `CLIPHIST_CURRENT` | clip | History, pins and current-entry store overrides |
 | `CLIPHIST_TS`, `CLIPHIST_MAX_ENTRIES`, `CLIPHIST_MAX_AGE_SECS` | clip | Retention timestamp sidecar, max history entries (default 200), max unpinned age in seconds (default 7 days); pins exempt |
 | `FLEX_PROC_KTHREADS` | proc | Show kernel threads (empty cmdline) in the process list |

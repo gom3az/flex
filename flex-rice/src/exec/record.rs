@@ -16,6 +16,7 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context as _, Result};
 
+use crate::providers::rec_opt::{Quality, RecOptions};
 use crate::spawn::RetryExec as _;
 
 /// The pid/file registry (`recording-start.sh`'s `/tmp/recording.info`).
@@ -84,34 +85,108 @@ fn signal(path_env: &str, signal: &str, pid: &str) {
     }
 }
 
-/// `start [-a] [-g GEOM] FILE`: spawn `wf-recorder` detached and register it.
+/// Parsed `start` argv: flags plus the output file.
+struct StartArgs {
+    /// Whether the `PipeWire` default source is captured (`-a`).
+    audio: bool,
+    /// Encoding quality preset.
+    quality: Quality,
+    /// Constant framerate.
+    fps: u32,
+    /// Region (`None` = fullscreen).
+    geometry: Option<String>,
+    /// Output file.
+    file: Option<String>,
+}
+
+/// Parse the recording-start arg vector (`-a`/`--quality`/`--fps`/`-g
+/// GEOM`/file), the same shape the `RECORDING_START` seam passes.
 ///
-/// `args` is the recording-start arg vector (`-a`/`-g GEOM`/file), the same
-/// shape the `RECORDING_START` seam passes.
+/// # Errors
+///
+/// When a `--quality`/`--fps` value is malformed.
+fn parse_start_args(args: &[String]) -> Result<StartArgs> {
+    let defaults = RecOptions::defaults();
+    let mut parsed = StartArgs {
+        audio: false,
+        quality: defaults.quality,
+        fps: defaults.fps,
+        geometry: None,
+        file: None,
+    };
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        match arg.as_str() {
+            "-a" | "--audio" => parsed.audio = true,
+            "-g" | "--geometry" => {
+                index += 1;
+                if let Some(value) = args.get(index) {
+                    parsed.geometry = Some(value.clone());
+                }
+            }
+            "--quality" => {
+                index += 1;
+                let value = args.get(index).map_or("", String::as_str);
+                parsed.quality = Quality::parse(value).with_context(|| {
+                    format!("record: unknown quality '{value}' (light/balanced/high)")
+                })?;
+            }
+            "--fps" => {
+                index += 1;
+                let value = args.get(index).map_or("", String::as_str);
+                parsed.fps = parse_fps(value)?;
+            }
+            other if other.starts_with("--quality=") => {
+                let value = other.trim_start_matches("--quality=");
+                parsed.quality = Quality::parse(value).with_context(|| {
+                    format!("record: unknown quality '{value}' (light/balanced/high)")
+                })?;
+            }
+            other if other.starts_with("--fps=") => {
+                parsed.fps = parse_fps(other.trim_start_matches("--fps="))?;
+            }
+            other => parsed.file = Some(other.to_string()),
+        }
+        index += 1;
+    }
+    Ok(parsed)
+}
+
+/// Parse an explicit `--fps` value (strict: the env override stays lenient,
+/// flags bail).
+///
+/// # Errors
+///
+/// When the value is not a framerate in `1..=240`.
+fn parse_fps(value: &str) -> Result<u32> {
+    value
+        .parse::<u32>()
+        .ok()
+        .filter(|fps| (1..=240).contains(fps))
+        .with_context(|| format!("record: bad framerate '{value}'"))
+}
+/// `start [-a] [--quality PRESET] [--fps N] [-g GEOM] FILE`: spawn
+/// `wf-recorder` detached and register it.
+///
+/// `args` is the recording-start arg vector, the same shape the
+/// `RECORDING_START` seam passes. Quality presets map to the bitrate ladder
+/// (`-p b=<bitrate> -p maxrate=<bitrate>`); the codec stays `av1_vaapi`.
 ///
 /// # Errors
 ///
 /// When no file is given or a recording is already running (both notify and
-/// bail, like the wrapper), the recorder is missing, or the spawn fails.
+/// bail, like the wrapper), the quality/fps flags are malformed, the
+/// recorder is missing, or the spawn fails.
 pub fn start(args: &[String], path_env: Option<&str>) -> Result<()> {
     let path_env = path_env.map_or_else(ambient_path, str::to_string);
-    let mut audio = false;
-    let mut geometry: Option<String> = None;
-    let mut file: Option<String> = None;
-    let mut index = 0;
-    while let Some(arg) = args.get(index) {
-        match arg.as_str() {
-            "-a" | "--audio" => audio = true,
-            "-g" | "--geometry" => {
-                index += 1;
-                if let Some(value) = args.get(index) {
-                    geometry = Some(value.clone());
-                }
-            }
-            other => file = Some(other.to_string()),
-        }
-        index += 1;
-    }
+    let parsed = parse_start_args(args)?;
+    let StartArgs {
+        audio,
+        quality,
+        fps,
+        geometry,
+        file,
+    } = parsed;
     let Some(file) = file else {
         notify(
             &path_env,
@@ -136,15 +211,16 @@ pub fn start(args: &[String], path_env: Option<&str>) -> Result<()> {
         anyhow::bail!("record: {RECORDER} not found on PATH");
     };
 
+    let bitrate = quality.bitrate();
     let mut recorder_args: Vec<String> = [
         "-c",
         "av1_vaapi",
         "-r",
-        "30",
+        &fps.to_string(),
         "-p",
-        "b=5M",
+        &format!("b={bitrate}"),
         "-p",
-        "maxrate=5M",
+        &format!("maxrate={bitrate}"),
     ]
     .iter()
     .map(ToString::to_string)

@@ -60,7 +60,7 @@ fn level_from_env() -> tracing::Level {
 
 use crate::{menu, popup, providers};
 use providers::{
-    bt, clip, launch, net, notify, power, proc, profile, shot, theme_, wallpaper, wifi,
+    bt, clip, launch, net, notify, power, proc, profile, rec_opt, shot, theme_, wallpaper, wifi,
 };
 
 /// The twelve menu providers, one per `flex-<name>` binary.
@@ -506,7 +506,21 @@ where
     if print_action {
         return run_select(provider, style).await;
     }
-    let menu = build_menu(provider, style)?;
+    run_custom_menu(build_menu(provider, style)?, style, handler).await
+}
+
+/// Run the select loop over a caller-built [`Menu`] (same outcome contract
+/// as [`run_standard_cli` minus the popup guard): frecency hook, `Quit` and
+/// `Cancelled` diverge, everything else goes to `handler`. Lets one binary
+/// chain several menus in-process (the recording-options submenu).
+///
+/// # Errors
+///
+/// When the event loop fails or the outcome handler fails.
+pub async fn run_custom_menu<F>(menu: Menu, style: StyleOptions, handler: F) -> Result<()>
+where
+    F: FnOnce(Outcome) -> Result<()>,
+{
     crate::spawn::set_wakeup_notifier(menu.notifier());
     // Snapshot row snapshots before the event loop consumes the menu: the
     // record hook joins choices to rows by id, skipping offline placeholders
@@ -529,6 +543,93 @@ where
         other => {
             record_hook(style.frecency, &rows, &other);
             handler(other)
+        }
+    }
+}
+
+/// Recording-options submenu: confirm-with-live-summary first, drill-in
+/// rows reopen their dimension tab, picks return here.
+///
+/// `Quit`/`Cancelled` diverge (exit code / 130, like the main menu), so a
+/// submenu escape cancels the whole capture; confirm returns the effective
+/// settings for the caller to execute.
+///
+/// # Errors
+///
+/// When a menu cannot build or an outcome is not a row choice.
+pub async fn run_recording_menu(
+    style: StyleOptions,
+    initial: rec_opt::RecOptions,
+) -> Result<rec_opt::RecOptions> {
+    use rec_opt::{apply_choice, Choice, Dimension};
+    let mut opts = initial;
+    loop {
+        let mut pick: Option<String> = None;
+        run_custom_menu(
+            style.apply(menu(rec_opt::PROVIDER, vec![rec_opt::options_tab(&opts)])),
+            style,
+            |outcome| match outcome {
+                Outcome::Chosen { action_id, .. } => {
+                    pick = Some(action_id);
+                    Ok(())
+                }
+                Outcome::Delete { action_id, .. } => {
+                    anyhow::bail!("recording options: unexpected delete outcome for '{action_id}'")
+                }
+                Outcome::Toggle { action_id, .. } => {
+                    anyhow::bail!("recording options: unexpected toggle outcome for '{action_id}'")
+                }
+                Outcome::Target { row, .. } => {
+                    anyhow::bail!("recording options: unexpected target outcome for '{row}'")
+                }
+                _ => unreachable!(),
+            },
+        )
+        .await?;
+        let Some(action_id) = pick else {
+            anyhow::bail!("recording options: menu returned no choice");
+        };
+        match apply_choice(&mut opts, &action_id) {
+            Choice::Confirm => return Ok(opts),
+            Choice::Open(dimension) => {
+                let tab = match dimension {
+                    Dimension::Audio => rec_opt::audio_tab(),
+                    Dimension::Quality => rec_opt::quality_tab(),
+                    Dimension::Fps => rec_opt::fps_tab(),
+                };
+                let mut value: Option<String> = None;
+                run_custom_menu(
+                    style.apply(menu(rec_opt::PROVIDER, vec![tab])),
+                    style,
+                    |outcome| match outcome {
+                        Outcome::Chosen { action_id, .. } => {
+                            value = Some(action_id);
+                            Ok(())
+                        }
+                        Outcome::Delete { action_id, .. } => {
+                            anyhow::bail!(
+                                "recording options: unexpected delete outcome for '{action_id}'"
+                            )
+                        }
+                        Outcome::Toggle { action_id, .. } => {
+                            anyhow::bail!(
+                                "recording options: unexpected toggle outcome for '{action_id}'"
+                            )
+                        }
+                        Outcome::Target { row, .. } => {
+                            anyhow::bail!(
+                                "recording options: unexpected target outcome for '{row}'"
+                            )
+                        }
+                        _ => unreachable!(),
+                    },
+                )
+                .await?;
+                if let Some(action_id) = value {
+                    let _ = apply_choice(&mut opts, &action_id);
+                }
+            }
+            Choice::Updated | Choice::Unknown => {}
         }
     }
 }
