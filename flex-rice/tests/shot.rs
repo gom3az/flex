@@ -539,3 +539,68 @@ fn binary_outside_a_popup_reexecs_into_the_menu_popup() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Worker-side popup wait: with a popup reported open, `grim` must not run
+/// until `pgrep` reports it gone — otherwise a fullscreen shot photographs
+/// the flex TUI itself.
+#[test]
+fn worker_waits_for_popup_gone_before_capture() {
+    let dir = stub_dir("exec-popup-wait");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("stub dir");
+    let log = dir.join("calls.log");
+    let logged = log.display().to_string();
+    let counted = dir.join("pgrep.count");
+    let counted_str = counted.display().to_string();
+    // Popup "open" for the first three probes, gone after: the worker polls
+    // through them (3 x 50 ms) before touching the screen.
+    write_exe(
+        &dir.join("pgrep"),
+        &format!(
+            "#!/usr/bin/env bash\nn=$(cat \"{counted_str}\" 2>/dev/null || echo 0)\necho $((n + 1)) > \"{counted_str}\"\n[ \"$n\" -lt 3 ]\n"
+        ),
+    );
+    write_exe(
+        &dir.join("grim"),
+        &format!("#!/usr/bin/env bash\necho \"grim $@\" >> \"{logged}\"\ntouch \"${{@: -1}}\"\n"),
+    );
+    write_exe(
+        &dir.join("wl-copy"),
+        &format!(
+            "#!/usr/bin/env bash\nbytes=$(wc -c | tr -d ' ')\necho \"wl-copy <$bytes bytes>\" >> \"{logged}\"\n"
+        ),
+    );
+    write_exe(
+        &dir.join("notify-send"),
+        &format!("#!/usr/bin/env bash\necho \"notify-send $@\" >> \"{logged}\"\n"),
+    );
+    let stubs = WorkerStubs {
+        dir,
+        log,
+        path_env: format!(
+            "{}:{}",
+            stub_dir("exec-popup-wait").display(),
+            std::env::var("PATH").unwrap_or_default()
+        ),
+    };
+    let file = stubs.dir.join("out.png");
+    let rec = stubs.dir.join("rec");
+    let output = run_capture_worker("full-shot", &file, &rec, &stubs);
+    assert!(
+        output.status.success(),
+        "full-shot: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let probes: usize = std::fs::read_to_string(&counted)
+        .expect("pgrep probe count")
+        .trim()
+        .parse()
+        .expect("probe count parses");
+    assert_eq!(probes, 4, "worker polls until the popup reports gone");
+    let lines = call_lines(&stubs.log);
+    assert!(
+        lines.iter().any(|line| line.starts_with("grim ")),
+        "grim runs, but only after the wait: {lines:?}"
+    );
+    let _ = std::fs::remove_dir_all(&stubs.dir);
+}

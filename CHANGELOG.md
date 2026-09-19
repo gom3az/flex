@@ -22,6 +22,10 @@ directly.
   lost since listing time reports `Image not found` instead of failing
   silent. Screenshots now copy as typed `image/png` and their notification
   carries an `image-path` hint (preview + Copy Image target).
+- `flex-shot` waits for the popup to disappear (bounded 1 s) before
+  capturing: the worker ran concurrently with the popup close, so a
+  fullscreen shot photographed the flex TUI itself (and a window shot could
+  measure the popup as the active window).
 - Clip retention: `flex-clip add` keeps the history within 200 entries
   (newest win) and drops unpinned lines older than 7 days, enforced on every
   append (the `watch` daemon inherits it). Pinned entries are exempt. Ages

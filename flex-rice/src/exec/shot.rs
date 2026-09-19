@@ -8,7 +8,7 @@
 //! `hyprctl -j activewindow` geometry (window mode), `grim` + `wl-copy` +
 //! `notify-send` (screenshots), or the `RECORDING_START` helper (recordings).
 //!
-//! Four deliberate departures from the wrapper (all tested):
+//! Five deliberate departures from the wrapper (all tested):
 //!
 //! - No generated script: the wrapper writes a temp capture script and runs it
 //!   under `setsid --fork bash` (plus a `trap` cleanup); the port builds a
@@ -24,6 +24,11 @@
 //! - `slurp` cancel exits 130 quietly: the wrapper's `set +e` fell through to
 //!   `wl-copy`/`notify-send` on cancel; the port treats a failed `slurp` as
 //!   user-cancelled and stops before `grim`.
+//! - Worker-side popup wait: the parent detaches the worker and closes the
+//!   popup concurrently, so the worker waits (bounded, the same 1 s cap) for
+//!   the popup to disappear before `slurp`/`activewindow`/`grim` — otherwise
+//!   a fullscreen shot photographs the flex TUI itself (and a window shot
+//!   measures the popup).
 //!
 //! [`MENU_CLASS`]: crate::popup::MENU_CLASS
 //! [`popup::match_pattern`]: crate::popup::match_pattern
@@ -529,6 +534,9 @@ pub fn run_worker(
     path_env: Option<&str>,
 ) -> Result<CaptureEnd> {
     let path_env = path_env.map_or_else(ambient_path, str::to_string);
+    // The parent kills the popup concurrently with the detach: do not touch
+    // the screen until it is gone, or the shot contains the flex TUI.
+    wait_popup_gone(&path_env);
     let file_str = file.to_string_lossy().into_owned();
     let rec_str = rec.to_string_lossy().into_owned();
     let mut geometry: Option<String> = None;
@@ -670,6 +678,33 @@ fn spawn_detached_worker(id: ShotId, filepath: &Path, rec: &Path, path_env: &str
     Ok(())
 }
 
+/// Wait for the popup to disappear (bounded 20 × 50 ms, the wrapper's 1 s
+/// cap): the parent closes it concurrently with the detach, so the worker
+/// must not capture or query the active window until it is gone — otherwise
+/// a fullscreen `grim` photographs the flex TUI itself (and a window `grim`
+/// measures the popup). A missing `pgrep` or an already-gone popup proceeds
+/// immediately.
+fn wait_popup_gone(path_env: &str) {
+    let Some(pgrep) = resolve_tool("pgrep", path_env) else {
+        return;
+    };
+    let pattern = popup::match_pattern(popup::MENU_CLASS);
+    for _ in 0..20_u32 {
+        let open = Command::new(&pgrep)
+            .arg("-f")
+            .arg(&pattern)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .output_retrying()
+            .is_ok_and(|output| output.status.success());
+        if !open {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// Close the popup and wait for its window to disappear (best-effort, never
 /// fails: like the wrapper's `kill … || true` plus its `2>/dev/null … else
 /// break`, a missing tool or an already-dead match just ends the wait).
@@ -688,23 +723,7 @@ fn close_popup(path_env: &str) {
             .stderr(Stdio::null())
             .status_retrying();
     }
-    let Some(pgrep) = resolve_tool("pgrep", path_env) else {
-        return;
-    };
-    for _ in 0..20_u32 {
-        let open = Command::new(&pgrep)
-            .arg("-f")
-            .arg(&pattern)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .output_retrying()
-            .is_ok_and(|output| output.status.success());
-        if !open {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    wait_popup_gone(path_env);
 }
 
 /// What [`execute`] staged for the detached worker.
@@ -918,6 +937,16 @@ mod tests {
         assert_eq!(active_geometry("{\"at\":[11],\"size\":[33,44]}"), None);
         assert_eq!(active_geometry("not json at all"), None);
         assert_eq!(active_geometry(""), None);
+    }
+
+    #[test]
+    fn popup_wait_proceeds_without_pgrep() {
+        // No `pgrep` on the shadow PATH: the worker must not block, it just
+        // captures (covers headless/CLI runs and the stub-PATH suites).
+        let dir = std::env::temp_dir().join(format!("shot-nopgrep-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        wait_popup_gone(&dir.to_string_lossy());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
