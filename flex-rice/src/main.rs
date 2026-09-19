@@ -83,12 +83,6 @@ enum Command {
         #[command(subcommand)]
         op: Option<ClipVerb>,
     },
-    /// Control center (volume/brightness/network).
-    Center {
-        /// Print the selected `ACTION:` line without executing it.
-        #[arg(long)]
-        print_action: bool,
-    },
     /// Wallpaper picker (image previews).
     Wallpaper {
         /// Print the selected `ACTION:` line without executing it.
@@ -258,7 +252,6 @@ fn run() -> Result<()> {
             *print_action,
             &clip_verb_tail(op.as_ref()),
         ),
-        Command::Center { print_action } => reexec(Provider::Center, style, *print_action, &[]),
         Command::Wallpaper { print_action, op } => reexec(
             Provider::Wallpaper,
             style,
@@ -357,7 +350,6 @@ fn multicall_tool() -> Option<String> {
         "flex-shot",
         "flex-theme",
         "flex-clip",
-        "flex-center",
         "flex-wallpaper",
         "flex-wifi",
         "flex-proc",
@@ -519,6 +511,7 @@ mod tests {
             char_set: flex_core::CharSetName::Default,
             theme: flex_core::ThemeName::Default,
             peaks: flex_core::Peaks::Auto,
+            frecency: true,
         }
     }
 }

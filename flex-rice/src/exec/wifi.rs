@@ -16,8 +16,7 @@
 //!   (`:148-156`), then connect with the password;
 //! - `noop` → exit `0` (the empty-scan placeholder).
 //!
-//! Snapshot convention (the [`exec::shot`](super::shot) template, via the
-//! [`exec::center`](super::center) port): [`plan`] builds the [`Step`]s
+//! Snapshot convention (the [`exec::shot`](super::shot) template): [`plan`] builds the [`Step`]s
 //! from already-decided inputs, [`describe`] renders one step as a single
 //! line — unit tests pin the lines, and integration tests diff the
 //! stub-`PATH` call logs against the same shapes. Wifi-specific describe
@@ -27,30 +26,29 @@
 //! - `nmcli device disconnect <iface>`
 //! - `nmcli device wifi connect <ssid> ifname <iface>`
 //! - `nmcli device wifi connect <ssid> password <password> ifname <iface>`
-//!   (the password renders verbatim, like center's secure line)
+//!   (the password renders verbatim)
 //! - `<notify> -a Wi-Fi <Connected|Disconnected|Failed> <ssid>`
 //!
 //! Planning reads (`nmcli` discovery/list/profiles) run inside [`execute`]
-//! to decide the [`PlannedAction`] and are therefore not [`Step`]s (the
-//! center template's shape). The conditional notifies (the wrapper's
+//! to decide the [`PlannedAction`] and are therefore not [`Step`]s. The
+//! conditional notifies (the wrapper's
 //! `if connect; then …; else …` verbatim) ride on [`Step::Notify`] +
 //! [`NotifyWhen`]: the open and secure plans list both the `Connected`
 //! (success) and the `Failed` (failure) notifies, exactly one of which
 //! runs; the disconnect and saved-profile plans notify unconditionally.
 //!
-//! Center reuse (called, not duplicated — the [`exec::center`](super::center)
-//! template solved these, so this module delegates):
+//! Shared parsing (called, not duplicated):
 //!
-//! - fresh-state parsing via [`parse_nmcli_devices`](crate::providers::center::parse_nmcli_devices)
-//!   and [`parse_nmcli_wifi`](crate::providers::center::parse_nmcli_wifi) —
+//! - fresh-state parsing via [`parse_nmcli_devices`](crate::providers::wifi::parse_nmcli_devices)
+//!   and [`parse_nmcli_wifi`](crate::providers::wifi::parse_nmcli_wifi) —
 //!   the same functions the picker scan paths use;
 //! - saved-profile parsing via [`parse_saved_profiles`](crate::providers::wifi::parse_saved_profiles)
 //!   (the wrapper's `is_saved` + `nmcli_unescape` verbatim: last-colon
 //!   split, `802-11-wireless` only, names unescaped before compare);
 //! - the [`NotifyWhen`] gating enum.
 //!
-//! Deliberately mirrored from center (same structure, wifi-local copies —
-//! the convention every `exec` module follows):
+//! Deliberately mirrored from the retired center port (same structure,
+//! wifi-local copies — the convention every `exec` module follows):
 //!
 //! - `nmcli_cmd`, `ambient_path`, `resolve_tool`, `tool_quiet`,
 //!   `tool_captured`, `set_echo`, and the `execute`/`execute_with` split;
@@ -60,8 +58,7 @@
 //!
 //! - No `ACTION:` unescape step: the wrapper's `wifi_unescape` undoes the
 //!   wire escaping of the `ACTION:` line, but the in-process label is
-//!   already raw, so the SSID compares identically with no transform (the
-//!   center port's departure, repeated).
+//!   already raw, so the SSID compares identically with no transform.
 //! - The saved-profile attempt runs inside `decide`: the attempt is both
 //!   the probe (did the stored key work?) and the effect (it connects),
 //!   exactly like the wrapper's order (`is_saved` → connect →
@@ -105,7 +102,7 @@
 //! `NMCLI`, `NOTIFY_SEND` (tool overrides), `FLEX_WIFI_PASSWORD` (skips the
 //! prompt).
 //!
-//! [`NotifyWhen`]: crate::exec::center::NotifyWhen
+//! [`NotifyWhen`]: crate::exec::NotifyWhen
 
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -114,8 +111,8 @@ use std::process::{Command, Stdio};
 
 use anyhow::Result;
 
-use crate::exec::center::NotifyWhen;
-use crate::providers::{center, wifi};
+use crate::exec::NotifyWhen;
+use crate::providers::wifi;
 use crate::spawn::RetryExec as _;
 use crate::tools;
 
@@ -190,7 +187,7 @@ pub enum Step {
         iface: String,
     },
     /// `nmcli device wifi connect <ssid> password <password> ifname
-    /// <iface>` (gates its notifies; the center `WifiConnectSecure` shape).
+    /// <iface>` (gates its notifies).
     NmcliConnectSecure {
         /// `NMCLI` program.
         nmcli: String,
@@ -218,7 +215,7 @@ pub enum Step {
 /// (`nmcli` discovery/list/profiles, the saved-profile attempt, the
 /// password prompt) and [`execute_with`] runs the [`plan`] steps with no
 /// further input (the `execute`/`execute_with` split from the pilot
-/// template, via the center port).
+/// template).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlannedAction {
     /// Nothing to do (`noop`, vanished interface, empty password): no
@@ -488,7 +485,7 @@ fn tool_captured(path_env: &str, name: &str, args: &[&str]) -> Option<String> {
 /// `None` when the interface vanished since the snapshot.
 fn wifi_iface(nmcli: &str, path_env: &str) -> Option<String> {
     let out = tool_captured(path_env, nmcli, DEVICE_TYPE_ARGS)?;
-    center::parse_nmcli_devices(&out)
+    wifi::parse_nmcli_devices(&out)
 }
 
 /// `nmcli … wifi list` output for `iface` (`None` on any failure — the
@@ -563,8 +560,7 @@ fn read_pw_line(reader: &mut dyn BufRead) -> Option<String> {
 }
 
 /// `stty -echo` / `stty echo` with stdin on `/dev/tty` (best-effort: every
-/// failure is swallowed — the prompt still works, just visibly; the center
-/// port's helper verbatim).
+/// failure is swallowed — the prompt still works, just visibly).
 fn set_echo(path_env: &str, on: bool) {
     let Ok(tty) = File::open("/dev/tty") else {
         return;
@@ -764,7 +760,7 @@ fn decide_connect(
         return PlannedAction::None;
     };
     let list = wifi_list(&nmcli, path_env, &iface).unwrap_or_default();
-    let found = center::parse_nmcli_wifi(&list)
+    let found = wifi::parse_nmcli_wifi(&list)
         .into_iter()
         .find(|net| net.ssid == ssid);
     match found {
@@ -1027,8 +1023,7 @@ mod tests {
 
     #[test]
     fn plan_snapshot_open_lists_connect_plus_both_notifies() {
-        // Unlike center's open arm (success-only), the wifi wrapper's
-        // `:130-134` has the `else`: exactly one notify runs.
+        // The wifi wrapper's `:130-134` has the `else`: exactly one notify runs.
         assert_eq!(
             describe_plan(&plan(&PlannedAction::WifiConnectOpen {
                 nmcli: String::from("nmcli"),

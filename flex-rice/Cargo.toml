@@ -39,10 +39,6 @@ name = "flex-clip"
 path = "src/bin/flex-clip.rs"
 
 [[bin]]
-name = "flex-center"
-path = "src/bin/flex-center.rs"
-
-[[bin]]
 name = "flex-wallpaper"
 path = "src/bin/flex-wallpaper.rs"
 

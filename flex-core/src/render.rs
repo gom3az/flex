@@ -1512,7 +1512,7 @@ fn draw_hints(buf: &mut Buffer, ox: u16, y: u16, width: usize, menu: &Menu) {
     Line::from(Span::styled(text, menu.theme.hint)).render(area, buf);
 }
 
-/// Flex extension: the `center` gauge row.
+/// Flex extension: the gauge row.
 fn draw_gauge(buf: &mut Buffer, ox: u16, y: u16, width: usize, menu: &Menu) {
     let Some(gauge) = menu.gauge.as_ref() else {
         return;

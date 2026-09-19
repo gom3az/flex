@@ -17,7 +17,7 @@ use std::path::Path;
 
 use flex_core::{Menu, Row, RowId, Tab, Target};
 
-use crate::providers::{self, center};
+use crate::providers::{self};
 
 /// Provider name for the `ACTION:` line.
 pub const PROVIDER: &str = "bt";
@@ -379,7 +379,7 @@ pub fn devices_tab_from(
             TAB_DEVICES,
             vec![Row::offline_placeholder(
                 RowId::new(providers::NOOP_ID),
-                center::OFFLINE_LABEL,
+                flex_core::strings::OFFLINE_LABEL,
             )],
         );
         tab.bare_rows = false;
@@ -425,7 +425,7 @@ pub fn adapters_tab_from(adapter: Option<&BtAdapterInfo>) -> Tab {
             TAB_ADAPTERS,
             vec![Row::offline_placeholder(
                 RowId::new(providers::NOOP_ID),
-                center::OFFLINE_LABEL,
+                flex_core::strings::OFFLINE_LABEL,
             )],
         );
         tab.bare_rows = false;
@@ -522,7 +522,7 @@ fn bt_info_snapshot(mac: &str) -> Option<String> {
         }
         return std::fs::read_to_string(Path::new(&dir).join(mac)).ok();
     }
-    center::snapshot(BT_INFO_DIR_ENV, "bluetoothctl", &["info", mac])
+    super::snapshot(BT_INFO_DIR_ENV, "bluetoothctl", &["info", mac])
 }
 
 /// Helper to read default audio sink status snapshot or live from wpctl/pactl.
@@ -534,18 +534,18 @@ fn bt_default_sink_snapshot() -> Option<String> {
         return std::fs::read_to_string(file).ok();
     }
     // Live probe: try wpctl status first, then pactl info
-    if let Some(out) = center::snapshot("", "wpctl", &["status"]) {
+    if let Some(out) = super::snapshot("", "wpctl", &["status"]) {
         return Some(out);
     }
-    center::snapshot("", "pactl", &["info"])
+    super::snapshot("", "pactl", &["info"])
 }
 
 /// Build the `Devices` tab live.
 #[must_use]
 pub fn devices_tab() -> Tab {
-    let show_out = center::snapshot(BT_SHOW_FILE_ENV, "bluetoothctl", &["show"]);
+    let show_out = super::snapshot(BT_SHOW_FILE_ENV, "bluetoothctl", &["show"]);
     let adapter = show_out.as_deref().and_then(parse_controller);
-    let devices_out = center::snapshot(BT_DEVICES_FILE_ENV, "bluetoothctl", &["devices"]);
+    let devices_out = super::snapshot(BT_DEVICES_FILE_ENV, "bluetoothctl", &["devices"]);
     let sink_status = bt_default_sink_snapshot();
 
     devices_tab_from(
@@ -559,7 +559,7 @@ pub fn devices_tab() -> Tab {
 /// Build the `Adapters` tab live.
 #[must_use]
 pub fn adapters_tab() -> Tab {
-    let show_out = center::snapshot(BT_SHOW_FILE_ENV, "bluetoothctl", &["show"]);
+    let show_out = super::snapshot(BT_SHOW_FILE_ENV, "bluetoothctl", &["show"]);
     let adapter = show_out.as_deref().and_then(parse_controller);
     adapters_tab_from(adapter.as_ref())
 }
@@ -567,7 +567,12 @@ pub fn adapters_tab() -> Tab {
 /// Build the full interactive Bluetooth menu.
 #[must_use]
 pub fn bt_menu() -> Menu {
-    let tabs = vec![devices_tab(), adapters_tab()];
+    let mut tabs = vec![devices_tab(), adapters_tab()];
+    // Device rows are scan snapshots (MACs come and go): searchable, but
+    // nothing stable worth learning.
+    for tab in &mut tabs {
+        tab.learnable = false;
+    }
     providers::menu(PROVIDER, tabs)
 }
 
@@ -587,9 +592,9 @@ pub fn refresh(menu: &mut Menu) {
     }
     let previous = menu.app.focused_row().map(|row| row.id.clone());
 
-    let show_out = center::snapshot(BT_SHOW_FILE_ENV, "bluetoothctl", &["show"]);
+    let show_out = super::snapshot(BT_SHOW_FILE_ENV, "bluetoothctl", &["show"]);
     let adapter = show_out.as_deref().and_then(parse_controller);
-    let devices_out = center::snapshot(BT_DEVICES_FILE_ENV, "bluetoothctl", &["devices"]);
+    let devices_out = super::snapshot(BT_DEVICES_FILE_ENV, "bluetoothctl", &["devices"]);
     let sink_status = bt_default_sink_snapshot();
 
     if let Some(tab) = menu.app.tabs.iter_mut().find(|tab| tab.name == TAB_DEVICES) {

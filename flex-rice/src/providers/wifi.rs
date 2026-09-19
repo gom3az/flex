@@ -9,22 +9,21 @@
 //!   the meta (the `power` provider's convention).
 //! - `Disconnect from {ssid}` (id `disconnect`) when a scan reports a
 //!   network with `IN-USE` `*`. The SSID rides in the escaped label, never
-//!   in the whitespace-split id token (SSIDs may contain spaces) — the same
-//!   contract as the `center` `Networks` tab.
+//!   in the whitespace-split id token (SSIDs may contain spaces).
 //! - One row per scanned network (id `wifi`, label = SSID, meta =
-//!   [`center::wifi_meta_body`]: `{signal}% [{bar}] {🔓 Open|🔒 sec}` plus
-//!   `  Connected`). Unlike the `center` tab these rows render in standard
+//!   [`wifi_meta_body`]: `{signal}% [{bar}] {🔓 Open|🔒 sec}` plus
+//!   `  Connected`). These rows render in standard
 //!   mode, because the signal/security meta is the whole point of the
 //!   picker.
 //!
-//! Degradation follows the `center` `Networks` tab exactly: a failed
+//! Degradation on command failure is exact: a failed
 //! `nmcli` call, or success without a `*:wifi` device, gives one dim
 //! `— offline` row (Q7); a successful scan that finds nothing gives the
 //! bash-exact `(No Wi-Fi networks)` parenthetical.
 //!
 //! Testability: the pure [`rows`] takes captured stdout, and every live
 //! snapshot honors a `$WIFI_*` file seam through the shared
-//! [`center::snapshot`] contract (seam set → read that file; seam
+//! [`super::snapshot`] contract (seam set → read that file; seam
 //! set-but-empty → force failure; unset → run the real command once).
 //! No test touches the network.
 //!
@@ -40,8 +39,6 @@ use std::sync::Mutex;
 
 use flex_core::{width, Menu, Row, RowId, Tab};
 
-use super::center;
-
 /// Provider name for the `ACTION:` line.
 pub const PROVIDER: &str = "wifi";
 /// Tab title (the picker shows the one surface it has).
@@ -52,9 +49,11 @@ pub const OFF_ID: &str = "off";
 pub const ON_ID: &str = "on";
 /// Action id: drop the active connection (`nmcli device disconnect`).
 pub const DISCONNECT_ID: &str = "disconnect";
-/// Action id for a network row (label = SSID; shared with the `center`
-/// `Networks` tab via [`center::WIFI_ID`]).
-pub const CONNECT_ID: &str = center::WIFI_ID;
+/// Action id for a network row (label = SSID).
+pub const CONNECT_ID: &str = WIFI_ID;
+/// Action id for a network row (label = SSID; the SSID rides in the escaped
+/// label, never in the whitespace-split id token).
+pub const WIFI_ID: &str = "wifi";
 /// Snapshot seam for `nmcli radio wifi` output (else the command runs).
 pub const RADIO_FILE_ENV: &str = "WIFI_RADIO_FILE";
 /// Snapshot seam for `nmcli … device` output (else the command runs).
@@ -71,6 +70,163 @@ pub const CONNECTED_MARKER: &str = "Connected";
 pub const SCANNING_LABEL: &str = "Scanning…";
 /// Secured-network glyph (`nf-fa-lock`, single cell in a Nerd Font).
 pub const LOCK_GLYPH: &str = "\u{f023}";
+/// One visible Wi-Fi network (`nmcli -t` fields).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WifiNet {
+    /// SSID (nmcli escapes unescaped, colons included).
+    pub ssid: String,
+    /// Signal 0–100+ (non-numeric coerces to 0, bash-exact).
+    pub signal: i64,
+    /// Security string (`--`/empty = open).
+    pub security: String,
+    /// Whether `IN-USE` is `*`.
+    pub connected: bool,
+}
+
+/// Parse `nmcli -t -f DEVICE,TYPE device` into the Wi-Fi interface name
+/// (`None` = no `*:wifi` line, the offline case). Bash-exact
+/// (`awk -F: '$2=="wifi"{print $1; exit}'`).
+#[must_use]
+pub fn parse_nmcli_devices(text: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        let mut fields = line.split(':');
+        let device = fields.next().filter(|name| !name.is_empty())?;
+        (fields.next() == Some("wifi")).then(|| device.to_string())
+    })
+}
+
+/// Undo nmcli `-t` escaping (`\\` → `\`, `\:` → `:`), bash-exact via the
+/// `\x01` placeholder so an escaped backslash before a colon survives.
+///
+/// Single pass over bytes (no 3× `replace` allocation storm). Shared with
+/// profile-name parsing below (same escaping rules).
+pub(crate) fn unescape_ssid(escaped: &str) -> String {
+    // Byte-level `strip_prefix` pre-checks, single pass, one allocation
+    // sized to the input.
+    let mut out = String::with_capacity(escaped.len());
+    let mut rest = escaped;
+    while !rest.is_empty() {
+        if let Some(tail) = rest.strip_prefix("\\\\") {
+            out.push('\\');
+            rest = tail;
+        } else if let Some(tail) = rest.strip_prefix("\\:") {
+            out.push(':');
+            rest = tail;
+        } else {
+            let mut chars = rest.chars();
+            if let Some(c) = chars.next() {
+                out.push(c);
+                rest = chars.as_str();
+            } else {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Parse `nmcli -t -f IN-USE,SSID,SIGNAL,SECURITY device wifi list`.
+///
+/// Edge-inward split (bash-exact): `IN-USE` is the first field and
+/// `SECURITY`/`SIGNAL` the last two (never contain colons), so SSIDs
+/// with colons survive. Non-numeric/negative signals become 0; empty
+/// SSIDs are skipped.
+#[must_use]
+pub fn parse_nmcli_wifi(text: &str) -> Vec<WifiNet> {
+    let mut nets = Vec::new();
+    for line in text.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        let Some((inuse, after_first)) = line.split_once(':') else {
+            continue;
+        };
+        let Some((middle, security)) = after_first.rsplit_once(':') else {
+            continue;
+        };
+        let Some((ssid_esc, signal_raw)) = middle.rsplit_once(':') else {
+            continue;
+        };
+        let signal: i64 = signal_raw.parse().ok().filter(|val| *val >= 0).unwrap_or(0);
+        let ssid = unescape_ssid(ssid_esc);
+        if ssid.is_empty() {
+            continue;
+        }
+        nets.push(WifiNet {
+            ssid,
+            signal,
+            security: security.to_string(),
+            connected: inuse == "*",
+        });
+    }
+    nets
+}
+
+/// Meta body for a Wi-Fi row — bash-exact minus the `select`-renderer
+/// prefix: `{signal}% [{8-wide bar}]` `{🔓 Open|🔒 sec}` plus a
+/// `  Connected` suffix when active.
+#[must_use]
+pub fn wifi_meta_body(net: &WifiNet) -> String {
+    let lock: &str = if net.security.is_empty() || net.security == "--" {
+        "🔓 Open"
+    } else {
+        net.security.as_str()
+    };
+    let mut meta = format!("{}% {} ", net.signal, bar(net.signal, 100, 8));
+    if lock == "🔓 Open" {
+        meta.push_str(lock);
+    } else {
+        meta.push_str("🔒 ");
+        meta.push_str(lock);
+    }
+    if net.connected {
+        meta.push_str("  Connected");
+    }
+    meta
+}
+
+/// Meta for a Wi-Fi row — bash-exact: [`wifi_meta_body`] with the
+/// `select`-renderer `◇ ` prefix (empty opt leaves the double space).
+#[must_use]
+pub fn wifi_meta(net: &WifiNet) -> String {
+    format!("◇  {}", wifi_meta_body(net))
+}
+
+/// Wi-Fi rows from parsed networks (empty scan → bash parenthetical).
+#[must_use]
+pub fn wifi_rows(nets: &[WifiNet]) -> Vec<Row> {
+    if nets.is_empty() {
+        return vec![Row::new(
+            RowId::new(crate::providers::NOOP_ID),
+            flex_core::strings::NO_NETWORKS_LABEL,
+        )];
+    }
+    nets.iter()
+        .map(|net| Row::with_meta(RowId::new(WIFI_ID), net.ssid.clone(), wifi_meta(net)))
+        .collect()
+}
+
+/// `[████░░░░]` gauge primitive — exact port of bash `flex_bar`:
+/// `max <= 0` becomes 1, `val` clamps to `[0, max]`, and
+/// `filled = (val * width + max / 2) / max` (integer, rounds half up).
+/// Saturating arithmetic: absurd magnitudes degrade to a full bar, never
+/// panic.
+#[must_use]
+pub fn bar(val: i64, max: i64, width: usize) -> String {
+    let max = max.max(1);
+    let clamped = val.clamp(0, max);
+    let slots = i64::try_from(width).unwrap_or(i64::MAX);
+    let filled = usize::try_from(clamped.saturating_mul(slots).saturating_add(max / 2) / max)
+        .unwrap_or(0)
+        .min(width);
+    let mut out = String::with_capacity(width + 2);
+    out.push('[');
+    for index in 0..width {
+        out.push(if index < filled { '█' } else { '░' });
+    }
+    out.push(']');
+    out
+}
 /// Open-network glyph (`nf-fa-unlock`; the deleted rofi picker's `icon=`).
 pub const UNLOCK_GLYPH: &str = "\u{f09c}";
 
@@ -108,9 +264,12 @@ pub fn radio_enabled(out: &str) -> bool {
 /// Prefix for `Saved:` rows.
 pub const SAVED_PREFIX: &str = "Saved: ";
 
-/// One dim `— offline` row (Q7, shared shape with `center`).
+/// One dim `— offline` row (Q7).
 fn offline_row() -> Row {
-    Row::offline_placeholder(RowId::new(center::NOOP_ID), center::OFFLINE_LABEL)
+    Row::offline_placeholder(
+        RowId::new(crate::providers::NOOP_ID),
+        flex_core::strings::OFFLINE_LABEL,
+    )
 }
 
 /// SSIDs of the saved Wi-Fi profiles in `nmcli -t -f NAME,TYPE connection show`
@@ -130,8 +289,7 @@ pub fn parse_saved_profiles(text: &str) -> Vec<String> {
     text.lines()
         .filter_map(|line| {
             let (name_esc, kind) = line.rsplit_once(':')?;
-            (kind == "802-11-wireless" && !name_esc.is_empty())
-                .then(|| center::unescape_ssid(name_esc))
+            (kind == "802-11-wireless" && !name_esc.is_empty()).then(|| unescape_ssid(name_esc))
         })
         .collect()
 }
@@ -143,7 +301,7 @@ pub fn parse_saved_profiles(text: &str) -> Vec<String> {
 /// the row connects without asking for a password — the picker says so
 /// instead of letting the prompt come as a surprise.
 #[must_use]
-pub fn state_marker(net: &center::WifiNet, saved: &[String]) -> &'static str {
+pub fn state_marker(net: &WifiNet, saved: &[String]) -> &'static str {
     if net.connected {
         CONNECTED_MARKER
     } else if saved.iter().any(|ssid| ssid == &net.ssid) {
@@ -155,14 +313,14 @@ pub fn state_marker(net: &center::WifiNet, saved: &[String]) -> &'static str {
 
 /// Network rows for [`rows`]: one per net, or the bash parenthetical when
 /// the scan found nothing. Standard-mode metas, so this is deliberately not
-/// [`center::wifi_rows`], which is bash-exact for the `center` tab's bare
-/// rows. `saved` is [`parse_saved_profiles`] output.
+/// [`wifi_rows`], which renders dialog-style bare rows.
+/// `saved` is [`parse_saved_profiles`] output.
 #[must_use]
-pub fn network_rows(nets: &[center::WifiNet], saved: &[String]) -> Vec<Row> {
+pub fn network_rows(nets: &[WifiNet], saved: &[String]) -> Vec<Row> {
     if nets.is_empty() {
         return vec![Row::new(
-            RowId::new(center::NOOP_ID),
-            center::NO_NETWORKS_LABEL,
+            RowId::new(crate::providers::NOOP_ID),
+            flex_core::strings::NO_NETWORKS_LABEL,
         )];
     }
     // OPT-8: compute each row's security text once (was once for the width
@@ -196,13 +354,13 @@ const BAR_WIDTH: usize = 10;
 ///
 /// The glyphs are Nerd Font private-use icons (`nf-fa-lock`, `nf-fa-unlock`
 /// — the ones the deleted rofi picker used), **not** the `🔒`/`🔓` emoji that
-/// [`center::wifi_meta_body`] carries: an emoji is drawn by a colour-emoji
+/// [`wifi_meta_body`] carries: an emoji is drawn by a colour-emoji
 /// fallback font, so inside a row of Noto Sans Nerd Font text it lands at
 /// emoji metrics (different size and advance) and visibly breaks the meta
 /// column. Private-use glyphs are single-cell by construction, like every
 /// other icon in these dotfiles.
 #[must_use]
-pub fn security_text(net: &center::WifiNet) -> String {
+pub fn security_text(net: &WifiNet) -> String {
     if net.security.is_empty() || net.security == "--" {
         format!("{UNLOCK_GLYPH} Open")
     } else {
@@ -227,7 +385,7 @@ pub fn security_text(net: &center::WifiNet) -> String {
 /// therefore end in blank cells rather than shifting every field to the right.
 /// `security_width` comes from [`network_rows`].
 #[must_use]
-pub fn net_meta(net: &center::WifiNet, security_width: usize, state: &str) -> String {
+pub fn net_meta(net: &WifiNet, security_width: usize, state: &str) -> String {
     let security = security_text(net);
     net_meta_with_security(net, &security, security_width, state)
 }
@@ -236,7 +394,7 @@ pub fn net_meta(net: &center::WifiNet, security_width: usize, state: &str) -> St
 /// per-row `security_text` allocation out of the width scan).
 #[must_use]
 pub fn net_meta_with_security(
-    net: &center::WifiNet,
+    net: &WifiNet,
     security: &str,
     security_width: usize,
     state: &str,
@@ -244,7 +402,7 @@ pub fn net_meta_with_security(
     let meta = format!(
         "{signal:>3}% {bar:<bar_w$}  {security:<security_w$}  {state:>state_w$}",
         signal = net.signal,
-        bar = center::bar(net.signal, 100, 8),
+        bar = bar(net.signal, 100, 8),
         security = security,
         bar_w = BAR_WIDTH,
         security_w = security_width,
@@ -282,11 +440,11 @@ pub fn rows(snapshot: Snapshot<'_>) -> Vec<Row> {
         "nmcli radio wifi off",
     )];
     let nets = match (snapshot.devices, snapshot.wifi) {
-        (Some(devices), Some(list)) if center::parse_nmcli_devices(devices).is_some() => {
-            center::parse_nmcli_wifi(list)
+        (Some(devices), Some(list)) if parse_nmcli_devices(devices).is_some() => {
+            parse_nmcli_wifi(list)
         }
-        // No Wi-Fi interface, or the list scan failed: same offline row the
-        // `center` tab shows, with the radio action still available.
+        // No Wi-Fi interface, or the list scan failed: one dim offline row,
+        // with the radio action still available.
         _ => {
             rows.push(offline_row());
             return rows;
@@ -377,8 +535,8 @@ impl OwnedSnapshot {
 /// scan, and the saved profiles. Never triggers a scan, so it cannot block
 /// the UI.
 fn live_snapshot() -> OwnedSnapshot {
-    let radio = center::snapshot(RADIO_FILE_ENV, "nmcli", &["radio", "wifi"]);
-    let devices = center::snapshot(
+    let radio = super::snapshot(RADIO_FILE_ENV, "nmcli", &["radio", "wifi"]);
+    let devices = super::snapshot(
         NMCLI_DEVICES_FILE_ENV,
         "nmcli",
         &["-t", "-f", "DEVICE,TYPE", "device"],
@@ -389,11 +547,9 @@ fn live_snapshot() -> OwnedSnapshot {
         .as_deref()
         .filter(|out| radio_enabled(out))
         .and(devices.as_deref())
-        .and_then(center::parse_nmcli_devices)
-        .and_then(|iface| {
-            center::snapshot(NMCLI_WIFI_FILE_ENV, "nmcli", &list_args(&iface, false))
-        });
-    let profiles = center::snapshot(
+        .and_then(parse_nmcli_devices)
+        .and_then(|iface| super::snapshot(NMCLI_WIFI_FILE_ENV, "nmcli", &list_args(&iface, false)));
+    let profiles = super::snapshot(
         NMCLI_PROFILES_FILE_ENV,
         "nmcli",
         &["-t", "-f", "NAME,TYPE", "connection", "show"],
@@ -434,7 +590,9 @@ pub fn tab() -> Tab {
 #[must_use]
 pub fn menu() -> Menu {
     let snapshot = live_snapshot();
-    let tab = tab_from(snapshot.view());
+    let mut tab = tab_from(snapshot.view());
+    // Scan snapshots come and go: searchable, but nothing stable worth learning.
+    tab.learnable = false;
     spawn_rescan(&snapshot);
     crate::menu(PROVIDER, vec![tab])
 }
@@ -460,19 +618,16 @@ pub fn initial_rows(snapshot: Snapshot<'_>) -> Vec<Row> {
 /// on, a Wi-Fi device exists, and the cache holds no networks.
 fn scan_pending(snapshot: Snapshot<'_>) -> bool {
     let radio_on = snapshot.radio.is_some_and(radio_enabled);
-    let has_device = snapshot
-        .devices
-        .and_then(center::parse_nmcli_devices)
-        .is_some();
+    let has_device = snapshot.devices.and_then(parse_nmcli_devices).is_some();
     let cached_empty = snapshot
         .wifi
-        .is_none_or(|list| center::parse_nmcli_wifi(list).is_empty());
+        .is_none_or(|list| parse_nmcli_wifi(list).is_empty());
     radio_on && has_device && cached_empty
 }
 
 /// Dim `Scanning…` placeholder (noop id: selecting it does nothing).
 fn scanning_row() -> Row {
-    Row::offline_placeholder(RowId::new(center::NOOP_ID), SCANNING_LABEL)
+    Row::offline_placeholder(RowId::new(crate::providers::NOOP_ID), SCANNING_LABEL)
 }
 
 /// Hand a finished scan to the running picker (worker thread → tick).
@@ -552,18 +707,14 @@ fn spawn_rescan(snapshot: &OwnedSnapshot) {
     if !snapshot.radio.as_deref().is_some_and(radio_enabled) {
         return;
     }
-    let Some(iface) = snapshot
-        .devices
-        .as_deref()
-        .and_then(center::parse_nmcli_devices)
-    else {
+    let Some(iface) = snapshot.devices.as_deref().and_then(parse_nmcli_devices) else {
         return;
     };
     let radio = snapshot.radio.clone();
     let devices = snapshot.devices.clone();
     let profiles = snapshot.profiles.clone();
     let task = crate::spawn::BgTask::spawn(move || {
-        let fresh = center::snapshot(NMCLI_WIFI_FILE_ENV, "nmcli", &list_args(&iface, true));
+        let fresh = super::snapshot(NMCLI_WIFI_FILE_ENV, "nmcli", &list_args(&iface, true));
         rows(Snapshot {
             radio: radio.as_deref(),
             devices: devices.as_deref(),
@@ -640,7 +791,7 @@ mod tests {
     fn meta_columns_share_one_geometry() {
         // `WPA1 WPA2` (9 cells with its lock glyph) sets the security column
         // for the whole list; `Open` and the `Connected` marker pad to it.
-        let nets = center::parse_nmcli_wifi("*:A:100:WPA2\n:B:49:WPA1 WPA2\n:C:7:--\n");
+        let nets = parse_nmcli_wifi("*:A:100:WPA2\n:B:49:WPA1 WPA2\n:C:7:--\n");
         let rows = network_rows(&nets, &[]);
         let metas: Vec<String> = rows
             .iter()
@@ -684,7 +835,7 @@ Wired:802-3-ethernet\n:802-11-wireless\n";
     #[test]
     fn state_marker_prefers_connected_then_saved() {
         let saved = vec!["HomeNet".to_string(), "Lobby".to_string()];
-        let nets = center::parse_nmcli_wifi("*:HomeNet:87:WPA2\n:Lobby:41:WPA2\n:Guest:20:--\n");
+        let nets = parse_nmcli_wifi("*:HomeNet:87:WPA2\n:Lobby:41:WPA2\n:Guest:20:--\n");
         let markers: Vec<&str> = nets.iter().map(|net| state_marker(net, &saved)).collect();
         assert_eq!(markers, vec!["Connected", "Saved", ""]);
     }
@@ -693,7 +844,7 @@ Wired:802-3-ethernet\n:802-11-wireless\n";
     fn saved_networks_are_marked_in_their_own_column() {
         // The marker column keeps its width: `Saved` pads, so the security
         // column does not shift between rows.
-        let nets = center::parse_nmcli_wifi(":HomeNet:87:WPA2\n:Lobby:41:WPA3\n");
+        let nets = parse_nmcli_wifi(":HomeNet:87:WPA2\n:Lobby:41:WPA3\n");
         let saved = vec!["HomeNet".to_string()];
         let rows = network_rows(&nets, &saved);
         let metas: Vec<&str> = rows
@@ -748,7 +899,10 @@ Wired:802-3-ethernet\n:802-11-wireless\n";
                 rows.iter().any(|row| row.offline),
                 "offline placeholder for {radio:?}/{devices:?}/{wifi:?}: {rows:?}"
             );
-            assert_eq!(rows.last().expect("row").id.as_str(), center::NOOP_ID);
+            assert_eq!(
+                rows.last().expect("row").id.as_str(),
+                crate::providers::NOOP_ID
+            );
         }
     }
 
@@ -756,8 +910,8 @@ Wired:802-3-ethernet\n:802-11-wireless\n";
     fn empty_scan_keeps_the_bash_parenthetical() {
         let rows = rows(snap(Some("enabled\n"), Some(DEVICES), Some("")));
         assert_eq!(rows.len(), 2, "radio row + parenthetical: {rows:?}");
-        assert_eq!(rows[1].label, center::NO_NETWORKS_LABEL);
-        assert_eq!(rows[1].id.as_str(), center::NOOP_ID);
+        assert_eq!(rows[1].label, flex_core::strings::NO_NETWORKS_LABEL);
+        assert_eq!(rows[1].id.as_str(), crate::providers::NOOP_ID);
         assert!(rows[1].meta.is_none(), "parenthetical carries no meta");
     }
 
@@ -778,7 +932,7 @@ Wired:802-3-ethernet\n:802-11-wireless\n";
             let rows = initial_rows(snap(Some("enabled\n"), Some(DEVICES), cached));
             assert_eq!(rows.len(), 2, "radio row + placeholder: {rows:?}");
             assert_eq!(rows[1].label, SCANNING_LABEL);
-            assert_eq!(rows[1].id.as_str(), center::NOOP_ID);
+            assert_eq!(rows[1].id.as_str(), crate::providers::NOOP_ID);
             assert!(rows[1].offline, "placeholder is dim");
         }
     }
@@ -803,7 +957,10 @@ Wired:802-3-ethernet\n:802-11-wireless\n";
         // No Wi-Fi device: the offline row stays (nothing will be scanned).
         let nodev = initial_rows(snap(Some("enabled\n"), Some("eth0:ethernet\n"), None));
         assert!(nodev.last().expect("row").offline);
-        assert_eq!(nodev.last().expect("row").label, center::OFFLINE_LABEL);
+        assert_eq!(
+            nodev.last().expect("row").label,
+            flex_core::strings::OFFLINE_LABEL
+        );
     }
 
     #[test]

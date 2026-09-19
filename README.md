@@ -1,6 +1,6 @@
 # flex — reusable Rust TUI menu library
 
-`flex` powers the dotfiles popup menus (`power`, `launch`, `clip`, `center`,
+`flex` powers the dotfiles popup menus (`power`, `launch`, `clip`,
 `shot`, `theme`, `wallpaper`, `wifi`, `proc`, `mixer`, `net`, `bt`, `notify`).
 Every provider is a Rust binary that renders its menu and executes the selected
 row **in-process** — the retired shell wrappers and the `ACTION:` wire protocol
@@ -17,7 +17,7 @@ Both halves of flex live in this repo as workspace members:
 
 Dependencies run one way (`flex-rice` → `flex-core`). The engine's only former
 reach into providers is now a seam: `Menu::on_tick` takes a `TickHook`, and
-`flex-rice` supplies the one that refreshes `center` gauges, picks up a finished
+`flex-rice` supplies the one that picks up a finished
 `wifi` scan, polls `proc`/`net`/`bt`, and updates `notify` live items —
 build menus in this repo with `flex_rice::menu(…)`, which installs it.
 
@@ -46,7 +46,6 @@ and the `flex-record` helper.
 | `flex-shot` | shot | Screenshot/recording flow: `slurp`, `grim`, `wl-copy`, `notify-send`, or the `flex-record` helper (`RECORDING_START` overrides) |
 | `flex-theme` | theme | Theme switcher: scans `~/.config/themes/available` and activates the selection in-process; `list`/`current`/`activate`/`delete` verbs (`$THEME_SWITCHER` overrides with `<switcher> activate <name>`) |
 | `flex-clip` | clip | Clipboard history: restore a selection to clipboard with `wl-copy`, delete it, pin/unpin it; `add`/`pin`/`unpin`/`current`/`watch` (alias: `daemon`) verbs |
-| `flex-center` | center | Control center: volume/brightness/network/bluetooth/power/theme tabs |
 | `flex-wallpaper` | wallpaper | Wallpaper picker with a kitty-graphics preview pane; sets the selection in-process (hyprpaper socket + `hyprpaper.conf`); `set <path>` verb (`$SET_WALLPAPER` overrides with `<setter> <path>`) |
 | `flex-wifi` | wifi | Wi-Fi picker: radio on/off, disconnect, connect (saved profile or password prompt) |
 | `flex-proc` | proc | Native process manager: filter `/proc`, Enter = SIGTERM, Delete = SIGKILL, `m` = stop/continue |
@@ -90,13 +89,13 @@ separate CLI step.
 
 | Variable | Provider | Purpose |
 |---|---|---|
-| `NMCLI` | wifi, center | `nmcli` tool override |
-| `BLUETOOTHCTL`, `WPCTL` | center | Tool overrides |
-| `NOTIFY_SEND` | wifi | Notification tool override (`center` hardcodes `notify-send`) |
-| `THEME_SWITCHER` | theme, center | Theme-activation override; unset/empty runs the in-process activator |
+| `NMCLI` | wifi | `nmcli` tool override |
+| `BLUETOOTHCTL`, `WPCTL` | bt | Tool overrides |
+| `NOTIFY_SEND` | wifi | Notification tool override |
+| `THEME_SWITCHER` | theme | Theme-activation override; unset/empty runs the in-process activator |
 | `SET_WALLPAPER` | wallpaper | Wallpaper-setting override; unset/empty runs the in-process setter |
 | `DRY_RUN` | power, profile | When exactly `1`, print `would run: <cmd>` instead of executing |
-| `FLEX_WIFI_PASSWORD`, `FLEX_CENTER_PASSWORD` | wifi, center | Skip the `/dev/tty` password prompt |
+| `FLEX_WIFI_PASSWORD` | wifi | Skip the `/dev/tty` password prompt |
 | `SCREENSHOT_DIR`, `RECORDING_START` | shot | Capture output dir / recording helper override (defaults to `flex-record`) |
 | `CLIPHIST_FILE`, `CLIPHIST_PINS`, `CLIPHIST_CURRENT` | clip | History, pins and current-entry store overrides |
 | `FLEX_PROC_KTHREADS` | proc | Show kernel threads (empty cmdline) in the process list |
@@ -113,7 +112,7 @@ separate CLI step.
 ## Popups
 
 Popups use the window classes `flex-menu` (compact variant: power/shot/theme/
-wifi/bt/profile), `flex-menu-wide` (wide variant: launch/clip/center/wallpaper/proc/net),
+wifi/bt/profile), `flex-menu-wide` (wide variant: launch/clip/wallpaper/proc/net),
 and `flex-notify-center` (right-side drawer).
 Toggle is keyed on the **variant**, not the provider, so opening `wifi` while
 the `power` popup is up closes it instead of stacking. The hosting terminal

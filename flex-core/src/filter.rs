@@ -25,6 +25,8 @@
 //! seam (swap [`FuzzyRanker`] for a `nucleo`-backed ranker without touching
 //! [`rank_all`] or the key/render layers).
 
+use std::collections::HashMap;
+
 use crate::Row;
 
 /// Haystack starts with the needle (`"fir"` in `"Firefox"`).
@@ -243,8 +245,27 @@ pub struct RankedHit {
 /// matching only — no `String`/`Vec` allocs except the per-hit positions.
 #[must_use]
 pub fn rank_all(needle: &str, rows: &[Row]) -> Vec<RankedHit> {
+    rank_all_inner(needle, rows, None)
+}
+
+/// [`rank_all`] with a zoxide-style frecency overlay.
+///
+/// Acceptance, tiers and penalties are identical; the sort gains a frecency
+/// tie-break between equal tiers (see [`usage_score`]). Rows never recorded
+/// score `0.0` and keep provider order among themselves, so an empty table
+/// ranks exactly like [`rank_all`]. On an empty needle every row matches and
+/// frecency alone decides the order (most-used on top).
+#[must_use]
+pub fn rank_all_scored(needle: &str, rows: &[Row], usage: &UsageTable, now: u64) -> Vec<RankedHit> {
+    rank_all_inner(needle, rows, Some((usage, now)))
+}
+
+/// Shared matching loop behind [`rank_all`] and [`rank_all_scored`].
+fn rank_all_inner(needle: &str, rows: &[Row], usage: Option<(&UsageTable, u64)>) -> Vec<RankedHit> {
     if needle.is_empty() {
-        return empty_hits(rows);
+        let mut hits = empty_hits(rows);
+        sort_hits(&mut hits, rows, usage);
+        return hits;
     }
     let folded_needle: Vec<char> = lowercase_chars(needle);
     let mut hits: Vec<RankedHit> = Vec::new();
@@ -264,7 +285,7 @@ pub fn rank_all(needle: &str, rows: &[Row]) -> Vec<RankedHit> {
             });
         }
     }
-    hits.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.index.cmp(&b.index)));
+    sort_hits(&mut hits, rows, usage);
     hits
 }
 
@@ -392,6 +413,139 @@ fn apply_penalties(tier: u16, leading: usize, gaps: usize) -> u16 {
         .saturating_sub(LEADING_PENALTY_PER_CHAR.saturating_mul(lead_hit))
 }
 
+/// Zoxide-style frecency overlay (usage ranking).
+///
+/// The fuzzy predicate and tiers above gate *whether* a row matches; this
+/// section only reorders matches by learned use, mirroring
+/// `zoxide/src/db/dir.rs`:
+/// - [`usage_score`] = `rank × boost`, boost `4.0`/`2.0`/`0.5`/`0.25` for
+///   entries used within the hour/day/week or earlier.
+/// - [`usage_record`] = `rank += 1.0`, `last_accessed = now` (new ids start
+///   at `1.0`), the `add_update` port.
+/// - [`usage_age`] trims the table when it exceeds [`MAX_USAGE_ENTRIES`]
+///   (scale `×0.9`, drop `rank < 1.0`), the `age` port.
+/// - [`usage_remove`] drops one id, the `remove` port.
+///
+/// Keyed by row-id string (not [`crate::RowId`]: it has no `Borrow<str>`,
+/// so `get(id_str)` would not compile). Scores are `f64` compared with
+/// `total_cmp`; ranks stay non-negative so `NaN` cannot arise.
+///
+/// Nowhere here touches I/O or the clock: the caller supplies `now`
+/// (epoch seconds) and owns persistence (see `flex-rice/src/usage.rs`).
+/// Seconds in an hour (frecency recency boundary, cf. zoxide `HOUR`).
+pub const FRECENCY_HOUR_SECS: u64 = 3_600;
+/// Seconds in a day (frecency recency boundary, cf. zoxide `DAY`).
+pub const FRECENCY_DAY_SECS: u64 = 86_400;
+/// Seconds in a week (frecency recency boundary, cf. zoxide `WEEK`).
+pub const FRECENCY_WEEK_SECS: u64 = 604_800;
+/// Score boost for entries used within the hour (cf. zoxide `4.0`).
+pub const FRECENCY_BOOST_HOUR: f64 = 4.0;
+/// Score boost for entries used within the day (cf. zoxide `2.0`).
+pub const FRECENCY_BOOST_DAY: f64 = 2.0;
+/// Score boost for entries used within the week (cf. zoxide `0.5`).
+pub const FRECENCY_BOOST_WEEK: f64 = 0.5;
+/// Score boost for older entries (cf. zoxide `0.25`).
+pub const FRECENCY_BOOST_OLDER: f64 = 0.25;
+/// Rank added per recorded choice (cf. zoxide `add_update(path, 1.0, now)`).
+pub const USAGE_RANK_PER_USE: f64 = 1.0;
+/// Minimum surviving rank after aging (cf. zoxide's `rank < 1.0` drop).
+pub const USAGE_MIN_RANK: f64 = 1.0;
+/// Aging scale applied when the table overflows (cf. zoxide `0.9`).
+pub const USAGE_AGE_FACTOR: f64 = 0.9;
+/// Maximum usage entries kept per provider (bounds the store file).
+pub const MAX_USAGE_ENTRIES: usize = 512;
+
+/// One learned entry: zoxide `Dir` minus the path (the row id is the map key).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct UsageEntry {
+    /// Accumulated uses (`+1.0` per recorded choice, aged on overflow).
+    pub rank: f64,
+    /// Epoch seconds of the last recorded choice.
+    pub last_accessed: u64,
+}
+
+/// Usage table keyed by row-id string (see module docs for why not `RowId`).
+pub type UsageTable = HashMap<String, UsageEntry>;
+
+/// Zoxide `Dir::score` port: `rank × recency boost` at `now` (epoch seconds).
+///
+/// Negative ranks (only possible from hand-built tables) clamp to zero.
+#[must_use]
+pub fn usage_score(entry: &UsageEntry, now: u64) -> f64 {
+    let duration = now.saturating_sub(entry.last_accessed);
+    let boost = if duration < FRECENCY_HOUR_SECS {
+        FRECENCY_BOOST_HOUR
+    } else if duration < FRECENCY_DAY_SECS {
+        FRECENCY_BOOST_DAY
+    } else if duration < FRECENCY_WEEK_SECS {
+        FRECENCY_BOOST_WEEK
+    } else {
+        FRECENCY_BOOST_OLDER
+    };
+    entry.rank.max(0.0) * boost
+}
+
+/// Zoxide `add_update` port: bump `id` by one use at `now`, inserting at
+/// rank `1.0` when unseen.
+pub fn usage_record(table: &mut UsageTable, id: &str, now: u64) {
+    match table.get_mut(id) {
+        Some(entry) => {
+            entry.rank = (entry.rank + USAGE_RANK_PER_USE).max(0.0);
+            entry.last_accessed = now;
+        }
+        None => {
+            table.insert(
+                id.to_owned(),
+                UsageEntry {
+                    rank: USAGE_RANK_PER_USE.max(0.0),
+                    last_accessed: now,
+                },
+            );
+        }
+    }
+}
+
+/// Zoxide `remove` port: drop `id` from the table; returns whether one existed.
+pub fn usage_remove(table: &mut UsageTable, id: &str) -> bool {
+    table.remove(id).is_some()
+}
+
+/// Zoxide `age` port (entry-count budget): when the table exceeds
+/// [`MAX_USAGE_ENTRIES`], scale every rank by [`USAGE_AGE_FACTOR`] and drop
+/// entries below [`USAGE_MIN_RANK`]. Under budget this is a no-op.
+pub fn usage_age(table: &mut UsageTable) {
+    if table.len() <= MAX_USAGE_ENTRIES {
+        return;
+    }
+    table.retain(|_, entry| {
+        entry.rank *= USAGE_AGE_FACTOR;
+        entry.rank >= USAGE_MIN_RANK
+    });
+}
+
+/// Frecency of one ranked hit (`0.0` when the row was never recorded).
+fn hit_frecency(hit: &RankedHit, rows: &[Row], usage: &UsageTable, now: u64) -> f64 {
+    rows.get(hit.index)
+        .and_then(|row| usage.get(row.id.as_str()))
+        .map_or(0.0, |entry| usage_score(entry, now))
+}
+
+/// Sort hits by tier descending, then frecency descending, then provider
+/// index ascending (stable, deterministic).
+fn sort_hits(hits: &mut [RankedHit], rows: &[Row], usage: Option<(&UsageTable, u64)>) {
+    match usage {
+        Some((table, now)) => hits.sort_by(|a, b| {
+            b.score
+                .cmp(&a.score)
+                .then_with(|| {
+                    hit_frecency(b, rows, table, now).total_cmp(&hit_frecency(a, rows, table, now))
+                })
+                .then_with(|| a.index.cmp(&b.index))
+        }),
+        None => hits.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.index.cmp(&b.index))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -452,5 +606,233 @@ mod tests {
         let hits = rank_all_legacy("fir", &rows);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].index, 0);
+    }
+
+    fn usage_table(entries: &[(&str, f64, u64)]) -> UsageTable {
+        entries
+            .iter()
+            .map(|(id, rank, last)| {
+                (
+                    (*id).to_owned(),
+                    UsageEntry {
+                        rank: *rank,
+                        last_accessed: *last,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    // Exact `==` below: ranks are small integers and boosts are powers of
+    // two, so every compared product is exactly representable.
+    #[allow(clippy::float_cmp)]
+    #[test]
+    fn usage_score_boost_boundaries_mirror_zoxide() {
+        let now = 1_000_000_u64;
+        let at = |ago: u64| UsageEntry {
+            rank: 2.0,
+            last_accessed: now - ago,
+        };
+        let cases = [
+            (0, 8.0, "within the hour: x4"),
+            (FRECENCY_HOUR_SECS - 1, 8.0, "hour edge inclusive"),
+            (FRECENCY_HOUR_SECS, 4.0, "within the day: x2"),
+            (FRECENCY_DAY_SECS - 1, 4.0, "day edge inclusive"),
+            (FRECENCY_DAY_SECS, 1.0, "within the week: x0.5"),
+            (FRECENCY_WEEK_SECS - 1, 1.0, "week edge inclusive"),
+            (FRECENCY_WEEK_SECS, 0.5, "older: x0.25"),
+        ];
+        for (ago, expected, what) in cases {
+            assert!(
+                usage_score(&at(ago), now) == expected,
+                "{what}: got {}, want {expected}",
+                usage_score(&at(ago), now)
+            );
+        }
+        // Future timestamps saturate instead of underflowing.
+        let future = UsageEntry {
+            rank: 2.0,
+            last_accessed: now + 60,
+        };
+        assert!(usage_score(&future, now) == 8.0);
+    }
+
+    #[test]
+    fn usage_record_accumulates_and_stamps() {
+        let mut table = UsageTable::new();
+        usage_record(&mut table, "a", 100);
+        assert_eq!(
+            table["a"],
+            UsageEntry {
+                rank: 1.0,
+                last_accessed: 100
+            },
+            "new ids start at rank 1.0"
+        );
+        usage_record(&mut table, "a", 200);
+        assert_eq!(
+            table["a"],
+            UsageEntry {
+                rank: 2.0,
+                last_accessed: 200
+            },
+            "+1.0 per use, timestamp moves"
+        );
+    }
+
+    #[test]
+    fn usage_remove_reports_presence() {
+        let mut table = usage_table(&[("a", 3.0, 100)]);
+        assert!(usage_remove(&mut table, "a"));
+        assert!(!usage_remove(&mut table, "a"));
+        assert!(table.is_empty());
+    }
+
+    // Aged ranks compared here are exact (10.0*0.9=9.0, 100.0*0.9=90.0
+    // are exactly representable), so `assert_eq!` is sound.
+    #[allow(clippy::float_cmp)]
+    #[test]
+    fn usage_age_only_fires_over_budget() {
+        let mut small = usage_table(&[("a", 50.0, 1)]);
+        usage_age(&mut small);
+        assert_eq!(small["a"].rank, 50.0, "under budget is a no-op");
+        let mut big: UsageTable = (0..=MAX_USAGE_ENTRIES)
+            .map(|i| {
+                (
+                    format!("id{i:04}"),
+                    UsageEntry {
+                        rank: 10.0,
+                        last_accessed: 1,
+                    },
+                )
+            })
+            .collect();
+        usage_age(&mut big);
+        assert!(
+            big.values().all(|entry| entry.rank == 9.0),
+            "over budget scales every rank by 0.9"
+        );
+    }
+
+    // Aged ranks compared here are exact (10.0*0.9=9.0, 100.0*0.9=90.0
+    // are exactly representable), so `assert_eq!` is sound.
+    #[allow(clippy::float_cmp)]
+    #[test]
+    fn usage_age_drops_below_minimum_rank() {
+        let mut table: UsageTable = (0..MAX_USAGE_ENTRIES)
+            .map(|i| {
+                (
+                    format!("id{i:04}"),
+                    UsageEntry {
+                        rank: 1.0,
+                        last_accessed: 1,
+                    },
+                )
+            })
+            .collect();
+        table.insert(
+            "fresh".to_owned(),
+            UsageEntry {
+                rank: 100.0,
+                last_accessed: 1,
+            },
+        );
+        usage_age(&mut table);
+        assert!(!table.contains_key("id0000"), "1.0 * 0.9 < 1.0 drops");
+        assert_eq!(table["fresh"].rank, 90.0);
+    }
+
+    #[test]
+    fn scored_empty_table_matches_plain_order() {
+        let rows = vec![row("Confirm"), row("Firefox"), row("My Firm")];
+        let plain: Vec<usize> = rank_all("fir", &rows)
+            .into_iter()
+            .map(|hit| hit.index)
+            .collect();
+        let scored: Vec<usize> = rank_all_scored("fir", &rows, &UsageTable::new(), 1_000_000)
+            .into_iter()
+            .map(|hit| hit.index)
+            .collect();
+        assert_eq!(scored, plain, "no learned entries, no reorder");
+        let empty_plain: Vec<usize> = rank_all("", &rows)
+            .into_iter()
+            .map(|hit| hit.index)
+            .collect();
+        let empty_scored: Vec<usize> = rank_all_scored("", &rows, &UsageTable::new(), 1_000_000)
+            .into_iter()
+            .map(|hit| hit.index)
+            .collect();
+        assert_eq!(empty_scored, empty_plain);
+        assert_eq!(
+            empty_scored,
+            vec![0, 1, 2],
+            "empty needle keeps provider order"
+        );
+    }
+
+    #[test]
+    fn scored_prefers_used_row_within_tier() {
+        // Both prefix a non-first word at index 3: tier 80, leading 15 → 65
+        // each. The recorded one must lead on frecency alone.
+        let rows = vec![row("My Firm"), row("My First")];
+        let plain: Vec<usize> = rank_all("fir", &rows)
+            .into_iter()
+            .map(|hit| hit.index)
+            .collect();
+        assert_eq!(plain, vec![0, 1], "true tier tie keeps provider order");
+        let now = 1_000_000_u64;
+        let table = usage_table(&[("My First", 5.0, now)]);
+        let order: Vec<usize> = rank_all_scored("fir", &rows, &table, now)
+            .into_iter()
+            .map(|hit| hit.index)
+            .collect();
+        assert_eq!(order, vec![1, 0], "frecency breaks the tier tie");
+    }
+
+    #[test]
+    fn scored_never_outranks_a_higher_tier() {
+        // B-003 holds under frecency: string-prefix still beats a heavily
+        // used scattered/word match.
+        let rows = vec![row("Gnome Terminal"), row("Terminal")];
+        let now = 1_000_000_u64;
+        let table = usage_table(&[("Gnome Terminal", 100.0, now)]);
+        let order: Vec<usize> = rank_all_scored("term", &rows, &table, now)
+            .into_iter()
+            .map(|hit| hit.index)
+            .collect();
+        assert_eq!(order, vec![1, 0], "prefix 100 beats used prefix-word");
+    }
+
+    #[test]
+    fn scored_empty_needle_orders_by_frecency() {
+        let rows = vec![row("aa"), row("bb"), row("cc")];
+        let now = 1_000_000_u64;
+        let table = usage_table(&[("cc", 1.0, now - FRECENCY_WEEK_SECS), ("bb", 3.0, now)]);
+        let order: Vec<usize> = rank_all_scored("", &rows, &table, now)
+            .into_iter()
+            .map(|hit| hit.index)
+            .collect();
+        // bb: 3*4=12, cc: 1*0.25=0.25, aa: unrecorded 0.0.
+        assert_eq!(order, vec![1, 2, 0], "most-used on top at open");
+    }
+
+    #[test]
+    fn scored_balances_count_against_recency() {
+        let rows = vec![row("aa"), row("bb")];
+        let now = 10_000_000_u64;
+        // aa: 50*0.25=12.5, bb: 2*4=8 — heavy stale use still leads.
+        let table = usage_table(&[("aa", 50.0, now - FRECENCY_WEEK_SECS), ("bb", 2.0, now)]);
+        let order: Vec<usize> = rank_all_scored("", &rows, &table, now)
+            .into_iter()
+            .map(|hit| hit.index)
+            .collect();
+        assert_eq!(order, vec![0, 1]);
+        // aa: 12.5, bb: 4*4=16 — a fresh run of uses overtakes it.
+        let table = usage_table(&[("aa", 50.0, now - 2 * FRECENCY_WEEK_SECS), ("bb", 4.0, now)]);
+        let order: Vec<usize> = rank_all_scored("", &rows, &table, now)
+            .into_iter()
+            .map(|hit| hit.index)
+            .collect();
+        assert_eq!(order, vec![1, 0], "recent use beats stale count");
     }
 }

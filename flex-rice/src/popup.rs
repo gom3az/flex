@@ -28,7 +28,7 @@ pub const MENU_CLASS: &str = "flex-menu";
 
 /// Window class for the wide (`menu-wide`) popup variant.
 ///
-/// Providers: `launch`, `clip`, `center`, `wallpaper`.
+/// Providers: `launch`, `clip`, `wallpaper`.
 pub const WIDE_CLASS: &str = "flex-menu-wide";
 
 /// Window class for the notification center drawer (`drawer`) variant.
@@ -258,7 +258,7 @@ mod tests {
 
     /// Providers per variant, mirroring
     /// [`Provider::variant`](crate::runner::Provider::variant): four share
-    /// `menu`, four share `menu-wide`.
+    /// `menu`, three share `menu-wide`.
     const PROVIDER_VARIANTS: &[(&str, &str)] = &[
         ("power", "menu"),
         ("shot", "menu"),
@@ -266,7 +266,6 @@ mod tests {
         ("wifi", "menu"),
         ("launch", "menu-wide"),
         ("clip", "menu-wide"),
-        ("center", "menu-wide"),
         ("wallpaper", "menu-wide"),
     ];
 
@@ -452,8 +451,8 @@ mod tests {
     #[test]
     fn toggle_closes_the_wide_variant_for_a_different_wide_provider() {
         let stubs = install_stubs("close-wide-other", 0);
-        // `center` shares `menu-wide` with the `launch` popup that opened it.
-        let cmd = vec!["flex".to_string(), "center".to_string()];
+        // `wallpaper` shares `menu-wide` with the `launch` popup that opened it.
+        let cmd = vec!["flex".to_string(), "wallpaper".to_string()];
         toggle_impl(TerminalKind::Kitty, WIDE_CLASS, &cmd, Some(&stubs.path_env))
             .expect("toggle close succeeds");
         assert_eq!(

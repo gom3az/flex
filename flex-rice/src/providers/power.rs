@@ -11,9 +11,7 @@
 //!   them after the TUI exits, running the same commands verbatim.
 //! - `Reboot`/`Power Off` are danger rows armed/confirmed by the shared
 //!   [`keys`](flex_core::keys) double-Enter flow — danger logic is never
-//!   duplicated here (same delegation as `center::power_tab`, which uses
-//!   `pw`-prefixed ids for the center surface; the standalone provider
-//!   keeps the bash-exact arms).
+//!   duplicated here; the provider keeps the bash-exact arms.
 //!
 //! The library never executes power operations; it only selects a row.
 

@@ -176,7 +176,12 @@ pub fn build_speedtest_rows(snapshot: &SpeedtestSnapshot) -> Vec<Row> {
 /// Build the complete interactive `flex-net` menu.
 #[must_use]
 pub fn net_menu() -> Menu {
-    let tabs = vec![bandwidth_tab(), interfaces_tab(), speedtest_tab()];
+    let mut tabs = vec![bandwidth_tab(), interfaces_tab(), speedtest_tab()];
+    // Pids and scan snapshots come and go: searchable, but nothing stable
+    // worth learning.
+    for tab in &mut tabs {
+        tab.learnable = false;
+    }
     providers::menu(PROVIDER, tabs)
 }
 

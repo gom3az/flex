@@ -86,7 +86,7 @@ pub struct Theme {
     pub filter_prompt: Style,
     /// Filter placeholder + hint line.
     pub hint: Style,
-    /// Gauge fill (flex's `center` gauge widget).
+    /// Gauge fill (the volume-gauge widget).
     pub gauge_fill: Style,
     /// Offline rows/menus (`— offline`), dimmed like the old flex UI.
     pub offline: Style,

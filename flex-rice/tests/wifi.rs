@@ -4,7 +4,7 @@
 //!
 //! Reference-data fixtures live in `tests/fixtures/wifi/` (captured
 //! `nmcli` stdout); expected labels/metas are hand-computed from the
-//! shared `center` row builders. No test touches the network.
+//! shared row builders. No test touches the network.
 
 use std::io::Cursor;
 use std::os::unix::fs::PermissionsExt as _;
@@ -18,7 +18,7 @@ use ratatui::Terminal;
 use flex_core::keys::{handle_key, KeyOutcome, EXIT_CANCELLED};
 use flex_core::{run, Menu};
 use flex_rice::exec::wifi as exec_wifi;
-use flex_rice::providers::{center, wifi};
+use flex_rice::providers::wifi;
 
 /// Serializes every test that touches process env: the `WIFI_*` seam
 /// readers and the executor tests below. The executor tests set
@@ -237,7 +237,7 @@ fn missing_command_degrades_to_one_offline_row() {
     let tab = wifi::tab_from(snap(None, None, None));
     assert_eq!(tab.rows.len(), 1);
     assert!(tab.rows[0].offline, "dim offline placeholder");
-    assert_eq!(tab.rows[0].id.as_str(), center::NOOP_ID);
+    assert_eq!(tab.rows[0].id.as_str(), flex_rice::providers::NOOP_ID);
 }
 
 #[test]
@@ -248,23 +248,23 @@ fn enabled_radio_without_wifi_device_keeps_the_off_action() {
         Some(&fixture("nmcli-wifi.txt")),
     ));
     let ids: Vec<&str> = tab.rows.iter().map(|row| row.id.as_str()).collect();
-    assert_eq!(ids, vec!["off", center::NOOP_ID]);
+    assert_eq!(ids, vec!["off", flex_rice::providers::NOOP_ID]);
     assert!(tab.rows[1].offline);
 }
 
 #[test]
 fn empty_cache_shows_scanning_not_the_parenthetical() {
-    // The raw row set keeps the bash parenthetical (the `center` contract)…
+    // The raw row set keeps the bash parenthetical…
     let raw = wifi::rows(snap(
         Some(&fixture("radio-enabled.txt")),
         Some(&fixture("nmcli-devices.txt")),
         Some(""),
     ));
-    assert_eq!(raw[1].label, center::NO_NETWORKS_LABEL);
+    assert_eq!(raw[1].label, flex_core::strings::NO_NETWORKS_LABEL);
     // …but a picker that is still scanning must not claim there are none.
     let tab = fixture_tab("");
     let ids: Vec<&str> = tab.rows.iter().map(|row| row.id.as_str()).collect();
-    assert_eq!(ids, vec!["off", center::NOOP_ID]);
+    assert_eq!(ids, vec!["off", flex_rice::providers::NOOP_ID]);
     assert_eq!(tab.rows[1].label, wifi::SCANNING_LABEL);
     assert!(tab.rows[1].offline, "placeholder is dim");
 }
@@ -476,7 +476,7 @@ fn cold_cache_opens_on_the_scanning_placeholder() {
     assert_eq!(rows.len(), 2, "radio row + placeholder: {rows:?}");
     assert_eq!(rows[1].label, wifi::SCANNING_LABEL);
     assert!(rows[1].offline, "placeholder renders dim");
-    assert_eq!(rows[1].id.as_str(), center::NOOP_ID);
+    assert_eq!(rows[1].id.as_str(), flex_rice::providers::NOOP_ID);
 }
 
 #[test]

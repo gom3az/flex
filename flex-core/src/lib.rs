@@ -25,7 +25,7 @@ pub use theme::{Theme, ThemeName};
 use std::cell::{Ref, RefCell};
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 /// Stable identifier for a [`Row`]'s action.
 ///
@@ -518,6 +518,7 @@ impl TabState {
 
 /// A named tab (one provider view) holding its rows plus state.
 #[derive(Debug, Default)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct Tab {
     /// Tab title shown in the tab bar.
     pub name: String,
@@ -528,6 +529,12 @@ pub struct Tab {
     /// Whether the tab shows a filter line and accepts type-to-filter.
     /// Fixed-choice menus (`power`) opt out: five rows need no search.
     pub filterable: bool,
+    /// Whether matches on this tab learn usage ranking.
+    ///
+    /// Independent of [`Tab::filterable`]: searchable lists with ephemeral
+    /// rows (pids, MACs, scan snapshots) keep the search box but opt out
+    /// here, while fixed menus opt out of both. Defaults to `true`.
+    pub learnable: bool,
     /// Whether the `Delete` key arms the delete-confirm flow on this tab.
     /// Launch/power rows are never deletable (`false`); `clip` opts in.
     pub deletable: bool,
@@ -559,6 +566,7 @@ impl Tab {
             rows: Vec::new(),
             bare_rows: true,
             filterable: true,
+            learnable: true,
             deletable: false,
             state: TabState::default(),
             name_cache: RefCell::default(),
@@ -572,6 +580,7 @@ impl Tab {
             rows,
             bare_rows: true,
             filterable: true,
+            learnable: true,
             deletable: false,
             state: TabState::default(),
             name_cache: RefCell::default(),
@@ -699,6 +708,20 @@ pub struct App {
     /// Ranking engine for the filtered view (`Spec` default; `Legacy`
     /// preserves provider order via `--filter-mode=legacy`).
     pub filter_mode: filter::FilterMode,
+    /// Whether the zoxide-style frecency overlay may reorder matches
+    /// (opt-out via `--no-frecency` / `FLEX_NO_FRECENCY`). Defaults to
+    /// `true` in [`App::with_tabs`]; the derived `Default` is `false`,
+    /// so menus must go through `with_tabs` (or set this explicitly).
+    /// This is the global switch only: [`App::visible_rows`] additionally
+    /// requires the active tab to be filterable and learnable, so fixed
+    /// menus (`power`, `shot`, `profile`, `notify`, net's speedtest tab)
+    /// and ephemeral lists (`net`, `wifi`, `bt`, `center`) never rerank.
+    pub use_frecency: bool,
+    /// Learned usage table (row-id string → rank + timestamp), loaded once
+    /// per invocation by the caller. Empty (or disabled) ranks exactly like
+    /// [`filter::rank_all`]. Immutable for the life of the menu, so the
+    /// [`FilterCacheKey`] needs no usage component (see `visible_rows`).
+    pub usage: filter::UsageTable,
 }
 
 impl App {
@@ -718,6 +741,8 @@ impl App {
             help_open: false,
             help_scroll: 0,
             filter_mode: filter::FilterMode::default(),
+            use_frecency: true,
+            usage: filter::UsageTable::new(),
         }
     }
 
@@ -872,6 +897,18 @@ impl App {
     /// [`filter::FilterMode::Legacy`] every hit scores equally, so the
     /// tie-break keeps provider order (no score reordering).
     ///
+    /// Frecency ([`filter::rank_all_scored`]) applies to `Spec` only, and
+    /// only when [`App::use_frecency`] is set, the active tab is
+    /// filterable and learnable, and [`App::usage`] is non-empty — every
+    /// other combination ranks exactly like [`filter::rank_all`]. Fixed
+    /// tabs keep provider order and ignore learned entries; so do
+    /// searchable tabs with ephemeral rows (`net`, `wifi`, `bt`). The table is
+    /// immutable for the life of the menu (recording happens after the
+    /// event loop exits), so the [`FilterCacheKey`] needs no usage
+    /// component: a cached view stays valid and in-process clock drift is
+    /// ignored (sessions last seconds; boosts only move at hour/day/week
+    /// boundaries).
+    ///
     /// Cache (OPT-2): hits return a shared `Arc<[usize]>` — no index `Vec`
     /// is cloned on hit or on store. The probe compares against the stored
     /// key with borrows only (`filter` as `&str`, first id by reference),
@@ -901,7 +938,13 @@ impl App {
             }
         }
         let hits = match mode {
-            filter::FilterMode::Spec => filter::rank_all(filter, &tab.rows),
+            filter::FilterMode::Spec => {
+                if self.use_frecency && tab.filterable && tab.learnable && !self.usage.is_empty() {
+                    filter::rank_all_scored(filter, &tab.rows, &self.usage, usage_now())
+                } else {
+                    filter::rank_all(filter, &tab.rows)
+                }
+            }
             filter::FilterMode::Legacy => filter::rank_all_legacy(filter, &tab.rows),
         };
         let result: Arc<[usize]> = hits
@@ -1060,6 +1103,17 @@ impl App {
             false
         }
     }
+}
+
+/// Wall-clock epoch seconds for frecency scoring (`visible_rows`).
+///
+/// Unreachable-in-practice fallback is `0` (pre-epoch clock): every learned
+/// entry then scores at the hourly boost uniformly, so relative order among
+/// used rows is preserved and unrecorded rows still sort last.
+fn usage_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |age| age.as_secs())
 }
 
 /// Per-tick refresh hook, installed by the caller with [`Menu::on_tick`].

@@ -8,7 +8,6 @@
 pub mod theme_;
 
 pub mod bt;
-pub mod center;
 pub mod clip;
 pub mod launch;
 pub mod net;
@@ -26,11 +25,12 @@ use std::time::{Duration, Instant};
 
 use flex_core::{Menu, Row, RowId, Tab, TickHook};
 
+use crate::spawn::RetryExec as _;
+
 /// No-op row id (the executor exits 0, no effect).
 ///
-/// Defined once here and re-exported by [`center`] (which used to own the
-/// constant), because every provider's empty state ends up as a `noop` row
-/// (B-026).
+/// Defined once here because every provider's empty state ends up as a
+/// `noop` row (B-026).
 pub const NOOP_ID: &str = "noop";
 
 /// Placeholder row for a provider whose scan found nothing.
@@ -43,10 +43,35 @@ pub fn empty_row(label: &str) -> Row {
     Row::new(RowId::new(NOOP_ID), label)
 }
 
+/// Read one snapshot: fixture file when `$file_env` is set (tests), else
+/// run `cmd` with `args` once. `None` on any failure — missing command,
+/// failing exit, unreadable fixture — so callers degrade to offline or
+/// empty rows. A set-but-empty seam forces `None` (offline-path tests).
+/// Child stderr is discarded (bash `2>/dev/null` parity).
+///
+/// Shared by the `wifi` and `bt` providers (same seam contract, different
+/// `$WIFI_*`/`$BT_*` variables), so the rule lives in exactly one place.
+pub(crate) fn snapshot(file_env: &str, cmd: &str, args: &[&str]) -> Option<String> {
+    if let Ok(path) = std::env::var(file_env) {
+        if path.is_empty() {
+            return None;
+        }
+        return std::fs::read_to_string(path).ok();
+    }
+    let output = std::process::Command::new(cmd)
+        .args(args)
+        .output_retrying()
+        .ok()?;
+    if output.status.success() {
+        Some(crate::tools::decode_stdout(output.stdout))
+    } else {
+        None
+    }
+}
+
 /// Per-tick refresh for the providers whose rows go stale while the menu is
-/// open: `center` re-reads volume/brightness into its gauge in place, `wifi`
-/// swaps in a background scan once it finishes, and `proc` re-sweeps `/proc`
-/// keeping the cursor on the same pid.
+/// open: `wifi` swaps in a background scan once it finishes, and `proc`
+/// re-sweeps `/proc` keeping the cursor on the same pid.
 ///
 /// Installed by [`menu`]; filter, focus and scroll survive all refreshes.
 ///
@@ -56,9 +81,6 @@ pub fn empty_row(label: &str) -> Row {
 /// performs no spawns or disk reads. `wifi` stays event-driven (its
 /// background scan wakes the UI via `wake_ui` when finished).
 pub fn tick_hook(menu: &mut Menu) {
-    if menu.provider == center::PROVIDER {
-        center::refresh_gauges(menu);
-    }
     if menu.provider == wifi::PROVIDER {
         wifi::refresh_scan(menu);
     }

@@ -24,7 +24,6 @@ const INSTALLED: &[&str] = &[
     "flex-shot",
     "flex-theme",
     "flex-clip",
-    "flex-center",
     "flex-wallpaper",
     "flex-wifi",
     "flex-proc",

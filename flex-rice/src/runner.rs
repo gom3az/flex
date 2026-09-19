@@ -60,10 +60,10 @@ fn level_from_env() -> tracing::Level {
 
 use crate::{menu, popup, providers};
 use providers::{
-    bt, center, clip, launch, net, notify, power, proc, profile, shot, theme_, wallpaper, wifi,
+    bt, clip, launch, net, notify, power, proc, profile, shot, theme_, wallpaper, wifi,
 };
 
-/// The thirteen menu providers, one per `flex-<name>` binary.
+/// The twelve menu providers, one per `flex-<name>` binary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provider {
     /// Shutdown/reboot/logout menu.
@@ -76,8 +76,6 @@ pub enum Provider {
     Theme,
     /// Clipboard history.
     Clip,
-    /// Control center (volume/brightness/network).
-    Center,
     /// Wallpaper picker (image previews).
     Wallpaper,
     /// Wi-Fi picker.
@@ -96,13 +94,12 @@ pub enum Provider {
 
 impl Provider {
     /// Every provider, in binary-name order.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 12] = [
         Self::Power,
         Self::Launch,
         Self::Shot,
         Self::Theme,
         Self::Clip,
-        Self::Center,
         Self::Wallpaper,
         Self::Wifi,
         Self::Proc,
@@ -121,7 +118,6 @@ impl Provider {
             "shot" => Some(Self::Shot),
             "theme" => Some(Self::Theme),
             "clip" => Some(Self::Clip),
-            "center" => Some(Self::Center),
             "wallpaper" => Some(Self::Wallpaper),
             "wifi" => Some(Self::Wifi),
             "proc" => Some(Self::Proc),
@@ -142,7 +138,6 @@ impl Provider {
             Self::Shot => shot::PROVIDER,
             Self::Theme => theme_::PROVIDER,
             Self::Clip => clip::PROVIDER,
-            Self::Center => center::PROVIDER,
             Self::Wallpaper => wallpaper::PROVIDER,
             Self::Wifi => wifi::PROVIDER,
             Self::Proc => proc::PROVIDER,
@@ -160,7 +155,7 @@ impl Provider {
     }
 
     /// Popup variant for this provider (`menu` for power/shot/theme/wifi/bt/profile,
-    /// `menu-wide` for launch/clip/center/wallpaper/proc/net, `drawer` for notify — see
+    /// `menu-wide` for launch/clip/wallpaper/proc/net, `drawer` for notify — see
     /// [`popup::MENU_VARIANT`] / [`popup::WIDE_VARIANT`] / [`popup::DRAWER_VARIANT`]).
     #[must_use]
     pub fn variant(self) -> &'static str {
@@ -168,7 +163,7 @@ impl Provider {
             Self::Power | Self::Shot | Self::Theme | Self::Wifi | Self::Bt | Self::Profile => {
                 popup::MENU_VARIANT
             }
-            Self::Launch | Self::Clip | Self::Center | Self::Wallpaper | Self::Proc | Self::Net => {
+            Self::Launch | Self::Clip | Self::Wallpaper | Self::Proc | Self::Net => {
                 popup::WIDE_VARIANT
             }
             Self::Notify => popup::DRAWER_VARIANT,
@@ -182,7 +177,7 @@ impl Provider {
             Self::Power | Self::Shot | Self::Theme | Self::Wifi | Self::Bt | Self::Profile => {
                 popup::MENU_CLASS
             }
-            Self::Launch | Self::Clip | Self::Center | Self::Wallpaper | Self::Proc | Self::Net => {
+            Self::Launch | Self::Clip | Self::Wallpaper | Self::Proc | Self::Net => {
                 popup::WIDE_CLASS
             }
             Self::Notify => popup::DRAWER_CLASS,
@@ -253,6 +248,22 @@ pub fn filter_mode_as_str(mode: flex_core::filter::FilterMode) -> &'static str {
     }
 }
 
+/// Env kill-switch for usage ranking (mirrors `FLEX_USAGE_FILE`; set and
+/// non-empty disables, like the clip provider's env seams).
+pub const NO_FRECENCY_ENV: &str = "FLEX_NO_FRECENCY";
+
+/// Whether frecency ranking/recording is enabled: on unless `--no-frecency`
+/// was passed or `$FLEX_NO_FRECENCY` is set and non-empty.
+#[must_use]
+pub fn frecency_enabled(no_frecency: bool) -> bool {
+    if no_frecency {
+        return false;
+    }
+    std::env::var(NO_FRECENCY_ENV)
+        .ok()
+        .is_none_or(|value| value.is_empty())
+}
+
 /// Global presentation flags shared by every entry point (upstream
 /// `-s/-t/-p/--filter-mode`).
 #[derive(Debug, Args)]
@@ -261,6 +272,11 @@ pub struct GlobalStyle {
     /// provider order instead of score-reordering).
     #[arg(long, hide = true, default_value = "spec", global = true)]
     filter_mode: FilterModeArg,
+
+    /// Disable zoxide-style usage ranking: matches rank by fuzzy score
+    /// only and nothing is recorded (`$FLEX_NO_FRECENCY` does the same).
+    #[arg(long, global = true)]
+    no_frecency: bool,
 
     /// Character set (upstream `-s/--char-set`): default, compat, extracompat.
     #[arg(
@@ -302,6 +318,7 @@ impl GlobalStyle {
             char_set: self.char_set,
             theme: self.theme,
             peaks: self.peaks,
+            frecency: frecency_enabled(self.no_frecency),
         }
     }
 }
@@ -317,6 +334,8 @@ pub struct StyleOptions {
     pub theme: ThemeName,
     /// Peak-meter mode.
     pub peaks: Peaks,
+    /// Whether frecency reorders matches and choices are recorded.
+    pub frecency: bool,
 }
 
 impl StyleOptions {
@@ -324,6 +343,7 @@ impl StyleOptions {
     #[must_use]
     pub fn apply(self, mut menu: Menu) -> Menu {
         menu.app.filter_mode = self.filter_mode;
+        menu.app.use_frecency = self.frecency;
         menu.char_set = CharSet::get(self.char_set);
         menu.theme = Theme::get(self.theme);
         menu.peaks = self.peaks;
@@ -342,55 +362,72 @@ impl StyleOptions {
 ///
 /// Currently infallible (`Ok` always); the `Result` keeps the shared
 /// call-site shape for providers whose construction may fail later.
-pub async fn build_menu(provider: Provider, style: StyleOptions) -> Result<Menu> {
-    match provider {
-        Provider::Power => {
-            let tabs = power::power_tabs();
-            Ok(style.apply(menu(power::PROVIDER, tabs)))
-        }
-        Provider::Launch => {
-            let tab = launch::launch_tab();
-            Ok(style.apply(menu(launch::PROVIDER, vec![tab])))
-        }
-        Provider::Shot => {
-            let tab = shot::shot_tab();
-            Ok(style.apply(menu(shot::PROVIDER, vec![tab])))
-        }
-        Provider::Theme => {
-            let tab = theme_::theme_tab();
-            Ok(style.apply(menu(theme_::PROVIDER, vec![tab])))
-        }
-        Provider::Clip => {
-            let tab = clip::clip_tab();
-            if tab.rows.is_empty() {
-                flex_core::diag::warn("flex: clip: no history yet");
-                std::process::exit(EXIT_CANCELLED);
+pub fn build_menu(provider: Provider, style: StyleOptions) -> Result<Menu> {
+    let inner: Result<Menu> = {
+        match provider {
+            Provider::Power => {
+                let tabs = power::power_tabs();
+                Ok(style.apply(menu(power::PROVIDER, tabs)))
             }
-            Ok(style.apply(menu(clip::PROVIDER, vec![tab])))
-        }
-        Provider::Center => Ok(style.apply(center::center_menu().await)),
-        Provider::Wallpaper => {
-            let tab = wallpaper::wallpaper_tab();
-            if tab.rows.is_empty() {
-                flex_core::diag::warn("flex: wallpaper: no wallpapers found");
-                std::process::exit(EXIT_CANCELLED);
+            Provider::Launch => {
+                let tab = launch::launch_tab();
+                Ok(style.apply(menu(launch::PROVIDER, vec![tab])))
             }
-            let mut built = style.apply(menu(wallpaper::PROVIDER, vec![tab]));
-            // Image previews need a kitty-compatible terminal; everywhere
-            // else the picker is a plain list (no pane reserved).
-            built.preview = flex_core::preview::enabled();
-            Ok(built)
+            Provider::Shot => {
+                let tab = shot::shot_tab();
+                Ok(style.apply(menu(shot::PROVIDER, vec![tab])))
+            }
+            Provider::Theme => {
+                let tab = theme_::theme_tab();
+                Ok(style.apply(menu(theme_::PROVIDER, vec![tab])))
+            }
+            Provider::Clip => {
+                let tab = clip::clip_tab();
+                if tab.rows.is_empty() {
+                    flex_core::diag::warn("flex: clip: no history yet");
+                    std::process::exit(EXIT_CANCELLED);
+                }
+                Ok(style.apply(menu(clip::PROVIDER, vec![tab])))
+            }
+            Provider::Wallpaper => {
+                let tab = wallpaper::wallpaper_tab();
+                if tab.rows.is_empty() {
+                    flex_core::diag::warn("flex: wallpaper: no wallpapers found");
+                    std::process::exit(EXIT_CANCELLED);
+                }
+                let mut built = style.apply(menu(wallpaper::PROVIDER, vec![tab]));
+                // Image previews need a kitty-compatible terminal; everywhere
+                // else the picker is a plain list (no pane reserved).
+                built.preview = flex_core::preview::enabled();
+                Ok(built)
+            }
+            Provider::Wifi => Ok(style.apply(wifi::menu())),
+            Provider::Proc => Ok(style.apply(menu(proc::PROVIDER, vec![proc::proc_tab()]))),
+            Provider::Net => Ok(style.apply(net::net_menu())),
+            Provider::Bt => Ok(style.apply(bt::bt_menu())),
+            Provider::Notify => Ok(style.apply(notify::menu())),
+            Provider::Profile => {
+                let tab = profile::profile_tab();
+                Ok(style.apply(menu(profile::PROVIDER, vec![tab])))
+            }
         }
-        Provider::Wifi => Ok(style.apply(wifi::menu())),
-        Provider::Proc => Ok(style.apply(menu(proc::PROVIDER, vec![proc::proc_tab()]))),
-        Provider::Net => Ok(style.apply(net::net_menu())),
-        Provider::Bt => Ok(style.apply(bt::bt_menu())),
-        Provider::Notify => Ok(style.apply(notify::menu())),
-        Provider::Profile => {
-            let tab = profile::profile_tab();
-            Ok(style.apply(menu(profile::PROVIDER, vec![tab])))
-        }
+    };
+    let mut built = inner?;
+    // Frecency table: loaded once per invocation and keyed by the menu's own
+    // provider tag (what `Chosen` reports). Tabs that are neither
+    // filterable nor learnable (fixed menus, ephemeral lists) skip
+    // entirely — static options are not a learnable list.
+    if style.frecency
+        && built
+            .app
+            .tabs
+            .iter()
+            .any(|tab| tab.filterable && tab.learnable)
+    {
+        let all = crate::usage::load_all(None);
+        built.app.usage = crate::usage::load_provider(&all, &built.provider);
     }
+    Ok(built)
 }
 
 /// This process's argv for a popup re-exec: the current executable plus the
@@ -441,7 +478,7 @@ pub fn popup_guard(provider: Provider) -> Result<()> {
 /// be polled/read, or the `ACTION:` line cannot be written. The error
 /// carries no `flex:` prefix; [`fail`] adds it.
 pub async fn run_select(provider: Provider, style: StyleOptions) -> Result<()> {
-    let built = build_menu(provider, style).await?;
+    let built = build_menu(provider, style)?;
     crate::spawn::set_wakeup_notifier(built.notifier());
     emit_outcome(flex_core::run::run_capture(built).await?)
 }
@@ -469,12 +506,59 @@ where
     if print_action {
         return run_select(provider, style).await;
     }
-    let menu = build_menu(provider, style).await?;
+    let menu = build_menu(provider, style)?;
     crate::spawn::set_wakeup_notifier(menu.notifier());
+    // Snapshot row snapshots before the event loop consumes the menu: the
+    // record hook joins choices to rows by id, skipping offline placeholders
+    // and rows in fixed (non-filterable) tabs.
+    let rows: Vec<crate::usage::RowSnap> = menu
+        .app
+        .tabs
+        .iter()
+        .flat_map(|tab| {
+            tab.rows.iter().map(|row| crate::usage::RowSnap {
+                id: row.id.as_str().to_owned(),
+                offline: row.offline,
+                searchable: tab.filterable && tab.learnable,
+            })
+        })
+        .collect();
     match flex_core::run::run_capture(menu).await? {
         Outcome::Quit { code } => std::process::exit(code),
         Outcome::Cancelled => std::process::exit(EXIT_CANCELLED),
-        other => handler(other),
+        other => {
+            record_hook(style.frecency, &rows, &other);
+            handler(other)
+        }
+    }
+}
+
+/// Frecency record hook for the interactive path.
+///
+/// `--print-action` returns through [`run_select`], never here, so dry runs
+/// don't pollute ranking. `Chosen` bumps the row's rank, `Delete` drops its
+/// entry, everything else is ignored. Store failures only warn — a broken
+/// cache never fails a launch.
+fn record_hook(enabled: bool, rows: &[crate::usage::RowSnap], outcome: &Outcome) {
+    if !enabled {
+        return;
+    }
+    let now = crate::usage::now_secs();
+    let result = match outcome {
+        Outcome::Chosen {
+            provider,
+            action_id,
+            ..
+        } => crate::usage::record_choice(provider, rows, action_id, None, now),
+        Outcome::Delete {
+            provider,
+            action_id,
+            ..
+        } => crate::usage::remove_choice(provider, action_id, None),
+        _ => return,
+    };
+    if let Err(err) = result {
+        flex_core::diag::warn(&format!("flex: usage store: {err:#}"));
     }
 }
 
@@ -530,7 +614,8 @@ fn emit_outcome(outcome: Outcome) -> Result<()> {
 }
 
 /// Canonical flag tail for re-execing a provider binary: `-s/-t/-p` plus
-/// `--filter-mode` in fixed order, with `--print-action` last when set.
+/// `--filter-mode` in fixed order, `--no-frecency` when disabled, with
+/// `--print-action` last when set.
 ///
 /// Pure (no I/O, no spawn), so the dispatcher's flag-ordering is unit
 /// testable without opening a TUI.
@@ -546,6 +631,9 @@ pub fn canonical_tail(style: StyleOptions, print_action: bool) -> Vec<String> {
         "--filter-mode".to_string(),
         filter_mode_as_str(style.filter_mode).to_string(),
     ];
+    if !style.frecency {
+        tail.push("--no-frecency".to_string());
+    }
     if print_action {
         tail.push("--print-action".to_string());
     }
@@ -573,6 +661,7 @@ mod tests {
             char_set: CharSetName::Default,
             theme: ThemeName::Default,
             peaks: Peaks::Auto,
+            frecency: true,
         }
     }
 
@@ -593,7 +682,7 @@ mod tests {
                 "power" | "shot" | "theme" | "wifi" | "bt" | "profile" => {
                     ("menu", popup::MENU_CLASS)
                 }
-                "launch" | "clip" | "center" | "wallpaper" | "proc" | "net" => {
+                "launch" | "clip" | "wallpaper" | "proc" | "net" => {
                     ("menu-wide", popup::WIDE_CLASS)
                 }
                 "notify" => ("drawer", popup::DRAWER_CLASS),
@@ -642,8 +731,87 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn build_menu_tags_every_provider() {
+    #[test]
+    fn canonical_tail_omits_no_frecency_when_enabled() {
+        let tail = canonical_tail(style(), false);
+        assert!(
+            !tail.iter().any(|flag| flag == "--no-frecency"),
+            "default-on keeps existing argv byte-identical: {tail:?}"
+        );
+    }
+
+    #[test]
+    fn canonical_tail_emits_no_frecency_before_print_action() {
+        let disabled = StyleOptions {
+            frecency: false,
+            ..style()
+        };
+        let tail = canonical_tail(disabled, true);
+        let no_frecency = tail
+            .iter()
+            .position(|flag| flag == "--no-frecency")
+            .expect("flag present");
+        let print_action = tail
+            .iter()
+            .position(|flag| flag == "--print-action")
+            .expect("probe present");
+        assert!(
+            no_frecency < print_action,
+            "style flags precede the probe flag"
+        );
+    }
+
+    #[test]
+    fn learnable_flag_marks_ephemeral_lists() {
+        // Wifi rows are scan snapshots: searchable, not learnable.
+        let wifi = build_menu(Provider::Wifi, style()).expect("menu builds");
+        assert!(!wifi.app.tabs.is_empty());
+        assert!(
+            wifi.app.tabs.iter().all(|tab| !tab.learnable),
+            "wifi opts out of usage ranking"
+        );
+        assert!(wifi.app.usage.is_empty(), "nothing loads for wifi");
+        // Launch rows are stable desktop ids: learnable.
+        let launch = build_menu(Provider::Launch, style()).expect("menu builds");
+        assert!(!launch.app.tabs.is_empty());
+        assert!(
+            launch.app.tabs.iter().all(|tab| tab.learnable),
+            "launch keeps usage ranking"
+        );
+    }
+
+    #[test]
+    fn frecency_enabled_unless_flag_or_env() {
+        assert!(frecency_enabled(false), "default on");
+        assert!(!frecency_enabled(true), "flag opts out");
+        std::env::set_var(NO_FRECENCY_ENV, "1");
+        assert!(!frecency_enabled(false), "env opts out");
+        std::env::set_var(NO_FRECENCY_ENV, "");
+        assert!(frecency_enabled(false), "empty env means unset");
+        std::env::remove_var(NO_FRECENCY_ENV);
+    }
+
+    #[test]
+    fn style_apply_carries_the_frecency_switch() {
+        use flex_core::{Row, RowId, Tab};
+        let menu = crate::providers::menu(
+            "launch",
+            vec![Tab::with_rows("apps", vec![Row::new(RowId::new("a"), "A")])],
+        );
+        assert!(style().apply(menu).app.use_frecency, "default on");
+        let menu = crate::providers::menu(
+            "launch",
+            vec![Tab::with_rows("apps", vec![Row::new(RowId::new("a"), "A")])],
+        );
+        let disabled = StyleOptions {
+            frecency: false,
+            ..style()
+        };
+        assert!(!disabled.apply(menu).app.use_frecency);
+    }
+
+    #[test]
+    fn build_menu_tags_every_provider() {
         // Non-empty providers build a menu tagged with their own name; the
         // two empty-store providers (`clip`, `wallpaper`) exit 130 instead
         // of returning, so they are covered by the integration prefix test.
@@ -652,13 +820,12 @@ mod tests {
             Provider::Launch,
             Provider::Shot,
             Provider::Theme,
-            Provider::Center,
             Provider::Wifi,
             Provider::Proc,
             Provider::Net,
             Provider::Bt,
         ] {
-            let built = build_menu(provider, style()).await.expect("menu builds");
+            let built = build_menu(provider, style()).expect("menu builds");
             assert_eq!(built.provider, provider.name());
         }
     }

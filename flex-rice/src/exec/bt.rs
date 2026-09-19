@@ -17,7 +17,7 @@ use std::process::{Command, Stdio};
 
 use anyhow::Result;
 
-use crate::exec::center::NotifyWhen;
+use crate::exec::NotifyWhen;
 use crate::spawn::RetryExec as _;
 use crate::tools;
 

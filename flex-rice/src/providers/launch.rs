@@ -187,8 +187,7 @@ pub fn resolve_id_in(dirs: &[PathBuf], hash: &str) -> Option<String> {
 }
 
 /// Placeholder row id for an empty scan is the shared `noop` (see
-/// [`super::empty_row`]); this is its bash-exact label, shared with the
-/// `center` Launchers tab so the two can never disagree.
+/// [`super::empty_row`]); this is its bash-exact label.
 pub const NO_APPS_LABEL: &str = "(No applications found)";
 
 /// Build the `Launchers` tab: bare-rows mode, non-deletable rows.
@@ -206,9 +205,7 @@ pub fn tab_from_entries(entries: &[DesktopEntry]) -> Tab {
     Tab::with_rows(TAB_NAME, tab_rows(entries))
 }
 
-/// [`rows`] plus the empty-scan placeholder (B-026): the standalone
-/// `flex launch` and the `center` Launchers tab must show the same thing for
-/// the same scan result.
+/// [`rows`] plus the empty-scan placeholder (B-026).
 fn tab_rows(entries: &[DesktopEntry]) -> Vec<Row> {
     let mut rows = rows(entries);
     if rows.is_empty() {

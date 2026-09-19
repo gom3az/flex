@@ -70,7 +70,7 @@ use crate::providers::clip;
 use crate::spawn::RetryExec as _;
 
 /// Which menu outcome is being executed: clip is the only provider (besides
-/// `center`/`wifi`) whose rows are deletable, so the binary
+/// `wifi`) whose rows are deletable, so the binary
 /// maps `Chosen`/`Delete`/`Toggle` onto these three ops and bails on
 /// `Target` (clip rows carry no dropdown targets, and the wrapper has no
 /// `ACTION:TARGET` arm either).

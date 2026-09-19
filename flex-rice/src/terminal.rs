@@ -113,7 +113,7 @@ pub fn spawn_argv(kind: TerminalKind, class: &str, cmd: &[String]) -> Vec<String
 ///
 /// For [`TerminalKind::Kitty`] this is `kitty -e <cmd…>`. This is the
 /// "run this app in a terminal" form used for `Terminal=true` desktop
-/// entries ([`crate::exec::launch`], [`crate::exec::center`]) — **not** a
+/// entries ([`crate::exec::launch`]) — **not** a
 /// popup. Unlike [`spawn_argv`] it carries no `--class`, no
 /// `-o font_size=10` override and no `POPUP_KITTY=1` marker: the launched
 /// application must not be mistaken for a flex popup by
