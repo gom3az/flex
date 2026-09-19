@@ -98,6 +98,7 @@ separate CLI step.
 | `FLEX_WIFI_PASSWORD` | wifi | Skip the `/dev/tty` password prompt |
 | `SCREENSHOT_DIR`, `RECORDING_START` | shot | Capture output dir / recording helper override (defaults to `flex-record`) |
 | `CLIPHIST_FILE`, `CLIPHIST_PINS`, `CLIPHIST_CURRENT` | clip | History, pins and current-entry store overrides |
+| `CLIPHIST_TS`, `CLIPHIST_MAX_ENTRIES`, `CLIPHIST_MAX_AGE_SECS` | clip | Retention timestamp sidecar, max history entries (default 200), max unpinned age in seconds (default 7 days); pins exempt |
 | `FLEX_PROC_KTHREADS` | proc | Show kernel threads (empty cmdline) in the process list |
 | `FLEX_PROC_SORT` | proc | Sort column override (default: memory) |
 | `FLEX_PROC_EXPAND` | proc | Show full cmdline args when `all` or `1` |

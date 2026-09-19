@@ -13,6 +13,13 @@ longer consumed by anything — each binary selects a row and runs its effect
 directly.
 
 ### Added
+- Clip retention: `flex-clip add` keeps the history within 200 entries
+  (newest win) and drops unpinned lines older than 7 days, enforced on every
+  append (the `watch` daemon inherits it). Pinned entries are exempt. Ages
+  live in a `~/.cache/cliphist.ts` timestamp sidecar (one epoch per history
+  line); a missing sidecar counts as fresh so legacy history survives the
+  first run. Overrides: `CLIPHIST_TS`, `CLIPHIST_MAX_ENTRIES`,
+  `CLIPHIST_MAX_AGE_SECS`.
 - `flex-notify`: Native right-side Notification Center drawer (`-m` / `flex notify`),
   Waybar JSON polling module (`--status`), CLI operations (`send`, `clear-all`, `toggle-dnd`),
   and background D-Bus listener daemon (`daemon`).
