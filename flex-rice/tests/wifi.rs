@@ -788,14 +788,13 @@ fn wifi_default_view_golden_at_80x24() {
         "Coffee Shop",
         "87%",
         "WPA2",
-        "filter",
-        "navigate",
+        "Search",
     ] {
         assert!(all.contains(token), "80x24 frame contains {token:?}");
     }
     // Standard mode: the selection bar sits on col 0 of the first node row,
-    // below the reserved `•••` indicator line.
-    let first_y = flex_core::render::LIST_INDICATOR_ROWS / 2;
+    // below the top chrome (margin + filter + separator) and reserved `•••` indicator line.
+    let first_y = 4; // margin at y=0, filter at y=1, separator at y=2, indicator at y=3, first entry at y=4
     let selector = buf.cell((0, first_y)).expect("first list row selector");
     assert_eq!(selector.symbol(), "░");
     assert_eq!(

@@ -301,8 +301,8 @@ fn render_reports_the_reserved_pane_only_when_asked() {
     let (_, pane) = draw(&mut with, 80, 24);
     assert_eq!(
         pane,
-        Some(Rect::new(44, 0, 36, 21)),
-        "80 wide: 45% pane right-aligned, sharing the 21-row list area"
+        Some(Rect::new(44, 3, 36, 20)),
+        "80 wide: 45% pane right-aligned, sharing the 20-row list area"
     );
 
     let mut without = fixture_menu(false);
@@ -315,7 +315,7 @@ fn pane_region_stays_blank_and_the_list_narrows() {
     let mut menu = fixture_menu(true);
     let (buf, pane) = draw(&mut menu, 80, 24);
     let pane = pane.expect("pane");
-    for y in 0..pane.height {
+    for y in pane.y..pane.y + pane.height {
         let cells = row_text(&buf, y, 80);
         assert!(
             cells[pane.x as usize..].trim().is_empty(),
@@ -329,7 +329,7 @@ fn pane_region_stays_blank_and_the_list_narrows() {
     );
 
     // The long name is truncated inside the narrowed list…
-    let all: String = (0..21).map(|y| row_text(&buf, y, 80)).collect();
+    let all: String = (1..22).map(|y| row_text(&buf, y, 80)).collect();
     assert!(
         !all.contains(LONG_NAME),
         "label does not cross into the pane"
@@ -339,7 +339,7 @@ fn pane_region_stays_blank_and_the_list_narrows() {
     let mut wide = fixture_menu(false);
     let (buf, pane) = draw(&mut wide, 80, 24);
     assert_eq!(pane, None);
-    let all: String = (0..21).map(|y| row_text(&buf, y, 80)).collect();
+    let all: String = (1..22).map(|y| row_text(&buf, y, 80)).collect();
     assert!(
         all.contains(LONG_NAME),
         "without a pane the list uses the whole width"
@@ -353,7 +353,7 @@ fn pane_needs_a_wide_enough_frame() {
     assert_eq!(pane, None, "40 columns: list keeps priority");
     let mut menu = fixture_menu(true);
     let (_, pane) = draw(&mut menu, 125, 30);
-    assert_eq!(pane, Some(Rect::new(69, 0, 56, 27)));
+    assert_eq!(pane, Some(Rect::new(69, 3, 56, 26)));
 }
 
 #[test]
@@ -468,7 +468,7 @@ fn flex_test_replays_are_deterministic() {
 // --- Goldens ----------------------------------------------------------------
 
 /// Every row is exactly the frame width in display cells, and the layout is
-/// the standard one: `•••` line, entries, filter line, hints, tab bar.
+/// the standard one: filter line, `•••` line, entries, hints, tab bar.
 #[test]
 fn wallpaper_default_view_golden_at_80x24() {
     let mut menu = fixture_menu(true);
@@ -485,7 +485,8 @@ fn wallpaper_default_view_golden_at_80x24() {
         }
         assert_eq!(total, 80, "row {y} must be exactly 80 cells");
     }
-    let first_y = render::LIST_INDICATOR_ROWS / 2;
+    // With filter chrome at top: y=0 margin, y=1 filter, y=2 separator, y=3 indicator, y=4 first entry
+    let first_y = 4;
     assert!(
         row_text(&buf, first_y, 80).starts_with('░'),
         "selected entry carries the selector at column 0"
