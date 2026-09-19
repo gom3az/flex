@@ -654,7 +654,7 @@ mod tests {
             rank: 2.0,
             last_accessed: now + 60,
         };
-        assert!(usage_score(&future, now) == 8.0);
+        assert_eq!(usage_score(&future, now), 8.0);
     }
 
     #[test]
