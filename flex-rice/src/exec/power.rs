@@ -388,13 +388,13 @@ fn run_step(step: &Step, path_env: &str) -> Result<()> {
                     .stderr(Stdio::null())
                     .status_retrying();
             } else {
-                let _ = Command::new("sh")
-                    .args(["-c", &script])
+                let mut cmd = Command::new("sh");
+                cmd.args(["-c", &script])
                     .env("PATH", path_env)
                     .stdin(Stdio::null())
                     .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .spawn();
+                    .stderr(Stdio::null());
+                let _ = crate::spawn::spawn_and_reap(&mut cmd);
             }
             Ok(())
         }

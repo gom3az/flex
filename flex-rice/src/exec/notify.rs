@@ -299,30 +299,86 @@ pub fn open_file(path_str: &str) {
     let _ = crate::spawn::spawn_detached(Path::new("setsid"), Path::new("xdg-open"), &[&expanded]);
 }
 
-/// Open containing folder of `path_str` using `xdg-open` detached via `setsid -f`.
+/// Managers that can highlight a file (`--select <file>`).
+const SELECT_MANAGERS: &[&str] = &["dolphin", "nautilus"];
+/// Managers that can open a folder (fallback when no `--select` candidate).
+const BROWSE_MANAGERS: &[&str] = &["dolphin", "nautilus", "thunar", "pcmanfm", "nemo"];
+
+/// First installed manager from `candidates` (`None` when none is on `PATH`).
+fn first_manager<'a>(candidates: &'a [&str], path_env: &str) -> Option<&'a str> {
+    candidates
+        .iter()
+        .copied()
+        .find(|m| crate::tools::resolve_tool(m, path_env).is_some())
+}
+
+/// Split `path_str` into the expanded path and the folder to reveal.
+///
+/// Returns `(path, dir)`: when the path is a directory both are the directory,
+/// otherwise `dir` is the non-empty parent. `None` for empty input,
+/// `file://`-only input, and bare filenames (no parent to reveal).
+fn reveal_targets(path_str: &str) -> Option<(PathBuf, PathBuf)> {
+    let trimmed = path_str.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let expanded = expand_home(trimmed);
+    let stripped = expanded.strip_prefix("file://").unwrap_or(&expanded);
+    if stripped.trim().is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(stripped);
+    if path.is_dir() {
+        return Some((path.clone(), path));
+    }
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())?
+        .to_path_buf();
+    Some((path, parent))
+}
+
+/// Open containing folder of `path_str` in a GUI file manager.
+///
+/// Prefers `--select <file>` (Dolphin, Nautilus) so the file is highlighted
+/// instead of just opening the folder, then a plain folder open in the first
+/// installed manager, then `xdg-open` as a last resort. The `xdg-open`
+/// fallback is last because a terminal emulator can claim `inode/directory`
+/// (e.g. `kitty-open.desktop`), which would open a terminal instead of the
+/// file manager. Silent no-op when nothing exists to reveal.
 pub fn open_dir(path_str: &str) {
-    let expanded = if let Some(rest) = path_str.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            format!("{home}/{rest}")
-        } else {
-            path_str.to_string()
+    let path_env = std::env::var("PATH").unwrap_or_default();
+    open_dir_with_path(path_str, &path_env);
+}
+
+/// [`open_dir`] with an explicit `PATH` (test seam for manager lookup).
+fn open_dir_with_path(path_str: &str, path_env: &str) {
+    let Some((file, dir)) = reveal_targets(path_str) else {
+        return;
+    };
+    if !dir.is_dir() {
+        return;
+    }
+    if file.is_file() {
+        let file_str = file.to_string_lossy();
+        if let Some(mgr) = first_manager(SELECT_MANAGERS, path_env) {
+            let _ = crate::spawn::spawn_detached(
+                Path::new("setsid"),
+                Path::new(mgr),
+                &["--select", &file_str],
+            );
+            return;
         }
-    } else {
-        path_str.to_string()
-    };
-    let path = Path::new(&expanded);
-    let target_dir = if path.is_dir() {
-        path
-    } else if let Some(parent) = path.parent() {
-        parent
-    } else {
-        path
-    };
-    let target_str = target_dir.to_string_lossy();
+    }
+    let dir_str = dir.to_string_lossy();
+    if let Some(mgr) = first_manager(BROWSE_MANAGERS, path_env) {
+        let _ = crate::spawn::spawn_detached(Path::new("setsid"), Path::new(mgr), &[&dir_str]);
+        return;
+    }
     let _ = crate::spawn::spawn_detached(
         Path::new("setsid"),
         Path::new("xdg-open"),
-        &[target_str.as_ref()],
+        &[dir_str.as_ref()],
     );
 }
 
@@ -411,24 +467,26 @@ pub fn copy_image_file(path_str: &str, mime: &str) -> bool {
     let Ok(file) = std::fs::File::open(path) else {
         return false;
     };
-    if Command::new("wl-copy")
-        .args(["--type", mime])
-        .stdin(Stdio::from(file))
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .is_ok()
+    if {
+        let mut cmd = Command::new("wl-copy");
+        cmd.args(["--type", mime])
+            .stdin(Stdio::from(file))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        crate::spawn::spawn_and_reap(&mut cmd)
+    }
+    .is_ok()
     {
         return true;
     }
-    Command::new("xclip")
+    let mut fallback = Command::new("xclip");
+    fallback
         .args(["-selection", "clipboard", "-t", mime])
         .arg(path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .is_ok()
+        .stderr(Stdio::null());
+    crate::spawn::spawn_and_reap(&mut fallback).is_ok()
 }
 
 /// Persistent trace logger for debugging notify focus and application launch execution steps.
@@ -1826,6 +1884,73 @@ mod tests {
         let text = dir.join("note.txt");
         std::fs::write(&text, b"hello").expect("fixture");
         assert!(!copy_image_file(&text.to_string_lossy(), "image/png"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn containing_dir_resolves_parent_and_guards_empty() {
+        let dir = std::env::temp_dir().join(format!("flex-notify-dir-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let sub = dir.join("sub");
+        let _ = std::fs::create_dir_all(&sub);
+
+        let dir_of = |p: &str| reveal_targets(p).map(|(_, d)| d);
+        // Missing file resolves to its parent.
+        let file = dir.join("report.txt");
+        assert_eq!(dir_of(&file.to_string_lossy()), Some(dir.clone()));
+        // file:// prefix is stripped before resolution.
+        assert_eq!(
+            dir_of(&format!("file://{}", file.display())),
+            Some(dir.clone())
+        );
+        // Existing directory reveals itself.
+        assert_eq!(dir_of(&sub.to_string_lossy()), Some(sub.clone()));
+
+        // Silent no-op cases: no parent to reveal, empty input.
+        assert_eq!(dir_of("note.txt"), None);
+        assert_eq!(dir_of(""), None);
+        assert_eq!(dir_of("   "), None);
+        assert_eq!(dir_of("file://"), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reveal_targets_splits_file_and_dir() {
+        let dir = std::env::temp_dir().join(format!("flex-notify-rev-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+
+        let file = dir.join("report.txt");
+        let (path, parent) = reveal_targets(&file.to_string_lossy()).expect("targets");
+        assert_eq!(path, file);
+        assert_eq!(parent, dir);
+
+        let (dpath, revealed) = reveal_targets(&dir.to_string_lossy()).expect("dir targets");
+        assert_eq!(dpath, dir);
+        assert_eq!(revealed, dir);
+
+        assert_eq!(reveal_targets("note.txt"), None);
+        assert_eq!(reveal_targets(""), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn first_manager_prefers_stub_path_order() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = std::env::temp_dir().join(format!("flex-notify-mgr-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let stub = dir.join("dolphin");
+        std::fs::write(&stub, "#!/bin/sh\nexit 0\n").expect("stub");
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let path_env = dir.to_string_lossy().into_owned();
+
+        assert_eq!(
+            first_manager(&["dolphin", "nautilus"], &path_env),
+            Some("dolphin")
+        );
+        assert_eq!(first_manager(&["nautilus", "nemo"], &path_env), None);
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

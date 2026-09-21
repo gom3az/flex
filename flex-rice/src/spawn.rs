@@ -202,6 +202,19 @@ pub(crate) fn spawn_detached(
     status(&mut cmd)
 }
 
+/// Reap an already-spawned child on a detached waiter thread.
+///
+/// The waiter blocks in `wait()` and exits; nothing ever joins it, so callers
+/// (including async contexts) are never blocked and process exit is never
+/// delayed. Returns the child pid.
+pub(crate) fn reap_detached(mut child: Child) -> u32 {
+    let pid = child.id();
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    pid
+}
+
 /// Spawn `cmd` and reap the child on a detached waiter thread.
 ///
 /// Fire-and-forget spawns that drop the [`Child`] handle leak a zombie: the
@@ -216,12 +229,8 @@ pub(crate) fn spawn_detached(
 ///
 /// Returns an error if the spawn itself fails.
 pub(crate) fn spawn_and_reap(cmd: &mut Command) -> io::Result<u32> {
-    let mut child = retrying(|| cmd.spawn())?;
-    let pid = child.id();
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
-    Ok(pid)
+    let child = retrying(|| cmd.spawn())?;
+    Ok(reap_detached(child))
 }
 
 #[cfg(test)]

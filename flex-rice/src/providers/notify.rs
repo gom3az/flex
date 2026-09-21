@@ -970,26 +970,27 @@ pub struct ExecuteReport {
 
 /// Helper to copy text to system clipboard via `wl-copy` or `xclip` detached.
 pub fn copy_to_clipboard(text: &str) {
-    let wl_res = std::process::Command::new("wl-copy")
-        .arg(text)
+    let mut wl = std::process::Command::new("wl-copy");
+    wl.arg(text)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+        .stderr(std::process::Stdio::null());
+    if crate::spawn::spawn_and_reap(&mut wl).is_ok() {
+        return;
+    }
 
-    if wl_res.is_err() {
-        if let Ok(mut child) = std::process::Command::new("xclip")
-            .args(["-selection", "clipboard"])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            if let Some(mut stdin) = child.stdin.take() {
-                use std::io::Write as _;
-                let _ = stdin.write_all(text.as_bytes());
-            }
+    if let Ok(mut child) = std::process::Command::new("xclip")
+        .args(["-selection", "clipboard"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        if let Some(mut stdin) = child.stdin.take() {
+            use std::io::Write as _;
+            let _ = stdin.write_all(text.as_bytes());
         }
+        crate::spawn::reap_detached(child);
     }
 }
 
