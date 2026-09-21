@@ -238,24 +238,57 @@ pub fn is_default_audio_sink(mac: &str, name: &str, default_sink_status: Option<
     let Some(status) = default_sink_status else {
         return false;
     };
-    let mac_underscore = mac.replace(':', "_");
+    // One fold per device (was: `replace` + two `to_lowercase` + one more
+    // for the name). `replace` after folding is equivalent for ASCII MACs.
     let mac_colon = mac.to_lowercase();
-    let mac_underscore_lower = mac_underscore.to_lowercase();
+    let mac_underscore_lower = mac_colon.replace(':', "_");
     let name_lower = name.to_lowercase();
 
     for line in status.lines() {
-        let line_lower = line.to_lowercase();
-        // In wpctl status, active default sink starts with `*` or contains `*`
-        // In pactl info, `Default Sink: bluez_output.F4_4E_FC_21_40_48.1`
+        // Byte-level default-line pre-check before any allocation: most
+        // status lines are not default lines, so they skip the fold.
         let is_default_line = line.contains('*')
-            || line_lower.contains("default sink:")
-            || line_lower.contains("default audio sink");
-
-        if is_default_line
-            && (line_lower.contains(&mac_colon)
-                || line_lower.contains(&mac_underscore_lower)
-                || (!name_lower.is_empty() && line_lower.contains(&name_lower)))
+            || contains_ascii_insensitive(line, "default sink:")
+            || contains_ascii_insensitive(line, "default audio sink");
+        if !is_default_line {
+            continue;
+        }
+        // Case-insensitive substring search without folding the whole line
+        // (was: `line.to_lowercase()` per status line per device).
+        if contains_ascii_insensitive(line, &mac_colon)
+            || contains_ascii_insensitive(line, &mac_underscore_lower)
+            || (!name_lower.is_empty() && contains_ascii_insensitive(line, &name_lower))
         {
+            return true;
+        }
+    }
+    false
+}
+
+/// ASCII case-insensitive substring search with no allocation.
+fn contains_ascii_insensitive(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    let hay = haystack.as_bytes();
+    let ndl = needle.as_bytes();
+    if ndl.len() > hay.len() {
+        return false;
+    }
+    // Fast path: first-byte filter before the full window compare.
+    let first = ndl[0].to_ascii_lowercase();
+    for window in hay.windows(ndl.len()) {
+        if window[0].to_ascii_lowercase() != first {
+            continue;
+        }
+        let mut hit = true;
+        for (a, b) in window.iter().zip(ndl.iter()) {
+            if !a.eq_ignore_ascii_case(b) {
+                hit = false;
+                break;
+            }
+        }
+        if hit {
             return true;
         }
     }

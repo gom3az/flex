@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] — Runtime performance pass
+
+Behavior-preserving optimizations across the filter, render, event-loop,
+and provider polling paths. No ranking, rendering, or wire-protocol
+changes; all existing goldens and gates hold.
+
+### Changed
+- Filter (`flex-core`): single-pass needle folding, single-char query fast
+  path, `Vec::with_capacity` on hit paths, and frecency pre-resolve so the
+  sort comparator no longer hits the usage `HashMap` per comparison.
+- Render (`flex-core`): tab bar reuses a thread-local width buffer and
+  re-borrows titles per tab (no per-frame `Vec<Ref>`/`Vec<u16>`), ASCII
+  fast path in `put_str` skipping the `unicode-width` lookup, one-shot
+  reserve for volume bars, single-pass dropdown width scan.
+- Event loop (`flex-core`): preview path borrows instead of cloning per
+  frame; reused `interval` timer instead of a fresh `sleep` future per
+  iteration.
+- `/proc` polling (`flex-rice` proc/net): borrowed pid-name parsing,
+  single-`rfind` stat parse, early-break status scan, moved (not cloned)
+  service keys, single-pass Waybar tooltip escape.
+- Spawn hot paths (`flex-rice` bt/wifi): allocation-free
+  case-insensitive sink matching (one fold per device), memoized wifi
+  signal bars (101-entry cache).
+- Startup scans (`flex-rice`): single-provider usage load (`load_one`,
+  no whole-store build + clone), allocation-free usage TSV split,
+  byte-scan `.desktop` field-code stripping.
+
 Per-provider-binary migration: the providers now execute **in-process**
 in Rust, and the shell wrappers are retired. The `ACTION:` wire protocol is no
 longer consumed by anything — each binary selects a row and runs its effect

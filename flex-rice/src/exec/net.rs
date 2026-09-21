@@ -712,10 +712,17 @@ pub fn sample_json() -> String {
         }
     }
 
-    let escaped_tooltip = tooltip
-        .replace('\\', "\\\\")
-        .replace('\n', "\\n")
-        .replace('"', "\\\"");
+    // Single-pass JSON escape: the old `.replace().replace().replace()`
+    // walked the tooltip three times; this reserves once and escapes inline.
+    let mut escaped_tooltip = String::with_capacity(tooltip.len() + 16);
+    for c in tooltip.chars() {
+        match c {
+            '\\' => escaped_tooltip.push_str("\\\\"),
+            '\n' => escaped_tooltip.push_str("\\n"),
+            '"' => escaped_tooltip.push_str("\\\""),
+            _ => escaped_tooltip.push(c),
+        }
+    }
 
     format!(
         r#"{{"text":" {down_str}   {up_str}","tooltip":"{escaped_tooltip}","class":"{class}"}}"#

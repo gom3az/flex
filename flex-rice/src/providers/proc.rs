@@ -280,9 +280,9 @@ fn group_processes(collected: Vec<RawProc>) -> Vec<ItemGroup> {
     let mut by_service: HashMap<String, Vec<RawProc>> = HashMap::new();
     let mut singles: Vec<RawProc> = Vec::new();
 
-    for proc_item in collected {
-        if let Some(ref svc) = proc_item.service {
-            by_service.entry(svc.clone()).or_default().push(proc_item);
+    for mut proc_item in collected {
+        if let Some(svc) = proc_item.service.take() {
+            by_service.entry(svc).or_default().push(proc_item);
         } else {
             singles.push(proc_item);
         }
@@ -510,10 +510,18 @@ fn pids() -> Vec<u32> {
     };
     let mut out = Vec::new();
     for entry in entries.flatten() {
-        if let Ok(name) = entry.file_name().into_string() {
-            if let Ok(pid) = name.parse::<u32>() {
-                out.push(pid);
-            }
+        // Borrow the file name: the old `into_string()` allocated an owned
+        // `String` per entry. Numeric names are short ASCII, so `to_str` +
+        // a first-byte digit guard skips `dot`/`sys`/`self` without parsing.
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.as_bytes().first().is_some_and(u8::is_ascii_digit) {
+            continue;
+        }
+        if let Ok(pid) = name.parse::<u32>() {
+            out.push(pid);
         }
     }
     out
@@ -539,7 +547,9 @@ fn parse_stat(data: &str) -> Option<(String, u64, u64)> {
         return None;
     }
     let comm = data.get(open + 1..close)?.to_string();
-    let rest = stat_after_comm(data)?;
+    // Reuse `close`: the old path re-ran `rfind(')')` inside
+    // `stat_after_comm`. The numeric tail starts after `") "`.
+    let rest = data.get(close + 2..).or_else(|| data.get(close + 1..))?;
     let mut fields = rest.split_whitespace();
     // state ppid pgrp session tty_nr tpgid flags minflt cminflt majflt cmajflt
     for _ in 0..11 {
@@ -566,15 +576,24 @@ fn read_status(pid: u32) -> Option<(u32, u64)> {
 fn parse_status(data: &str) -> (u32, u64) {
     let mut uid = 0_u32;
     let mut rss_kb = 0_u64;
+    let mut have_uid = false;
+    let mut have_rss = false;
     for line in data.lines() {
         if let Some(value) = line.strip_prefix("Uid:") {
             if let Some(first) = value.split_whitespace().next() {
                 uid = first.parse().unwrap_or(0);
+                have_uid = true;
             }
         } else if let Some(value) = line.strip_prefix("VmRSS:") {
             if let Some(first) = value.split_whitespace().next() {
                 rss_kb = first.parse().unwrap_or(0);
+                have_rss = true;
             }
+        }
+        // `status` files are ~50 lines; both fields sit near the top, so
+        // stop scanning once both are found instead of walking the tail.
+        if have_uid && have_rss {
+            break;
         }
     }
     (uid, rss_kb)
