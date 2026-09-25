@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `flex-clip add`: bound the `wl-paste` paste wait to 5 s. A wedged
+  Wayland selection blocked `wl-paste` forever and the unbounded wait wedged
+  `add` under `wl-paste --watch` for 14 h, silently dropping every later
+  copy. A stuck paste now fails loudly (`flex: error: clip: wl-paste timed
+  out …`) and the next selection change retries; stdout drains on a side
+  thread so healthy pastes larger than the 64 KiB pipe buffer still read.
+
+### Changed
+- `flex-net` Bandwidth and `flex-bt` Devices now render compact 1-line rows
+  like `flex-wifi`: wire-share and battery render as `NN% [████░░░░]` text
+  gauges in `meta` instead of `Row::volume` bars. Compact rows are the
+  documented default for all providers going forward (tall detail rows
+  opt-in only, e.g. `notify` message bodies).
+
 ## [1.0.1] — Runtime performance pass
 
 Behavior-preserving optimizations across the filter, render, event-loop,
